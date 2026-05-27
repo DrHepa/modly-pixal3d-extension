@@ -1,0 +1,97 @@
+{
+  "id": "pixal3d",
+  "kind": "model",
+  "type": "model",
+  "name": "Pixal3D",
+  "description": "Pixal3D image-to-3D Modly model extension.",
+  "generator_class": "Pixal3DGenerator",
+  "model_identity": {
+    "source_model": "TencentARC/Pixal3D",
+    "canonical_modly_model_id": null,
+    "registration_status": "unregistered"
+  },
+  "inputs": [
+    { "name": "image", "type": "image", "required": true }
+  ],
+  "outputs": [
+    { "name": "asset", "formats": ["glb"], "pbr": true }
+  ],
+  "params": {
+    "seed": { "type": ["integer", "null"], "default": null },
+    "resolution": { "type": "integer", "enum": [1024, 1536], "default": 1024 },
+    "low_vram": { "type": "boolean", "default": false },
+    "manual_fov": { "type": ["number", "null"], "default": null }
+  },
+  "params_schema": {
+    "type": "object",
+    "properties": {
+      "seed": { "type": ["integer", "null"], "default": null },
+      "resolution": { "type": "integer", "enum": [1024, 1536], "default": 1024 },
+      "low_vram": { "type": "boolean", "default": false },
+      "manual_fov": { "type": ["number", "null"], "default": null }
+    },
+    "additionalProperties": false
+  },
+  "nodes": [
+    {
+      "id": "pixal3d.image_to_3d",
+      "type": "model.generate",
+      "input": "image",
+      "output": "asset"
+    }
+  ],
+  "hf_repo": "TencentARC/Pixal3D",
+  "download_check": {
+    "strategy": "sentinel-files",
+    "required": [
+      "models/pixal3d/generate/pipeline.json",
+      "models/pixal3d/generate/ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
+      "models/pixal3d/generate/ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors",
+      "models/pixal3d/generate/ckpts/shape_dec_next_dc_f16c32_fp16.safetensors",
+      "models/pixal3d/generate/ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors",
+      "models/pixal3d/generate/ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors",
+      "models/pixal3d/generate/ckpts/tex_dec_next_dc_f16c32_fp16.safetensors",
+      "models/pixal3d/generate/ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors",
+      "models/pixal3d/aux/dinov3/config.json",
+      "models/pixal3d/aux/dinov3/preprocessor_config.json",
+      "models/pixal3d/aux/dinov3/model.safetensors",
+      "models/pixal3d/aux/rmbg/config.json",
+      "models/pixal3d/aux/rmbg/preprocessor_config.json",
+      "models/pixal3d/aux/rmbg/BiRefNet_config.py",
+      "models/pixal3d/aux/rmbg/birefnet.py",
+      "models/pixal3d/aux/rmbg/model.safetensors",
+      "models/pixal3d/readiness.json"
+    ],
+    "pipeline_substitutions": {
+      "dino": "camenduru/dinov3-vitl16-pretrain-lvd1689m",
+      "rmbg": "camenduru/RMBG-2.0"
+    }
+  },
+  "platforms": [
+    { "platform": "linux-aarch64-cp312-nvidia-cuda", "status": "prepared" },
+    { "platform": "linux-x64-nvidia-cuda", "status": "wheelhouse-needed" },
+    { "platform": "windows-x64", "status": "unsupported" },
+    { "platform": "amd-rocm", "status": "unsupported" },
+    { "platform": "macos", "status": "unsupported" },
+    { "platform": "cpu-only", "status": "unsupported" }
+  ],
+  "assets": {
+    "extension_root": "extensions/pixal3d",
+    "model_roots": [
+      "models/pixal3d/generate",
+      "models/pixal3d/aux/dinov3",
+      "models/pixal3d/aux/rmbg"
+    ]
+  },
+  "entrypoints": {
+    "setup": "setup.py",
+    "generator": "generator.py"
+  },
+  "setup": {
+    "entrypoint": "setup.py",
+    "venv_dir": "venv",
+    "default_downloads": false,
+    "default_installs": true,
+    "wheelhouse": "wheels"
+  }
+}

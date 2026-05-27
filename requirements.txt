@@ -1,0 +1,15 @@
+pillow
+imageio
+imageio-ffmpeg
+tqdm
+easydict
+opencv-python-headless
+trimesh
+transformers
+zstandard
+kornia
+timm
+diffusers
+accelerate
+gradio
+plyfile
