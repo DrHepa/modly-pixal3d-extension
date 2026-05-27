@@ -133,6 +133,16 @@ def _load_payload(raw_payload: str | None) -> dict[str, Any]:
     return {key: payload[key] for key in {"ext_dir"} if key in payload}
 
 
+def _coerce_payload_arg(explicit_payload: str | None, positional_payload: str | None, unknown_args: list[str]) -> str | None:
+    if explicit_payload:
+        return explicit_payload
+    if positional_payload:
+        return positional_payload
+    if unknown_args and unknown_args[0].lstrip().startswith("{"):
+        return " ".join(unknown_args)
+    return None
+
+
 def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
     parser = argparse.ArgumentParser(description="Prepare the Pixal3D Modly extension.")
     parser.add_argument("--workspace-root", default=".")
@@ -143,11 +153,14 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
     parser.add_argument("--restore-pipeline", action="store_true")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--payload-json")
-    args = parser.parse_args(argv)
+    parser.add_argument("positional_payload_json", nargs="?", help="Modly install payload JSON. Modly may pass this as a positional argument.")
+    args, unknown_args = parser.parse_known_args(argv)
 
-    setup_inputs = _load_payload(args.payload_json)
+    raw_payload = _coerce_payload_arg(args.payload_json, args.positional_payload_json, unknown_args)
+    setup_inputs = _load_payload(raw_payload)
     layout = resolve_modly_layout(args.workspace_root, ext_dir=setup_inputs.get("ext_dir"))
     workspace_root = layout.ext_dir
+    prepare_requested = args.prepare or bool(raw_payload)
 
     result: dict[str, Any] = {
         "extension_id": EXTENSION_ID,
@@ -158,7 +171,7 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
         "installs_started": False,
     }
 
-    if args.prepare:
+    if prepare_requested:
         created, skipped = _create_prepare_paths(layout)
         dependency_install = None if args.skip_install else _install_prepare_dependencies(workspace_root)
         result.update(
