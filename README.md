@@ -45,6 +45,19 @@ Included packaged dependencies:
 - `generator.py` exposes `Pixal3DGenerator`.
 - Model assets must live under Modly's model storage, not inside this repository.
 
+## View-aligned generation behavior
+
+Pixal3D generates meshes aligned to the input image projection rather than always canonicalizing the object to a universal upright/front pose. Upstream's projected render path is designed so the first rendered frame matches the projected input view.
+
+Practical implications:
+
+- front/straight input images should usually produce upright meshes;
+- angled or isometric input images can produce angled meshes;
+- that input-dependent tilt is expected Pixal3D behavior, not a Modly orientation bug;
+- do not apply a fixed post-export pitch correction to all Pixal3D outputs, because it can break already-upright generations.
+
+The extension preserves Pixal3D's upstream GLB export orientation. It must not add an extra hardcoded yaw rotation after export; doing so can flip the generated mesh away from Modly's default camera.
+
 ## Remaining runtime requirement
 
 After setup succeeds, use Modly UI to download Pixal3D/DINO/RMBG/NAF/MoGe model assets. Real generation should be validated only after those assets are present.

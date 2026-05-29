@@ -3,7 +3,9 @@
   "kind": "model",
   "type": "model",
   "name": "Pixal3D",
-  "description": "Pixal3D image-to-3D Modly model extension.",
+  "version": "0.1.0",
+  "author": "DrHepa",
+  "description": "Pixal3D image-to-3D Modly model extension. Outputs are aligned to the input image projection; angled inputs may produce angled meshes by design.",
   "generator_class": "Pixal3DGenerator",
   "model_identity": {
     "source_model": "TencentARC/Pixal3D",
@@ -14,34 +16,57 @@
     { "name": "image", "type": "image", "required": true }
   ],
   "outputs": [
-    { "name": "asset", "formats": ["glb"], "pbr": true }
+    { "name": "mesh", "formats": ["glb"], "pbr": true }
   ],
-  "params": {
-    "seed": { "type": ["integer", "null"], "default": null },
-    "resolution": { "type": "integer", "enum": [1024, 1536], "default": 1024 },
-    "low_vram": { "type": "boolean", "default": false },
-    "manual_fov": { "type": ["number", "null"], "default": null }
-  },
-  "params_schema": {
-    "type": "object",
-    "properties": {
-      "seed": { "type": ["integer", "null"], "default": null },
-      "resolution": { "type": "integer", "enum": [1024, 1536], "default": 1024 },
-      "low_vram": { "type": "boolean", "default": false },
-      "manual_fov": { "type": ["number", "null"], "default": null }
-    },
-    "additionalProperties": false
-  },
+  "params_schema": [],
   "nodes": [
     {
-      "id": "pixal3d.image_to_3d",
+      "id": "generate",
+      "name": "Image to 3D",
       "type": "model.generate",
       "input": "image",
-      "output": "asset"
+      "output": "mesh",
+      "hf_repo": "TencentARC/Pixal3D",
+      "download_check": "pipeline.json",
+      "weight_owner_id": "generate",
+      "hf_skip_prefixes": [
+        "README.md",
+        "requirements.txt",
+        "requirements-hfdemo.txt",
+        "assets/"
+      ],
+      "params_schema": [
+        {
+          "id": "resolution",
+          "label": "Resolution",
+          "type": "select",
+          "default": 1024,
+          "options": [
+            { "value": 1024, "label": "1024" },
+            { "value": 1536, "label": "1536" }
+          ],
+          "tooltip": "Generation resolution. Higher is slower and requires more VRAM."
+        },
+        {
+          "id": "low_vram",
+          "label": "Low VRAM",
+          "type": "boolean",
+          "default": false,
+          "tooltip": "Use lower-memory generation settings when available."
+        },
+        {
+          "id": "seed",
+          "label": "Seed",
+          "type": "int",
+          "default": -1,
+          "min": -1,
+          "max": 4294967295,
+          "tooltip": "Seed for reproducibility. -1 uses a random seed."
+        }
+      ]
     }
   ],
-  "hf_repo": "TencentARC/Pixal3D",
-  "download_check": {
+  "asset_requirements": {
     "strategy": "sentinel-files",
     "required": [
       "models/pixal3d/generate/pipeline.json",

@@ -5,7 +5,8 @@ tqdm
 easydict
 opencv-python-headless
 trimesh
-transformers
+transformers==4.57.3
+safetensors>=0.8.0rc0
 zstandard
 kornia
 timm

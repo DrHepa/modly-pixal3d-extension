@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import importlib
 import os
+import random
+import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -17,6 +20,16 @@ def _default_pipeline_factory(source: str) -> Any:
     os.environ.setdefault("SPARSE_CONV_BACKEND", "flex_gemm")
     module = importlib.import_module("pixal3d.pipelines")
     return module.Pixal3DImageTo3DPipeline.from_pretrained(source)
+
+
+def _prepare_runtime_compat() -> None:
+    os.environ.setdefault("ATTN_BACKEND", "sdpa")
+    os.environ.setdefault("SPARSE_ATTN_BACKEND", "sdpa")
+    os.environ.setdefault("SPARSE_CONV_BACKEND", "flex_gemm")
+    import torch
+
+    if not hasattr(torch.nn.Module, "all_tied_weights_keys"):
+        torch.nn.Module.all_tied_weights_keys = {}
 
 
 def _failure(code: str, message: str) -> dict:
@@ -92,22 +105,36 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
     if preflight_error is not None:
         return preflight_error
 
-    params = job.get("params") or {}
-    factory = pipeline_factory or _default_pipeline_factory
     try:
-        pipeline = factory(PIXAL3D_MODEL_SOURCE)
-    except Exception as exc:  # pragma: no cover - exercised by downstream integration tests.
-        return _failure("pipeline_import_failed", str(exc))
+        params = job.get("params") or {}
+        if pipeline_factory is not None:
+            pipeline = pipeline_factory(job.get("model_source") or PIXAL3D_MODEL_SOURCE)
+            result = pipeline(
+                image_path=str(image_path),
+                output_dir=str(output_dir),
+                seed=params.get("seed"),
+                resolution=params.get("resolution", 1024),
+                low_vram=params.get("low_vram", False),
+                manual_fov=params.get("manual_fov"),
+            )
+        else:
+            _prepare_runtime_compat()
+            from inference import run_inference
 
-    try:
-        result = pipeline(
-            image_path=str(image_path),
-            output_dir=str(output_dir),
-            seed=params.get("seed"),
-            resolution=params.get("resolution", 1024),
-            low_vram=params.get("low_vram", False),
-            manual_fov=params.get("manual_fov"),
-        )
+            seed = int(params.get("seed", -1))
+            if seed == -1:
+                seed = random.randint(0, 2**32 - 1)
+            glb_path = output_dir / f"{int(time.time())}_{uuid.uuid4().hex[:8]}_pixal3d.glb"
+            run_inference(
+                image_path=str(image_path),
+                output_path=str(glb_path),
+                seed=seed,
+                model_path=job.get("model_source") or PIXAL3D_MODEL_SOURCE,
+                manual_fov=float(params.get("manual_fov") or -1.0),
+                low_vram=bool(params.get("low_vram", False)),
+                resolution=int(params.get("resolution", 1024)),
+            )
+            result = {"glb_path": str(glb_path), "pbr": {}}
     except Exception as exc:  # pragma: no cover - contract retained for real runtime failures.
         return _failure("runtime_failed", str(exc))
 
