@@ -208,7 +208,8 @@ build_native_wheel() {
   source_dir="$(source_dir_for_package "${package}")"
 
   if ! maybe_fetch_source_ref "${package}" "${source_dir}"; then
-    return 1
+    printf 'missing_source\n'
+    return 0
   fi
 
   local build_dir
@@ -216,11 +217,15 @@ build_native_wheel() {
 
   if [[ ! -f "${build_dir}/pyproject.toml" && ! -f "${build_dir}/setup.py" ]]; then
     echo "${package}: ${build_dir} does not contain pyproject.toml or setup.py." >&2
-    return 1
+    printf 'invalid_source\n'
+    return 0
   fi
 
   echo "Building ${package} from ${build_dir}" >&2
-  python3 -m pip wheel "${build_dir}" --no-deps --wheel-dir "${wheelhouse_dir}"
+  if ! python3 -m pip wheel "${build_dir}" --no-deps --no-build-isolation --wheel-dir "${wheelhouse_dir}"; then
+    printf 'build_failed\n'
+    return 0
+  fi
 
   local glob="${wheel_globs[${package}]}"
   shopt -s nullglob
@@ -228,22 +233,51 @@ build_native_wheel() {
   shopt -u nullglob
   if (( ${#matches[@]} == 0 )); then
     echo "${package}: build completed but no expected cp312 linux_x86_64 wheel matched ${glob}." >&2
-    return 1
+    printf 'build_failed\n'
+    return 0
   fi
+  printf 'built\n'
 }
 
 build_native_wheels() {
   local missing=()
+  local invalid=()
+  local failed=()
   local package
   for package in "${native_packages[@]}"; do
-    if ! build_native_wheel "${package}"; then
-      missing+=("${package}=$(source_dir_for_package "${package}")")
-    fi
+    local status
+    status="$(build_native_wheel "${package}")"
+    case "${status}" in
+      built)
+        ;;
+      missing_source)
+        missing+=("${package}=$(source_dir_for_package "${package}")")
+        ;;
+      invalid_source)
+        invalid+=("${package}=$(build_dir_for_package "${package}" "$(source_dir_for_package "${package}")")")
+        ;;
+      build_failed)
+        failed+=("${package}=$(build_dir_for_package "${package}" "$(source_dir_for_package "${package}")")")
+        ;;
+      *)
+        failed+=("${package}=unexpected status ${status}")
+        ;;
+    esac
   done
 
-  if (( ${#missing[@]} > 0 )); then
-    echo "Missing native source directories for ${lane}:" >&2
-    printf '  - %s\n' "${missing[@]}" >&2
+  if (( ${#missing[@]} > 0 || ${#invalid[@]} > 0 || ${#failed[@]} > 0 )); then
+    if (( ${#missing[@]} > 0 )); then
+      echo "Missing native source directories for ${lane}:" >&2
+      printf '  - %s\n' "${missing[@]}" >&2
+    fi
+    if (( ${#invalid[@]} > 0 )); then
+      echo "Invalid native source directories for ${lane}:" >&2
+      printf '  - %s\n' "${invalid[@]}" >&2
+    fi
+    if (( ${#failed[@]} > 0 )); then
+      echo "Failed native wheel builds for ${lane}:" >&2
+      printf '  - %s\n' "${failed[@]}" >&2
+    fi
     echo "Provide package source directories via *_SOURCE_DIR or explicit *_SOURCE_URL + *_SOURCE_REF with WHEELHOUSE_ALLOW_SOURCE_FETCH=1." >&2
     echo "Native wheels are required for: ${native_packages[*]}." >&2
     echo "Pure wheels were copied from wheels/: ${pure_wheels[*]}." >&2
