@@ -19,6 +19,13 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Install CUDA 12.4 toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: '12.4.1'
+          method: network
+          sub-packages: '["nvcc", "cudart-dev"]'
+
       - name: Verify CUDA 12.4 build prerequisites
         run: |
           set -euo pipefail

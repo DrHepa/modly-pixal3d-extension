@@ -29,7 +29,7 @@ Candidate Linux x64 lane:
 linux-x64-cp312-cuda124
 ```
 
-This lane is intentionally **not declared as supported** in `wheelhouse.manifest.json` until a real, checksum-pinned release asset exists. Use the GitHub Actions recipe in `.github/workflows/wheelhouse-linux-x64-cp312-cuda124.yml` to validate build prerequisites on hosted Linux x64. The recipe must fail clearly when the CUDA 12.4 toolchain or native build prerequisites are unavailable, and it must not publish placeholder archives.
+This lane is intentionally **not declared as supported** in `wheelhouse.manifest.json` until a real, checksum-pinned release asset exists. Use the GitHub Actions recipe in `.github/workflows/wheelhouse-linux-x64-cp312-cuda124.yml` to validate build prerequisites on hosted Linux x64. The workflow attempts to install the CUDA 12.4 toolkit (`nvcc` + runtime development package) before running the build recipe. It must fail clearly when the CUDA 12.4 toolchain or native build prerequisites are unavailable, and it must not publish placeholder archives.
 
 ## SHA256SUMS
 
