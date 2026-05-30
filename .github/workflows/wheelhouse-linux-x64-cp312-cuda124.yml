@@ -36,6 +36,8 @@ jobs:
           nvcc --version
 
       - name: Build candidate wheelhouse archive
+        env:
+          WHEELHOUSE_NATIVE_SOURCES_ENV: ${{ github.workspace }}/tools/wheelhouse/native-sources.linux-x64-cp312-cuda124.env.example
         run: |
           set -euo pipefail
           echo "Building ${WHEELHOUSE_LANE} requires CUDA/native Pixal3D wheel recipes."

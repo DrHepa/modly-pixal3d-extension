@@ -8,6 +8,7 @@ work_dir="${build_root}/work"
 wheelhouse_dir="${build_root}/wheelhouse"
 dist_dir="${build_root}/dist/wheelhouse"
 archive_path="${dist_dir}/pixal3d-wheelhouse-v0.1.0-${lane}.zip"
+source_env_file="${WHEELHOUSE_NATIVE_SOURCES_ENV:-${repo_root}/tools/wheelhouse/native-sources.${lane}.env}"
 
 pure_wheels=(
   "pixal3d_core-0.1.0+modly-py3-none-any.whl"
@@ -62,6 +63,15 @@ declare -A source_url_vars=(
   ["nvdiffrec_render"]="NVDIFFREC_RENDER_SOURCE_URL"
 )
 
+declare -A source_subdir_vars=(
+  ["natten"]="NATTEN_SOURCE_SUBDIR"
+  ["o_voxel"]="O_VOXEL_SOURCE_SUBDIR"
+  ["cumesh"]="CUMESH_SOURCE_SUBDIR"
+  ["flex_gemm"]="FLEX_GEMM_SOURCE_SUBDIR"
+  ["nvdiffrast"]="NVDIFFRAST_SOURCE_SUBDIR"
+  ["nvdiffrec_render"]="NVDIFFREC_RENDER_SOURCE_SUBDIR"
+)
+
 declare -A wheel_globs=(
   ["natten"]="natten-*-cp312-cp312-linux_x86_64.whl"
   ["o_voxel"]="o_voxel-*-cp312-cp312-linux_x86_64.whl"
@@ -75,6 +85,15 @@ fail_no_placeholder() {
   echo "$1" >&2
   echo "No placeholder wheelhouse archive will be created." >&2
   exit 1
+}
+
+load_native_sources_env() {
+  if [[ -f "${source_env_file}" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "${source_env_file}"
+    set +a
+  fi
 }
 
 setup_directories() {
@@ -170,6 +189,19 @@ maybe_fetch_source_ref() {
   return 1
 }
 
+build_dir_for_package() {
+  local package="$1"
+  local source_dir="$2"
+  local subdir_var="${source_subdir_vars[${package}]}"
+  local source_subdir
+  source_subdir="$(env_value "${subdir_var}")"
+  if [[ -n "${source_subdir}" ]]; then
+    printf '%s' "${source_dir}/${source_subdir}"
+  else
+    printf '%s' "${source_dir}"
+  fi
+}
+
 build_native_wheel() {
   local package="$1"
   local source_dir
@@ -179,13 +211,16 @@ build_native_wheel() {
     return 1
   fi
 
-  if [[ ! -f "${source_dir}/pyproject.toml" && ! -f "${source_dir}/setup.py" ]]; then
-    echo "${package}: ${source_dir} does not contain pyproject.toml or setup.py." >&2
+  local build_dir
+  build_dir="$(build_dir_for_package "${package}" "${source_dir}")"
+
+  if [[ ! -f "${build_dir}/pyproject.toml" && ! -f "${build_dir}/setup.py" ]]; then
+    echo "${package}: ${build_dir} does not contain pyproject.toml or setup.py." >&2
     return 1
   fi
 
-  echo "Building ${package} from ${source_dir}" >&2
-  python3 -m pip wheel "${source_dir}" --no-deps --wheel-dir "${wheelhouse_dir}"
+  echo "Building ${package} from ${build_dir}" >&2
+  python3 -m pip wheel "${build_dir}" --no-deps --wheel-dir "${wheelhouse_dir}"
 
   local glob="${wheel_globs[${package}]}"
   shopt -s nullglob
@@ -243,6 +278,7 @@ PY
 }
 
 main() {
+  load_native_sources_env
   setup_directories
   verify_build_prerequisites
   install_build_prerequisites

@@ -111,6 +111,7 @@ test('linux x64 cp312 cuda124 wheelhouse workflow is documented but not added to
   const workflow = readFileSync(workflowPath, 'utf8')
   assert.match(workflow, /linux-x64-cp312-cuda124/)
   assert.match(workflow, /ubuntu-22\.04/)
+  assert.match(workflow, /native-sources\.linux-x64-cp312-cuda124\.env\.example/)
   assert.match(workflow, /fail clearly/i)
   assert.match(workflow, /Do not upload placeholders/i)
   assert.doesNotMatch(workflow, /upload-release-asset/i)
@@ -124,6 +125,9 @@ test('linux x64 cp312 cuda124 wheelhouse workflow is documented but not added to
   assert.match(script, /install_build_prerequisites\(\)/)
   assert.match(script, /copy_pure_wheels\(\)/)
   assert.match(script, /build_native_wheel\(\)/)
+  assert.match(script, /WHEELHOUSE_NATIVE_SOURCES_ENV/)
+  assert.match(script, /O_VOXEL_SOURCE_SUBDIR/)
+  assert.match(script, /build_dir_for_package\(\)/)
   assert.match(script, /finalize_wheelhouse_archive\(\)/)
   assert.match(recipe, /linux-x64-cp312-cuda124/)
   assert.match(recipe, /not declared as supported/i)
@@ -131,6 +135,19 @@ test('linux x64 cp312 cuda124 wheelhouse workflow is documented but not added to
   assert.match(recipe, /NATTEN_SOURCE_DIR/)
   assert.match(recipe, /copy the existing pure Python wheels/i)
   assert.match(recipe, /missing native source directories/i)
+  assert.match(recipe, /native-sources\.linux-x64-cp312-cuda124\.env\.example/)
+})
+
+test('linux x64 native source refs are immutable and confidence-documented', () => {
+  const env = readFileSync(new URL('../tools/wheelhouse/native-sources.linux-x64-cp312-cuda124.env.example', import.meta.url), 'utf8')
+
+  for (const name of ['NATTEN', 'O_VOXEL', 'CUMESH', 'FLEX_GEMM', 'NVDIFFRAST', 'NVDIFFREC_RENDER']) {
+    assert.match(env, new RegExp(`${name}_SOURCE_URL=https://`))
+    assert.match(env, new RegExp(`${name}_SOURCE_REF=[0-9a-f]{40}`))
+  }
+  assert.match(env, /O_VOXEL_SOURCE_SUBDIR=o-voxel/)
+  assert.match(env, /Confidence legend:/)
+  assert.match(env, /WHEELHOUSE_ALLOW_SOURCE_FETCH=1/)
 })
 
 test('linux x64 build recipe reuses pure wheels and fails clearly when native sources are missing', () => {
