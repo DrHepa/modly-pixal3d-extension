@@ -190,8 +190,9 @@ maybe_fetch_source_ref() {
       echo "${package}: both ${url_var} and ${ref_var} are required for explicit source fetching." >&2
       return 1
     fi
-    git clone "${source_url}" "${source_dir}"
+    git clone --recurse-submodules "${source_url}" "${source_dir}"
     git -C "${source_dir}" checkout "${source_ref}"
+    git -C "${source_dir}" submodule update --init --recursive
     return 0
   fi
 

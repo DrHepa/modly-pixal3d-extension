@@ -52,7 +52,7 @@ NVDIFFREC_RENDER_SOURCE_DIR=/path/to/nvdiffrec_render \
 tools/wheelhouse/build-linux-x64-cp312-cuda124.sh
 ```
 
-If a maintainer chooses source fetching in CI, they must set both `*_SOURCE_URL` and immutable `*_SOURCE_REF` for each package plus `WHEELHOUSE_ALLOW_SOURCE_FETCH=1`. The script does not invent or fetch sources silently.
+If a maintainer chooses source fetching in CI, they must set both `*_SOURCE_URL` and immutable `*_SOURCE_REF` for each package plus `WHEELHOUSE_ALLOW_SOURCE_FETCH=1`. The script does not invent or fetch sources silently. Fetched repositories are cloned with `--recurse-submodules`, then checked out to the immutable ref and followed by `git submodule update --init --recursive`; this is required for packages such as CuMesh that vendor CUDA sources under submodules like `third_party/cubvh`.
 
 ## SHA256SUMS
 

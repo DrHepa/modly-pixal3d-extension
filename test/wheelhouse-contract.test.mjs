@@ -145,6 +145,8 @@ test('linux x64 cp312 cuda124 wheelhouse workflow is documented but not added to
   assert.match(script, /TORCH_CUDA_ARCH_LIST:-8\.0;8\.6;8\.9;9\.0/)
   assert.match(script, /NATTEN_CUDA_ARCH:-\$\{TORCH_CUDA_ARCH_LIST\}/)
   assert.match(script, /--no-build-isolation/)
+  assert.match(script, /git clone --recurse-submodules/)
+  assert.match(script, /git -C "\$\{source_dir\}" submodule update --init --recursive/)
   assert.match(script, /Missing native source directories/)
   assert.match(script, /Invalid native source directories/)
   assert.match(script, /Failed native wheel builds/)
