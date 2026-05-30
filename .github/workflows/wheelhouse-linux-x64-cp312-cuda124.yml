@@ -30,7 +30,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y libcurand-dev-12-4 libcusparse-dev-12-4 libcublas-dev-12-4 libcusolver-dev-12-4 libnvrtc-dev-12-4
+          sudo apt-get install -y libcurand-dev-12-4 libcusparse-dev-12-4 libcublas-dev-12-4 libcusolver-dev-12-4 cuda-nvrtc-dev-12-4
 
       - name: Verify CUDA 12.4 build prerequisites
         run: |

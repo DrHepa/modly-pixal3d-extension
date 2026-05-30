@@ -115,7 +115,7 @@ test('linux x64 cp312 cuda124 wheelhouse workflow is documented but not added to
   assert.match(workflow, /libcusparse-dev-12-4/)
   assert.match(workflow, /libcublas-dev-12-4/)
   assert.match(workflow, /libcusolver-dev-12-4/)
-  assert.match(workflow, /libnvrtc-dev-12-4/)
+  assert.match(workflow, /cuda-nvrtc-dev-12-4/)
   assert.match(workflow, /curand_kernel\.h/)
   assert.match(workflow, /cusparse\.h/)
   assert.match(workflow, /cublas_v2\.h/)
