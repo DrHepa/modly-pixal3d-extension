@@ -24,7 +24,13 @@ jobs:
         with:
           cuda: '12.4.1'
           method: network
-          sub-packages: '["nvcc", "cudart-dev", "curand-dev", "cusparse-dev"]'
+          sub-packages: '["nvcc", "cudart-dev"]'
+
+      - name: Install CUDA math development headers
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libcurand-dev-12-4 libcusparse-dev-12-4
 
       - name: Verify CUDA 12.4 build prerequisites
         run: |
@@ -34,6 +40,8 @@ jobs:
             exit 1
           fi
           nvcc --version
+          test -f "${CUDA_HOME}/include/curand_kernel.h"
+          test -f "${CUDA_HOME}/include/cusparse.h"
 
       - name: Build candidate wheelhouse archive
         env:
