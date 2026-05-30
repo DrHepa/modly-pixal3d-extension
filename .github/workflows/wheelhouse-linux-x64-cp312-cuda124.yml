@@ -26,11 +26,11 @@ jobs:
           method: network
           sub-packages: '["nvcc", "cudart-dev"]'
 
-      - name: Install CUDA math development headers
+      - name: Install CUDA math and link development libraries
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y libcurand-dev-12-4 libcusparse-dev-12-4 libcublas-dev-12-4 libcusolver-dev-12-4
+          sudo apt-get install -y libcurand-dev-12-4 libcusparse-dev-12-4 libcublas-dev-12-4 libcusolver-dev-12-4 libnvrtc-dev-12-4
 
       - name: Verify CUDA 12.4 build prerequisites
         run: |
@@ -44,6 +44,9 @@ jobs:
           test -f "${CUDA_HOME}/include/cusparse.h"
           test -f "${CUDA_HOME}/include/cublas_v2.h"
           test -f "${CUDA_HOME}/include/cusolverDn.h"
+          test -f "${CUDA_HOME}/include/nvrtc.h"
+          test -f "${CUDA_HOME}/lib64/stubs/libcuda.so"
+          test -f "${CUDA_HOME}/lib64/libnvrtc.so"
 
       - name: Build candidate wheelhouse archive
         env:
@@ -53,6 +56,8 @@ jobs:
           echo "Building ${WHEELHOUSE_LANE} requires CUDA/native Pixal3D wheel recipes."
           echo "Do not upload placeholders; this workflow must fail if prerequisites are incomplete."
           test -x tools/wheelhouse/build-linux-x64-cp312-cuda124.sh
+          export LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/lib64/stubs:${LIBRARY_PATH:-}"
+          export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/lib64/stubs:${LD_LIBRARY_PATH:-}"
           tools/wheelhouse/build-linux-x64-cp312-cuda124.sh
 
       - name: Upload candidate artifact only
