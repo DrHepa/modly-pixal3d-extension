@@ -29,7 +29,7 @@ Candidate Linux x64 lane:
 linux-x64-cp312-cuda124
 ```
 
-This lane is intentionally **not declared as supported** in `wheelhouse.manifest.json` until a real, checksum-pinned release asset exists. Use the GitHub Actions recipe in `.github/workflows/wheelhouse-linux-x64-cp312-cuda124.yml` to validate build prerequisites on hosted Linux x64. The workflow uses `ubuntu-22.04` and attempts to install the CUDA 12.4 toolkit (`nvcc` + runtime development package) before running the build recipe. It must fail clearly when the CUDA 12.4 toolchain or native build prerequisites are unavailable, and it must not publish placeholder archives.
+This lane is intentionally **not declared as supported** in `wheelhouse.manifest.json` until a real, checksum-pinned release asset exists. Use the GitHub Actions recipe in `.github/workflows/wheelhouse-linux-x64-cp312-cuda124.yml` to validate build prerequisites on hosted Linux x64. The workflow uses `ubuntu-22.04` and attempts to install the CUDA 12.4 toolkit (`nvcc`, runtime development package, cuRAND headers, and cuSPARSE headers) before running the build recipe. It must fail clearly when the CUDA 12.4 toolchain or native build prerequisites are unavailable, and it must not publish placeholder archives.
 
 Native source refs for the linux-x64 probe are documented in `native-sources.linux-x64-cp312-cuda124.env.example`. The file uses immutable SHAs and includes confidence notes for each package. The workflow loads this file explicitly; source fetching still requires `WHEELHOUSE_ALLOW_SOURCE_FETCH=1` from the env file, so local runs remain opt-in. `O_VOXEL_SOURCE_SUBDIR=o-voxel` is required because `o_voxel` lives inside the TRELLIS.2 repository rather than in its own top-level repo.
 

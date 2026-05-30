@@ -24,7 +24,7 @@ jobs:
         with:
           cuda: '12.4.1'
           method: network
-          sub-packages: '["nvcc", "cudart-dev"]'
+          sub-packages: '["nvcc", "cudart-dev", "curand-dev", "cusparse-dev"]'
 
       - name: Verify CUDA 12.4 build prerequisites
         run: |
