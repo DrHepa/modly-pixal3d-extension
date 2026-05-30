@@ -11,7 +11,7 @@ from typing import Any, Callable
 from pixal3d_extension.paths import is_contained_path, require_contained_path
 
 PIXAL3D_MODEL_SOURCE = "TencentARC/Pixal3D"
-SUPPORTED_RUNTIME_LANE = "linux-x64-nvidia-cuda"
+SUPPORTED_RUNTIME_LANE = "linux-aarch64-cp312-cuda124"
 
 
 def _default_pipeline_factory(source: str) -> Any:

@@ -366,10 +366,17 @@ def _wheel_is_compatible(filename: str, runtime_evidence: dict[str, str]) -> boo
     if filename.endswith("-py3-none-any.whl"):
         return True
     python_tag = runtime_evidence["python_tag"]
-    arch = {"aarch64": "aarch64", "x64": "x86_64"}.get(runtime_evidence["arch"], runtime_evidence["arch"])
     os_name = runtime_evidence["os"]
-    platform_tag = f"{os_name}_{arch}"
+    platform_tag = {
+        ("linux", "aarch64"): "linux_aarch64",
+        ("linux", "x64"): "linux_x86_64",
+        ("windows", "x64"): "win_amd64",
+    }.get((os_name, runtime_evidence["arch"]), f"{os_name}_{runtime_evidence['arch']}")
     return f"-{python_tag}-{python_tag}-" in filename and platform_tag in filename
+
+
+def runtime_lane_id(runtime_evidence: dict[str, str]) -> str:
+    return "{os}-{arch}-{python_tag}-{accelerator_lane}".format(**runtime_evidence)
 
 
 def resolve_verified_fallback(manifest: dict[str, Any], workspace_root: Path, runtime_evidence: dict[str, str]) -> dict[str, Any]:

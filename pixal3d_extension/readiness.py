@@ -6,7 +6,7 @@ from pixal3d_extension.assets import AUXILIARY_ASSETS, PRIMARY_ASSET, check_asse
 from pixal3d_extension.paths import resolve_modly_layout, resolve_storage_path
 from pixal3d_extension.pipeline_patch import validate_pipeline_patch
 
-SUPPORTED_RUNTIME_LANE = "linux-aarch64-cp312-nvidia-cuda"
+SUPPORTED_RUNTIME_LANE = "linux-aarch64-cp312-cuda124"
 
 SETUP_REQUIRED_PATHS = [
     "venv",

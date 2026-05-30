@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 import venv as stdlib_venv
 from pathlib import Path
 from typing import Any
@@ -107,7 +108,7 @@ def _run_setup_command(args: list[str], *, cwd: Path) -> dict[str, Any]:
 
 
 def _install_prepare_dependencies(workspace_root: Path, *, wheelhouse_path: Path | None = None) -> dict[str, Any]:
-    venv_python = workspace_root / VENV_DIR / "bin" / "python"
+    venv_python = _venv_python_path(workspace_root)
     wheelhouse = wheelhouse_path or (workspace_root / WHEELHOUSE_DIR)
     if not venv_python.exists():
         return {"status": "failed", "code": "venv_python_missing", "venv_python": str(venv_python), "commands": []}
@@ -133,6 +134,19 @@ def _install_prepare_dependencies(workspace_root: Path, *, wheelhouse_path: Path
         "local_wheel_packages": LOCAL_WHEEL_PACKAGES,
         "commands": results,
     }
+
+
+def _venv_python_path(workspace_root: Path) -> Path:
+    venv_root = workspace_root / VENV_DIR
+    candidates = []
+    if sys.platform.startswith("win"):
+        candidates.extend([venv_root / "Scripts" / "python.exe", venv_root / "bin" / "python"])
+    else:
+        candidates.extend([venv_root / "bin" / "python", venv_root / "Scripts" / "python.exe"])
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 
 def _prepare_wheelhouse_for_setup(workspace_root: Path) -> dict[str, Any]:

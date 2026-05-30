@@ -30,6 +30,7 @@ test('wheelhouse manifest is pinned, checksum-verifiable, and selects the linux 
   assert.equal(manifest.schema_version, 'release-wheelhouse/v1')
   assert.equal(manifest.extension_id, 'pixal3d')
   assert.equal(manifest.release.tag, 'wheelhouse-v0.1.0')
+  assert.equal(manifest.release.immutable_commit, '47e78252f5cb185623ba3aad564d879d30809bb6')
   assert.notEqual(manifest.release.tag, 'latest')
   assert.match(manifest.release.immutable_commit, /^[0-9a-f]{40}$/)
   assert.equal(manifest.assets.length, 1)
@@ -54,6 +55,74 @@ print(json.dumps({'asset_id': asset['id'], 'release_tag': manifest['release']['t
     release_tag: 'wheelhouse-v0.1.0',
     cache_key: 'pixal3d/0.1.0/linux-aarch64-cp312-cuda124',
   })
+})
+
+test('wheelhouse lane helpers support Windows venv Python paths, win_amd64 tags, and consistent cuda124 runtime lanes', () => {
+  const result = runPython(`
+import json, tempfile
+from pathlib import Path
+import setup
+from modly_wheelhouse import _wheel_is_compatible, runtime_lane_id
+from pixal3d_extension import readiness, runtime
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    windows_python = root / 'venv' / 'Scripts' / 'python.exe'
+    windows_python.parent.mkdir(parents=True)
+    windows_python.write_text('', encoding='utf-8')
+    wheelhouse = root / 'wheels'
+    wheelhouse.mkdir()
+    calls = []
+    setup._run_setup_command = lambda command, *, cwd: calls.append({'command': command, 'cwd': str(cwd)}) or {'args': command, 'returncode': 0, 'stdout_tail': '', 'stderr_tail': '', 'ok': True}
+    install = setup._install_prepare_dependencies(root)
+    win_runtime = {'os':'windows','arch':'x64','python_tag':'cp312','accelerator_lane':'cuda124'}
+    print(json.dumps({
+        'install_status': install['status'],
+        'venv_python': install['venv_python'],
+        'first_command_python': calls[0]['command'][0],
+        'win_native_compatible': _wheel_is_compatible('native-1.0.0-cp312-cp312-win_amd64.whl', win_runtime),
+        'win_x86_incompatible': _wheel_is_compatible('native-1.0.0-cp312-cp312-win32.whl', win_runtime),
+        'linux_lane': runtime_lane_id({'os':'linux','arch':'x64','python_tag':'cp312','accelerator_lane':'cuda124'}),
+        'readiness_supported': readiness.SUPPORTED_RUNTIME_LANE,
+        'runtime_supported': runtime.SUPPORTED_RUNTIME_LANE,
+    }, sort_keys=True))
+`)
+
+  assert.equal(result.install_status, 'installed')
+  assert.match(result.venv_python, /venv[\\/]Scripts[\\/]python\.exe$/)
+  assert.equal(result.first_command_python, result.venv_python)
+  assert.equal(result.win_native_compatible, true)
+  assert.equal(result.win_x86_incompatible, false)
+  assert.equal(result.linux_lane, 'linux-x64-cp312-cuda124')
+  assert.equal(result.readiness_supported, 'linux-aarch64-cp312-cuda124')
+  assert.equal(result.runtime_supported, 'linux-aarch64-cp312-cuda124')
+})
+
+test('linux x64 cp312 cuda124 wheelhouse workflow is documented but not added to supported manifest lanes', () => {
+  const manifest = JSON.parse(readFileSync(join(repoRoot, 'wheelhouse.manifest.json'), 'utf8'))
+  const workflowPath = join(repoRoot, '.github', 'workflows', 'wheelhouse-linux-x64-cp312-cuda124.yml')
+  const scriptPath = join(repoRoot, 'tools', 'wheelhouse', 'build-linux-x64-cp312-cuda124.sh')
+  const recipe = readFileSync(join(repoRoot, 'tools', 'wheelhouse', 'README.md'), 'utf8')
+
+  assert.deepEqual(manifest.assets.map((asset) => asset.id), ['linux-aarch64-cp312-cuda124'])
+  assert.equal(existsSync(workflowPath), true)
+
+  const workflow = readFileSync(workflowPath, 'utf8')
+  assert.match(workflow, /linux-x64-cp312-cuda124/)
+  assert.match(workflow, /ubuntu-24\.04/)
+  assert.match(workflow, /fail clearly/i)
+  assert.match(workflow, /Do not upload placeholders/i)
+  assert.doesNotMatch(workflow, /upload-release-asset/i)
+  assert.equal(existsSync(scriptPath), true)
+
+  const script = readFileSync(scriptPath, 'utf8')
+  assert.match(script, /linux-x64-cp312-cuda124/)
+  assert.match(script, /nvcc/)
+  assert.match(script, /CUDA 12\.4 toolchain/)
+  assert.match(script, /placeholder/i)
+  assert.match(recipe, /linux-x64-cp312-cuda124/)
+  assert.match(recipe, /not declared as supported/i)
+  assert.match(recipe, /CUDA 12\.4 toolchain/)
 })
 
 test('manifest validation rejects mutable releases, missing checksums, and unsafe cache roots before selection', () => {
@@ -109,6 +178,40 @@ print(json.dumps(out, sort_keys=True))
   assert.deepEqual(result, {
     ambiguous: { code: 'ambiguous_lane', downloads_started: false, installs_started: false },
     unsupported: { code: 'unsupported_lane', downloads_started: false, installs_started: false },
+  })
+})
+
+test('release downloader maps GitHub 401 and 403 responses to auth_required before install intent', () => {
+  const result = runPython(`
+import json
+import urllib.error
+from pathlib import Path
+from modly_wheelhouse import WheelhouseError, _download_url
+
+out = {}
+class RaisingUrlopen:
+    def __init__(self, code):
+        self.code = code
+    def __call__(self, *_args, **_kwargs):
+        raise urllib.error.HTTPError('https://example.invalid/asset.zip', self.code, 'blocked', {}, None)
+
+import modly_wheelhouse
+original = modly_wheelhouse.urllib.request.urlopen
+try:
+    for code in (401, 403):
+        modly_wheelhouse.urllib.request.urlopen = RaisingUrlopen(code)
+        try:
+            _download_url('https://example.invalid/asset.zip', Path('/tmp/unused-wheelhouse.zip'))
+        except WheelhouseError as exc:
+            out[str(code)] = {'code': exc.code, 'downloads_started': exc.observation['downloads_started'], 'installs_started': exc.observation['installs_started']}
+finally:
+    modly_wheelhouse.urllib.request.urlopen = original
+print(json.dumps(out, sort_keys=True))
+`)
+
+  assert.deepEqual(result, {
+    401: { code: 'auth_required', downloads_started: false, installs_started: false },
+    403: { code: 'auth_required', downloads_started: false, installs_started: false },
   })
 })
 

@@ -1,0 +1,44 @@
+name: Wheelhouse Linux x64 cp312 cuda124
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-wheelhouse:
+    name: Build linux-x64-cp312-cuda124 wheelhouse candidate
+    runs-on: ubuntu-24.04
+    env:
+      WHEELHOUSE_LANE: linux-x64-cp312-cuda124
+      CUDA_HOME: /usr/local/cuda-12.4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify CUDA 12.4 build prerequisites
+        run: |
+          set -euo pipefail
+          if ! command -v nvcc >/dev/null 2>&1; then
+            echo "CUDA 12.4 toolchain is unavailable; fail clearly instead of publishing placeholders." >&2
+            exit 1
+          fi
+          nvcc --version
+
+      - name: Build candidate wheelhouse archive
+        run: |
+          set -euo pipefail
+          echo "Building ${WHEELHOUSE_LANE} requires CUDA/native Pixal3D wheel recipes."
+          echo "Do not upload placeholders; this workflow must fail if prerequisites are incomplete."
+          test -x tools/wheelhouse/build-linux-x64-cp312-cuda124.sh
+          tools/wheelhouse/build-linux-x64-cp312-cuda124.sh
+
+      - name: Upload candidate artifact only
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixal3d-wheelhouse-${{ env.WHEELHOUSE_LANE }}
+          path: dist/wheelhouse/*
+          if-no-files-found: error
