@@ -249,6 +249,9 @@ def _ready_observation(
     downloads_started: bool,
     bytes_downloaded: int,
 ) -> dict[str, Any]:
+    wheelhouse_path = paths["extracted"] / "wheelhouse"
+    if not wheelhouse_path.is_dir():
+        wheelhouse_path = paths["extracted"]
     return {
         "status": "ready",
         "selected_asset": asset["id"],
@@ -259,7 +262,7 @@ def _ready_observation(
         "release_tag": manifest["release"]["tag"],
         "downloads_started": downloads_started,
         "installs_started": False,
-        "wheelhouse_path": str(paths["extracted"]),
+        "wheelhouse_path": str(wheelhouse_path),
     }
 
 

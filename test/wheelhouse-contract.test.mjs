@@ -170,7 +170,8 @@ with tempfile.TemporaryDirectory() as tmp:
         'bytes_downloaded': observation['bytes_downloaded'],
         'release_tag': observation['release_tag'],
         'calls': calls,
-        'wheel_exists': (extracted / 'wheelhouse' / 'pkg-1.0.0-py3-none-any.whl').exists(),
+        'wheel_exists': (extracted / 'pkg-1.0.0-py3-none-any.whl').exists(),
+        'wheelhouse_dir': extracted.name,
         'contained': tmp_path in extracted.parents,
     }, sort_keys=True))
 `)
@@ -188,6 +189,7 @@ with tempfile.TemporaryDirectory() as tmp:
     sha256_verified: true,
     status: 'ready',
     wheel_exists: true,
+    wheelhouse_dir: 'wheelhouse',
   })
   assert.ok(result.bytes_downloaded > 0)
 })

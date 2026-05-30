@@ -12,8 +12,8 @@
     {
       "id": "linux-aarch64-cp312-cuda124",
       "filename": "pixal3d-wheelhouse-v0.1.0-linux-aarch64-cp312-cuda124.zip",
-      "size_bytes": 89505230,
-      "sha256": "b67867e5e36e8b02d289584b67f819bd2b5bb2da457fa88e449e470cc85256cd",
+      "size_bytes": 88451373,
+      "sha256": "19a2386cac36440a74bff18d8feb2ef59081e7608998e0863d8d94ca074485d6",
       "compression": "zip",
       "packages": [
         "utils3d",
