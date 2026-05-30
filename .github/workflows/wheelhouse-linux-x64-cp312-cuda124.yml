@@ -30,7 +30,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y libcurand-dev-12-4 libcusparse-dev-12-4
+          sudo apt-get install -y libcurand-dev-12-4 libcusparse-dev-12-4 libcublas-dev-12-4
 
       - name: Verify CUDA 12.4 build prerequisites
         run: |
@@ -42,6 +42,7 @@ jobs:
           nvcc --version
           test -f "${CUDA_HOME}/include/curand_kernel.h"
           test -f "${CUDA_HOME}/include/cusparse.h"
+          test -f "${CUDA_HOME}/include/cublas_v2.h"
 
       - name: Build candidate wheelhouse archive
         env:
