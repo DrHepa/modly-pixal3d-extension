@@ -121,6 +121,15 @@ PY
   fi
 }
 
+configure_cuda_build_archs() {
+  export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0;8.6;8.9;9.0}"
+  # NATTEN uses its own semicolon-separated arch variable and builds a
+  # py3-none-any wheel on GPU-less CI runners unless this is set.
+  export NATTEN_CUDA_ARCH="${NATTEN_CUDA_ARCH:-${TORCH_CUDA_ARCH_LIST}}"
+  echo "Using TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}" >&2
+  echo "Using NATTEN_CUDA_ARCH=${NATTEN_CUDA_ARCH}" >&2
+}
+
 install_build_prerequisites() {
   if [[ "${WHEELHOUSE_SKIP_PREREQ_INSTALL:-0}" == "1" ]]; then
     echo "Skipping Python build prerequisite installation because WHEELHOUSE_SKIP_PREREQ_INSTALL=1." >&2
@@ -222,7 +231,7 @@ build_native_wheel() {
   fi
 
   echo "Building ${package} from ${build_dir}" >&2
-  if ! python3 -m pip wheel "${build_dir}" --no-deps --no-build-isolation --wheel-dir "${wheelhouse_dir}"; then
+  if ! python3 -m pip wheel "${build_dir}" --no-deps --no-build-isolation --wheel-dir "${wheelhouse_dir}" >&2; then
     printf 'build_failed\n'
     return 0
   fi
@@ -315,6 +324,7 @@ main() {
   load_native_sources_env
   setup_directories
   verify_build_prerequisites
+  configure_cuda_build_archs
   install_build_prerequisites
   copy_pure_wheels
   build_native_wheels
