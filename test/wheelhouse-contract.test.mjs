@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
@@ -120,9 +121,57 @@ test('linux x64 cp312 cuda124 wheelhouse workflow is documented but not added to
   assert.match(script, /nvcc/)
   assert.match(script, /CUDA 12\.4 toolchain/)
   assert.match(script, /placeholder/i)
+  assert.match(script, /install_build_prerequisites\(\)/)
+  assert.match(script, /copy_pure_wheels\(\)/)
+  assert.match(script, /build_native_wheel\(\)/)
+  assert.match(script, /finalize_wheelhouse_archive\(\)/)
   assert.match(recipe, /linux-x64-cp312-cuda124/)
   assert.match(recipe, /not declared as supported/i)
   assert.match(recipe, /CUDA 12\.4 toolchain/)
+  assert.match(recipe, /NATTEN_SOURCE_DIR/)
+  assert.match(recipe, /copy the existing pure Python wheels/i)
+  assert.match(recipe, /missing native source directories/i)
+})
+
+test('linux x64 build recipe reuses pure wheels and fails clearly when native sources are missing', () => {
+  const scriptPath = join(repoRoot, 'tools', 'wheelhouse', 'build-linux-x64-cp312-cuda124.sh')
+  const tmp = mkdtempSync(join(tmpdir(), 'pixal3d-wheelhouse-'))
+  const fakeBin = join(tmp, 'bin')
+
+  mkdirSync(fakeBin, { recursive: true })
+  writeFileSync(join(fakeBin, 'nvcc'), '#!/usr/bin/env bash\necho "Cuda compilation tools, release 12.4, V12.4.1"\n')
+  writeFileSync(join(fakeBin, 'python3'), '#!/usr/bin/env bash\ncat >/dev/null\necho cp312\n')
+  chmodSync(join(fakeBin, 'nvcc'), 0o755)
+  chmodSync(join(fakeBin, 'python3'), 0o755)
+
+  const result = spawnSync('bash', [scriptPath], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      WHEELHOUSE_BUILD_ROOT: tmp,
+      WHEELHOUSE_SKIP_PREREQ_INSTALL: '1',
+    },
+  })
+
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /Missing native source directories for linux-x64-cp312-cuda124/)
+  for (const nativeName of ['natten', 'o_voxel', 'cumesh', 'flex_gemm', 'nvdiffrast', 'nvdiffrec_render']) {
+    assert.match(result.stderr, new RegExp(nativeName))
+  }
+  assert.match(result.stderr, /No placeholder wheelhouse archive will be created/i)
+
+  const copiedWheels = readdirSync(join(tmp, 'wheelhouse')).sort()
+  assert.deepEqual(copiedWheels, [
+    'moge-2.0.0+modly-py3-none-any.whl',
+    'naf-0.1.0+modly-py3-none-any.whl',
+    'pipeline-1.0.0+modly-py3-none-any.whl',
+    'pixal3d_core-0.1.0+modly-py3-none-any.whl',
+    'utils3d-1.3+modly.headless-py3-none-any.whl',
+  ])
+  assert.equal(existsSync(join(tmp, 'dist', 'wheelhouse', 'pixal3d-wheelhouse-v0.1.0-linux-x64-cp312-cuda124.zip')), false)
+  rmSync(tmp, { recursive: true, force: true })
 })
 
 test('manifest validation rejects mutable releases, missing checksums, and unsafe cache roots before selection', () => {

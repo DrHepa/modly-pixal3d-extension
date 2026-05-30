@@ -31,6 +31,27 @@ linux-x64-cp312-cuda124
 
 This lane is intentionally **not declared as supported** in `wheelhouse.manifest.json` until a real, checksum-pinned release asset exists. Use the GitHub Actions recipe in `.github/workflows/wheelhouse-linux-x64-cp312-cuda124.yml` to validate build prerequisites on hosted Linux x64. The workflow uses `ubuntu-22.04` and attempts to install the CUDA 12.4 toolkit (`nvcc` + runtime development package) before running the build recipe. It must fail clearly when the CUDA 12.4 toolchain or native build prerequisites are unavailable, and it must not publish placeholder archives.
 
+The candidate recipe in `build-linux-x64-cp312-cuda124.sh` is staged deliberately:
+
+1. Create isolated `work/`, `wheelhouse/`, and `dist/wheelhouse/` directories.
+2. Install Python build tooling and PyTorch from the CUDA 12.4 wheel index.
+3. Copy the existing pure Python wheels from `wheels/`: `pixal3d_core`, `pipeline`, `moge`, `naf`, and `utils3d`.
+4. Build native wheels only from explicit source directories or explicit source URLs/refs. The script fails with `missing native source directories` instead of creating fake wheels.
+
+Native source directories can be supplied with:
+
+```bash
+NATTEN_SOURCE_DIR=/path/to/natten \
+O_VOXEL_SOURCE_DIR=/path/to/o_voxel \
+CUMESH_SOURCE_DIR=/path/to/cumesh \
+FLEX_GEMM_SOURCE_DIR=/path/to/flex_gemm \
+NVDIFFRAST_SOURCE_DIR=/path/to/nvdiffrast \
+NVDIFFREC_RENDER_SOURCE_DIR=/path/to/nvdiffrec_render \
+tools/wheelhouse/build-linux-x64-cp312-cuda124.sh
+```
+
+If a maintainer chooses source fetching in CI, they must set both `*_SOURCE_URL` and immutable `*_SOURCE_REF` for each package plus `WHEELHOUSE_ALLOW_SOURCE_FETCH=1`. The script does not invent or fetch sources silently.
+
 ## SHA256SUMS
 
 Generate checksums after the archive is final:
