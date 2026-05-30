@@ -109,7 +109,7 @@ test('linux x64 cp312 cuda124 wheelhouse workflow is documented but not added to
 
   const workflow = readFileSync(workflowPath, 'utf8')
   assert.match(workflow, /linux-x64-cp312-cuda124/)
-  assert.match(workflow, /ubuntu-24\.04/)
+  assert.match(workflow, /ubuntu-22\.04/)
   assert.match(workflow, /fail clearly/i)
   assert.match(workflow, /Do not upload placeholders/i)
   assert.doesNotMatch(workflow, /upload-release-asset/i)

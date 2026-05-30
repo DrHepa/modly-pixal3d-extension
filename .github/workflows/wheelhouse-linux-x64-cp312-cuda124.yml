@@ -6,7 +6,7 @@ on:
 jobs:
   build-wheelhouse:
     name: Build linux-x64-cp312-cuda124 wheelhouse candidate
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     env:
       WHEELHOUSE_LANE: linux-x64-cp312-cuda124
       CUDA_HOME: /usr/local/cuda-12.4
