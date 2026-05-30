@@ -10,12 +10,21 @@ from typing import Any
 from pixal3d_extension.pipeline_patch import patch_pipeline, restore_pipeline
 from pixal3d_extension.paths import ModlyLayout, resolve_modly_layout, resolve_storage_path
 from pixal3d_extension.readiness import check_readiness, check_setup_readiness
+from modly_wheelhouse import (
+    WheelhouseError,
+    detect_runtime_lane,
+    load_manifest,
+    prepare_wheelhouse,
+    resolve_verified_fallback,
+    validate_manifest,
+)
 
 
 EXTENSION_ID = "pixal3d"
 VENV_DIR = "venv"
 VENV_MARKER = ".modly-prepared"
 WHEELHOUSE_DIR = "wheels"
+WHEELHOUSE_MANIFEST = "wheelhouse.manifest.json"
 
 LOCAL_WHEEL_PACKAGES = [
     "utils3d==1.3+modly.headless",
@@ -97,9 +106,9 @@ def _run_setup_command(args: list[str], *, cwd: Path) -> dict[str, Any]:
     }
 
 
-def _install_prepare_dependencies(workspace_root: Path) -> dict[str, Any]:
+def _install_prepare_dependencies(workspace_root: Path, *, wheelhouse_path: Path | None = None) -> dict[str, Any]:
     venv_python = workspace_root / VENV_DIR / "bin" / "python"
-    wheelhouse = workspace_root / WHEELHOUSE_DIR
+    wheelhouse = wheelhouse_path or (workspace_root / WHEELHOUSE_DIR)
     if not venv_python.exists():
         return {"status": "failed", "code": "venv_python_missing", "venv_python": str(venv_python), "commands": []}
     if not wheelhouse.exists():
@@ -107,7 +116,7 @@ def _install_prepare_dependencies(workspace_root: Path) -> dict[str, Any]:
 
     commands = [
         [str(venv_python), "-m", "pip", "install", "-r", "requirements.txt"],
-        [str(venv_python), "-m", "pip", "install", "--find-links", WHEELHOUSE_DIR, *LOCAL_WHEEL_PACKAGES],
+        [str(venv_python), "-m", "pip", "install", "--no-index", "--find-links", str(wheelhouse), *LOCAL_WHEEL_PACKAGES],
         [str(venv_python), "-m", "pip", "check"],
     ]
     results: list[dict[str, Any]] = []
@@ -123,6 +132,48 @@ def _install_prepare_dependencies(workspace_root: Path) -> dict[str, Any]:
         "wheelhouse": str(wheelhouse),
         "local_wheel_packages": LOCAL_WHEEL_PACKAGES,
         "commands": results,
+    }
+
+
+def _prepare_wheelhouse_for_setup(workspace_root: Path) -> dict[str, Any]:
+    manifest = load_manifest(workspace_root / WHEELHOUSE_MANIFEST)
+    runtime_evidence = detect_runtime_lane()
+    try:
+        return prepare_wheelhouse(manifest, runtime_evidence, workspace_root)
+    except WheelhouseError as exc:
+        if exc.code not in {"network", "auth_required"}:
+            raise
+        fallback = resolve_verified_fallback(manifest, workspace_root, runtime_evidence)
+        return {
+            **fallback,
+            "fallback_mode": manifest.get("fallback", {}).get("mode", "migration_only"),
+            "fallback_reason": exc.code,
+            "release_failure": exc.observation,
+        }
+
+
+def _prepared_wheelhouse_path(observation: dict[str, Any]) -> Path:
+    path = observation.get("wheelhouse_path") or observation.get("fallback_path")
+    if not isinstance(path, str) or not path:
+        raise WheelhouseError("wheelhouse_path_missing", "Wheelhouse preparation did not return a local install path")
+    return Path(path)
+
+
+def _wheelhouse_manifest_observation(workspace_root: Path) -> dict[str, Any]:
+    manifest_path = workspace_root / WHEELHOUSE_MANIFEST
+    if not manifest_path.exists():
+        return {"status": "missing", "path": WHEELHOUSE_MANIFEST}
+    try:
+        manifest = load_manifest(manifest_path)
+        validate_manifest(manifest)
+    except (OSError, json.JSONDecodeError, WheelhouseError) as exc:
+        code = getattr(exc, "code", "invalid_manifest")
+        return {"status": "failed", "failure_code": code, "path": WHEELHOUSE_MANIFEST}
+    return {
+        "status": "available",
+        "release_tag": manifest["release"]["tag"],
+        "wheelhouse_version": manifest["wheelhouse_version"],
+        "asset_count": len(manifest["assets"]),
     }
 
 
@@ -169,16 +220,44 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
         "resolved_paths": layout.as_dict(),
         "downloads_started": False,
         "installs_started": False,
+        "wheelhouse_manifest": _wheelhouse_manifest_observation(workspace_root),
     }
 
     if prepare_requested:
         created, skipped = _create_prepare_paths(layout)
-        dependency_install = None if args.skip_install else _install_prepare_dependencies(workspace_root)
+        wheelhouse_prepare = None
+        dependency_install = None
+        if not args.skip_install:
+            try:
+                wheelhouse_prepare = _prepare_wheelhouse_for_setup(workspace_root)
+                dependency_install = _install_prepare_dependencies(
+                    workspace_root,
+                    wheelhouse_path=_prepared_wheelhouse_path(wheelhouse_prepare),
+                )
+            except (OSError, json.JSONDecodeError, WheelhouseError) as exc:
+                code = getattr(exc, "code", "wheelhouse_prepare_failed")
+                wheelhouse_prepare = getattr(
+                    exc,
+                    "observation",
+                    {"status": "failed", "failure_code": code, "downloads_started": False, "installs_started": False},
+                )
+                return {
+                    **result,
+                    "status": "failed",
+                    "created": created,
+                    "skipped": skipped,
+                    "wheelhouse_prepare": wheelhouse_prepare,
+                    "dependency_install": None,
+                    "installs_started": False,
+                    "setup_readiness": check_setup_readiness(workspace_root),
+                    "next_steps": ["preseed a verified wheelhouse release asset or fix the wheelhouse manifest"],
+                }
         result.update(
             {
                 "status": "prepared",
                 "created": created,
                 "skipped": skipped,
+                "wheelhouse_prepare": wheelhouse_prepare,
                 "dependency_install": dependency_install,
                 "installs_started": dependency_install is not None,
                 "setup_readiness": check_setup_readiness(workspace_root),
@@ -199,6 +278,7 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
         "status": "dry_run",
         "prepare_command": "python3 setup.py --prepare --json",
         "wheelhouse": WHEELHOUSE_DIR,
+        "wheelhouse_manifest_path": WHEELHOUSE_MANIFEST,
         "local_wheel_packages": LOCAL_WHEEL_PACKAGES,
     }
 

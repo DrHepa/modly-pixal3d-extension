@@ -2,7 +2,7 @@
 
 Pixal3D image-to-3D model extension for Modly.
 
-This repository contains only the extension runtime, setup entrypoint, and a local wheelhouse needed to prepare Pixal3D dependencies from a GitHub install. Model weights are not included; Modly downloads model assets through its UI into the normal Modly model storage.
+This repository contains only the extension runtime, setup entrypoint, and a release-backed wheelhouse contract needed to prepare Pixal3D dependencies from a GitHub install. Model weights are not included; Modly downloads model assets through its UI into the normal Modly model storage.
 
 ## What setup does
 
@@ -12,17 +12,20 @@ python3 setup.py --prepare --json
 
 - creates `venv/` inside the extension
 - installs `requirements.txt`
-- installs packaged wheels from `wheels/`
+- prepares the selected release-backed wheelhouse from `wheelhouse.manifest.json`
+- installs native packages with `pip install --no-index --find-links <verified-wheelhouse>`
 - runs `pip check`
 - creates logical Modly model-storage folders under the configured Modly models root
 
 It does **not** download model weights and does **not** run generation.
 
-## Included wheelhouse
+## Release-backed wheelhouse
 
-The `wheels/` folder is intentionally versioned so GitHub installs can prepare dependencies without cloning/building extra repositories at user setup time.
+`wheelhouse.manifest.json` pins the release tag, selected platform lane, archive filename, checksum, and fallback policy. Setup verifies the selected archive before extraction and installs native packages only from a verified local path using `--no-index --find-links`.
 
-Current wheelhouse targets Linux `aarch64` / Python `cp312` for native wheels.
+The vendored `wheels/` fallback is intentionally retained for migration/rollback. It is used only after retryable release access failures such as network/auth errors and only when every wheel is lane-compatible and hash-verified. Setup must not silently fall back to PyPI for native packages.
+
+Current wheelhouse targets Linux `aarch64` / Python `cp312` / `cuda124` for native wheels.
 
 Included packaged dependencies:
 

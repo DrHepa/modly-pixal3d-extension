@@ -1,0 +1,71 @@
+{
+  "schema_version": "release-wheelhouse/v1",
+  "extension_id": "pixal3d",
+  "wheelhouse_version": "0.1.0",
+  "release": {
+    "owner": "DrHepa",
+    "repo": "modly-pixal3d-extension",
+    "tag": "wheelhouse-v0.1.0",
+    "immutable_commit": "4e7ebb1bdd1f93c8f3f3e6114d3f5e84bd33ebe0"
+  },
+  "assets": [
+    {
+      "id": "linux-aarch64-cp312-cuda124",
+      "filename": "pixal3d-wheelhouse-v0.1.0-linux-aarch64-cp312-cuda124.zip",
+      "size_bytes": 89505230,
+      "sha256": "b67867e5e36e8b02d289584b67f819bd2b5bb2da457fa88e449e470cc85256cd",
+      "compression": "zip",
+      "packages": [
+        "utils3d",
+        "pipeline",
+        "moge",
+        "natten",
+        "naf",
+        "o-voxel",
+        "cumesh",
+        "flex-gemm",
+        "nvdiffrast",
+        "nvdiffrec-render",
+        "pixal3d-core"
+      ],
+      "selectors": {
+        "os": "linux",
+        "arch": "aarch64",
+        "python_tag": "cp312",
+        "accelerator_lane": "cuda124"
+      }
+    }
+  ],
+  "checksums": {
+    "manifest_asset": "SHA256SUMS"
+  },
+  "cache": {
+    "root": ".modly/cache/wheelhouse",
+    "key_template": "{extension_id}/{wheelhouse_version}/{asset_id}"
+  },
+  "fallback": {
+    "vendored_wheels": "wheels/",
+    "mode": "migration_only",
+    "require_hashes": true,
+    "wheels": [
+      { "filename": "cumesh-0.0.1-cp312-cp312-linux_aarch64.whl", "size_bytes": 14856302, "sha256": "9a598973594655db269d00ed1e134655fbaee091a648bbdf5ea08ceb01f63a82" },
+      { "filename": "flex_gemm-1.0.0-cp312-cp312-linux_aarch64.whl", "size_bytes": 3368758, "sha256": "e325f1e330c869b57bd124061a611ff09ff681fa0385be9c90b62c17025a4162" },
+      { "filename": "moge-2.0.0+modly-py3-none-any.whl", "size_bytes": 114628, "sha256": "d940829b7c4a4b75987aedb37fdedcdde8f1b96e4b35423a142fd42c2a935888" },
+      { "filename": "naf-0.1.0+modly-py3-none-any.whl", "size_bytes": 25494, "sha256": "843789db29075a9dd7fcd37564d0bdf39ac43f0df5a5ab2c5de0d952bc24b892" },
+      { "filename": "natten-0.21.0-cp312-cp312-linux_aarch64.whl", "size_bytes": 31985582, "sha256": "76226b27bddcec9754c50da57b6f9199ddf57dcf2c24cd6de71aaceaee2d2f2a" },
+      { "filename": "nvdiffrast-0.4.0-cp312-cp312-linux_aarch64.whl", "size_bytes": 16687913, "sha256": "899aedf85ee0789708f13267f199cf86fd124e2c0f76e499ba2500263d19cc74" },
+      { "filename": "nvdiffrec_render-0.0.0-cp312-cp312-linux_aarch64.whl", "size_bytes": 4263267, "sha256": "5d3f71a00c4692440db72027a9297a1d1244a267a001b7685e7e0e0cdd3deb4c" },
+      { "filename": "o_voxel-0.0.1-cp312-cp312-linux_aarch64.whl", "size_bytes": 17863634, "sha256": "371ec8e3dfae94c0986568a54124004944ea38c4d142f8180d70242e962a5228" },
+      { "filename": "pipeline-1.0.0+modly-py3-none-any.whl", "size_bytes": 8100, "sha256": "ed17a6e7ff975eb79ce54d5dd66f838d3f8376c1c90f3e40d34fe00194384743" },
+      { "filename": "pixal3d_core-0.1.0+modly-py3-none-any.whl", "size_bytes": 200980, "sha256": "c46502c5ed195351efd150a229856095119435d356511f9343f71b8974a872f2" },
+      { "filename": "utils3d-1.3+modly.headless-py3-none-any.whl", "size_bytes": 130572, "sha256": "8a5e39b0c8bc0163c1cfe66c03d12215acafc78c10dbbeaccf5921d09699a9b2" }
+    ]
+  },
+  "failure_policy": {
+    "unsupported_lane": "fail",
+    "ambiguous_lane": "fail",
+    "checksum_mismatch": "fail",
+    "network": "retryable",
+    "auth_required": "auth_required"
+  }
+}

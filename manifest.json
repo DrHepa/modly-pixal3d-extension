@@ -117,6 +117,10 @@
     "venv_dir": "venv",
     "default_downloads": false,
     "default_installs": true,
-    "wheelhouse": "wheels"
+    "wheelhouse": "wheels",
+    "wheelhouse_manifest": {
+      "path": "wheelhouse.manifest.json",
+      "schema_version": "release-wheelhouse/v1"
+    }
   }
 }
