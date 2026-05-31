@@ -64,5 +64,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pixal3d-wheelhouse-${{ env.WHEELHOUSE_LANE }}
-          path: dist/wheelhouse/*
+          path: build/wheelhouse/${{ env.WHEELHOUSE_LANE }}/dist/wheelhouse/*
           if-no-files-found: error

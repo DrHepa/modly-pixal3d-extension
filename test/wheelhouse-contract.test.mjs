@@ -126,6 +126,7 @@ test('linux x64 cp312 cuda124 wheelhouse workflow is documented but not added to
   assert.match(workflow, /LIBRARY_PATH="\$\{CUDA_HOME\}\/lib64:\$\{CUDA_HOME\}\/lib64\/stubs:/)
   assert.match(workflow, /LD_LIBRARY_PATH="\$\{CUDA_HOME\}\/lib64:\$\{CUDA_HOME\}\/lib64\/stubs:/)
   assert.match(workflow, /native-sources\.linux-x64-cp312-cuda124\.env\.example/)
+  assert.match(workflow, /build\/wheelhouse\/\$\{\{ env\.WHEELHOUSE_LANE \}\}\/dist\/wheelhouse\/\*/)
   assert.match(workflow, /fail clearly/i)
   assert.match(workflow, /Do not upload placeholders/i)
   assert.doesNotMatch(workflow, /upload-release-asset/i)
