@@ -124,10 +124,14 @@ PY
 configure_cuda_build_archs() {
   export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-8.0;8.6;8.9;9.0}"
   # NATTEN uses its own semicolon-separated arch variable and builds a
-  # py3-none-any wheel on GPU-less CI runners unless this is set.
-  export NATTEN_CUDA_ARCH="${NATTEN_CUDA_ARCH:-${TORCH_CUDA_ARCH_LIST}}"
+  # py3-none-any wheel on GPU-less CI runners unless this is set. Keep its
+  # CI default narrow: building NATTEN for every runtime arch can consume the
+  # full hosted-runner timeout before any other native package is attempted.
+  export NATTEN_CUDA_ARCH="${NATTEN_CUDA_ARCH:-${WHEELHOUSE_NATTEN_CUDA_ARCH:-8.9}}"
+  export WHEELHOUSE_NATIVE_BUILD_TIMEOUT="${WHEELHOUSE_NATIVE_BUILD_TIMEOUT:-60m}"
   echo "Using TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}" >&2
   echo "Using NATTEN_CUDA_ARCH=${NATTEN_CUDA_ARCH}" >&2
+  echo "Using WHEELHOUSE_NATIVE_BUILD_TIMEOUT=${WHEELHOUSE_NATIVE_BUILD_TIMEOUT}" >&2
 }
 
 install_build_prerequisites() {
@@ -231,8 +235,14 @@ build_native_wheel() {
     return 0
   fi
 
-  echo "Building ${package} from ${build_dir}" >&2
-  if ! python3 -m pip wheel "${build_dir}" --no-deps --no-build-isolation --wheel-dir "${wheelhouse_dir}" >&2; then
+  echo "Building ${package} from ${build_dir} with timeout ${WHEELHOUSE_NATIVE_BUILD_TIMEOUT}" >&2
+  if timeout "${WHEELHOUSE_NATIVE_BUILD_TIMEOUT}" python3 -m pip wheel "${build_dir}" --no-deps --no-build-isolation --wheel-dir "${wheelhouse_dir}" >&2; then
+    :
+  else
+    local exit_code=$?
+    if [[ "${exit_code}" == "124" ]]; then
+      echo "${package}: native wheel build exceeded ${WHEELHOUSE_NATIVE_BUILD_TIMEOUT}." >&2
+    fi
     printf 'build_failed\n'
     return 0
   fi

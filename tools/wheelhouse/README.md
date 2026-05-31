@@ -40,6 +40,8 @@ The candidate recipe in `build-linux-x64-cp312-cuda124.sh` is staged deliberatel
 3. Copy the existing pure Python wheels from `wheels/`: `pixal3d_core`, `pipeline`, `moge`, `naf`, and `utils3d`.
 4. Build native wheels only from explicit source directories or explicit source URLs/refs. The script fails with `missing native source directories` instead of creating fake wheels.
 
+Hosted Linux x64 builds intentionally narrow NATTEN's default arch list to `WHEELHOUSE_NATTEN_CUDA_ARCH=8.9` and wrap each native package build with `WHEELHOUSE_NATIVE_BUILD_TIMEOUT=60m`. NATTEN can otherwise spend the full GitHub Actions job timeout compiling kernels for every CUDA architecture before the remaining native packages are attempted. Maintainers can override both variables for a release-grade rebuild after the probe is healthy.
+
 Native source directories can be supplied with:
 
 ```bash

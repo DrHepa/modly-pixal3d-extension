@@ -143,7 +143,10 @@ test('linux x64 cp312 cuda124 wheelhouse workflow is documented but not added to
   assert.match(script, /O_VOXEL_SOURCE_SUBDIR/)
   assert.match(script, /build_dir_for_package\(\)/)
   assert.match(script, /TORCH_CUDA_ARCH_LIST:-8\.0;8\.6;8\.9;9\.0/)
-  assert.match(script, /NATTEN_CUDA_ARCH:-\$\{TORCH_CUDA_ARCH_LIST\}/)
+  assert.match(script, /WHEELHOUSE_NATTEN_CUDA_ARCH:-8\.9/)
+  assert.match(script, /WHEELHOUSE_NATIVE_BUILD_TIMEOUT:-60m/)
+  assert.match(script, /timeout "\$\{WHEELHOUSE_NATIVE_BUILD_TIMEOUT\}" python3 -m pip wheel/)
+  assert.match(script, /native wheel build exceeded \$\{WHEELHOUSE_NATIVE_BUILD_TIMEOUT\}/)
   assert.match(script, /--no-build-isolation/)
   assert.match(script, /git clone --recurse-submodules/)
   assert.match(script, /git -C "\$\{source_dir\}" submodule update --init --recursive/)
@@ -197,7 +200,8 @@ test('linux x64 build recipe reuses pure wheels and fails clearly when native so
   assert.equal(result.status, 1)
   assert.match(result.stderr, /Missing native source directories for linux-x64-cp312-cuda124/)
   assert.match(result.stderr, /Using TORCH_CUDA_ARCH_LIST=8\.0;8\.6;8\.9;9\.0/)
-  assert.match(result.stderr, /Using NATTEN_CUDA_ARCH=8\.0;8\.6;8\.9;9\.0/)
+  assert.match(result.stderr, /Using NATTEN_CUDA_ARCH=8\.9/)
+  assert.match(result.stderr, /Using WHEELHOUSE_NATIVE_BUILD_TIMEOUT=60m/)
   for (const nativeName of ['natten', 'o_voxel', 'cumesh', 'flex_gemm', 'nvdiffrast', 'nvdiffrec_render']) {
     assert.match(result.stderr, new RegExp(nativeName))
   }
