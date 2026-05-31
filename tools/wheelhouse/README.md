@@ -17,19 +17,22 @@ Use the manifest lane in the filename:
 pixal3d-wheelhouse-v<version>-<os>-<arch>-<python-tag>-<runtime>.zip
 ```
 
-Current MVP lane:
+Published lanes:
 
 ```text
 pixal3d-wheelhouse-v0.1.0-linux-aarch64-cp312-cuda124.zip
+pixal3d-wheelhouse-v0.1.0-linux-x64-cp312-cuda124.zip
 ```
 
-Candidate Linux x64 lane:
+Candidate Windows x64 lane:
 
 ```text
-linux-x64-cp312-cuda124
+windows-x64-cp312-cuda124
 ```
 
-This lane is intentionally **not declared as supported** in `wheelhouse.manifest.json` until a real, checksum-pinned release asset exists. Use the GitHub Actions recipe in `.github/workflows/wheelhouse-linux-x64-cp312-cuda124.yml` to validate build prerequisites on hosted Linux x64. The workflow uses `ubuntu-22.04`, installs CUDA 12.4 `nvcc`/runtime headers via the CUDA toolkit action, then installs cuRAND/cuSPARSE/cuBLAS/cuSOLVER/NVRTC development headers and link libraries with apt (`libcurand-dev-12-4`, `libcusparse-dev-12-4`, `libcublas-dev-12-4`, `libcusolver-dev-12-4`, `cuda-nvrtc-dev-12-4`) before running the build recipe. It also exports `LIBRARY_PATH` and `LD_LIBRARY_PATH` with `${CUDA_HOME}/lib64` plus `${CUDA_HOME}/lib64/stubs` so native extensions can link against `libnvrtc.so` and the hosted-runner `libcuda.so` stub. It must fail clearly when the CUDA 12.4 toolchain or native build prerequisites are unavailable, and it must not publish placeholder archives.
+The Windows lane is intentionally **not declared as supported** in `wheelhouse.manifest.json` until a real, checksum-pinned release asset exists. Use `.github/workflows/wheelhouse-windows-x64-cp312-cuda124.yml` and `build-windows-x64-cp312-cuda124.ps1` to probe exact-stack Windows wheels. Candidate artifacts may include a `WINDOWS-CANDIDATE-NOT-PUBLISHABLE.json` marker while required packages are still unresolved; such artifacts must not be uploaded to the GitHub Release or added to the manifest.
+
+Use the GitHub Actions recipe in `.github/workflows/wheelhouse-linux-x64-cp312-cuda124.yml` to validate Linux x64 rebuilds on hosted Linux. The workflow uses `ubuntu-22.04`, installs CUDA 12.4 `nvcc`/runtime headers via the CUDA toolkit action, then installs cuRAND/cuSPARSE/cuBLAS/cuSOLVER/NVRTC development headers and link libraries with apt (`libcurand-dev-12-4`, `libcusparse-dev-12-4`, `libcublas-dev-12-4`, `libcusolver-dev-12-4`, `cuda-nvrtc-dev-12-4`) before running the build recipe. It also exports `LIBRARY_PATH` and `LD_LIBRARY_PATH` with `${CUDA_HOME}/lib64` plus `${CUDA_HOME}/lib64/stubs` so native extensions can link against `libnvrtc.so` and the hosted-runner `libcuda.so` stub. It must fail clearly when the CUDA 12.4 toolchain or native build prerequisites are unavailable, and it must not publish placeholder archives.
 
 Native source refs for the linux-x64 probe are documented in `native-sources.linux-x64-cp312-cuda124.env.example`. The file uses immutable SHAs and includes confidence notes for each package. The workflow loads this file explicitly; source fetching still requires `WHEELHOUSE_ALLOW_SOURCE_FETCH=1` from the env file, so local runs remain opt-in. `O_VOXEL_SOURCE_SUBDIR=o-voxel` is required because `o_voxel` lives inside the TRELLIS.2 repository rather than in its own top-level repo.
 
@@ -42,7 +45,7 @@ The candidate recipe in `build-linux-x64-cp312-cuda124.sh` is staged deliberatel
 
 The Linux x64 base wheelhouse deliberately does **not** block on NATTEN/libnatten. NATTEN is only needed for strict NAF; setup probes `natten.HAS_LIBNATTEN` and must keep/fall back to non-strict NAF unless that value is `True`. Maintainers can opt into a strict NATTEN attempt with `WHEELHOUSE_BUILD_STRICT_NATTEN=1`, but a failed optional NATTEN build does not invalidate the base Pixal3D wheelhouse. Hosted Linux x64 builds intentionally narrow NATTEN's optional default arch list to `WHEELHOUSE_NATTEN_CUDA_ARCH=8.9` and wrap each native package build with `WHEELHOUSE_NATIVE_BUILD_TIMEOUT=60m`. NATTEN can otherwise spend the full GitHub Actions job timeout compiling kernels for every CUDA architecture before the remaining native packages are attempted.
 
-Windows wheelhouses must follow the exact-stack policy used by Pixal3D-ComfyUI references: Python ABI, PyTorch minor, CUDA minor, platform tag, and GPU architecture/SM coverage must all match. Do not publish or auto-install generic Windows NATTEN wheels; use curated exact-stack artifacts only, and keep fallback NAF first-class when `HAS_LIBNATTEN` is unavailable.
+Windows wheelhouses must follow the exact-stack policy used by Pixal3D-ComfyUI references: Python ABI, PyTorch minor, CUDA minor, platform tag, and GPU architecture/SM coverage must all match. For the `windows-x64-cp312-cuda124` candidate, the baseline stack is Python `cp312`, PyTorch `2.6`, CUDA `12.4`, and `win_amd64`. Do not publish or auto-install generic Windows NATTEN wheels; use curated exact-stack artifacts only, and keep fallback NAF first-class when `HAS_LIBNATTEN` is unavailable.
 
 Native source directories can be supplied with:
 

@@ -25,7 +25,12 @@ It does **not** download model weights and does **not** run generation.
 
 The vendored `wheels/` fallback is intentionally retained for migration/rollback. It is used only after retryable release access failures such as network/auth errors and only when every wheel is lane-compatible and hash-verified. Setup must not silently fall back to PyPI for native packages.
 
-Current wheelhouse targets Linux `aarch64` / Python `cp312` / `cuda124` for native wheels.
+Current published wheelhouse targets:
+
+- Linux `aarch64` / Python `cp312` / `cuda124`
+- Linux `x64` / Python `cp312` / `cuda124`
+
+Windows `x64` / Python `cp312` / `cuda124` is under candidate investigation only; it is not declared as a supported manifest lane until a real checksum-pinned release asset exists.
 
 Included packaged dependencies:
 
@@ -34,12 +39,13 @@ Included packaged dependencies:
 - `naf==0.1.0+modly`
 - `utils3d==1.3+modly.headless`
 - `pipeline==1.0.0+modly`
-- `natten==0.21.0`
 - `o-voxel==0.0.1`
 - `cumesh==0.0.1`
 - `flex-gemm==1.0.0`
 - `nvdiffrast==0.4.0`
 - `nvdiffrec-render==0.0.0`
+
+`natten`/`libnatten` is intentionally optional. Setup probes `natten.HAS_LIBNATTEN` and strict NAF is available only when that value is `True`; otherwise the extension must use the NAF fallback path.
 
 ## Modly contract
 
