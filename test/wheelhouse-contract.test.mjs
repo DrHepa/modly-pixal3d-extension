@@ -240,8 +240,9 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.ok(result.x64[0].includes('torch==2.6.0+cu124'))
   assert.ok(result.x64[0].includes('torchvision==0.21.0+cu124'))
   assert.deepEqual(result.x64[1].slice(2), ['pip', 'install', '-r', 'requirements.txt'])
-  assert.deepEqual(result.x64[2].slice(2, 7), ['pip', 'install', '--no-index', '--find-links', result.x64[2][6]])
-  assert.deepEqual(result.aarch64[0].slice(2, 7), ['pip', 'install', '--no-cache-dir', '--retries', '5'])
+  assert.deepEqual(result.x64[2].slice(2, 8), ['pip', 'install', '--no-index', '--no-deps', '--find-links', result.x64[2][7]])
+  assert.deepEqual(result.aarch64[0].slice(2, 8), ['pip', 'install', '--no-cache-dir', '--retries', '5', '--timeout'])
+  assert.ok(result.aarch64[0].includes('--no-deps'))
   assert.ok(result.aarch64[0].some((arg) => /torch-2\.6\.0-cp312-cp312-manylinux_2_28_aarch64\.whl#sha256=/.test(arg)))
   assert.ok(result.aarch64[0].some((arg) => /torchvision-0\.21\.0-1-cp312-cp312-manylinux_2_28_aarch64\.whl#sha256=/.test(arg)))
   assert.ok(!result.aarch64[0].includes('torch==2.6.0'))
@@ -762,7 +763,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
   assert.equal(result.status, 'installed')
   assert.match(result.wheelhouse, /linux-aarch64-cp312-cuda124\/extracted$/)
-  assert.deepEqual(result.commands[2].slice(2, 7), ['pip', 'install', '--no-index', '--find-links', result.wheelhouse])
+  assert.deepEqual(result.commands[2].slice(2, 8), ['pip', 'install', '--no-index', '--no-deps', '--find-links', result.wheelhouse])
   assert.ok(result.commands[2].includes('pixal3d-core==0.1.0+modly'))
   assert.ok(!result.commands[2].includes('natten==0.21.0'))
 })
@@ -797,6 +798,14 @@ with tempfile.TemporaryDirectory() as tmp:
   }
   assert.ok(!result.packages.includes('o-voxel==0.0.1'))
   assert.ok(!result.packages.includes('flex-gemm==1.0.0'))
+})
+
+test('requirements install supplies scipy before no-deps local wheelhouse install', () => {
+  const requirements = readFileSync(join(repoRoot, 'requirements.txt'), 'utf8')
+  assert.match(requirements, /^scipy$/m)
+  for (const dependency of ['filelock', 'fsspec', 'jinja2', 'networkx', 'numpy', 'sympy==1.13.1', 'typing-extensions>=4.10.0']) {
+    assert.match(requirements, new RegExp(`^${dependency.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'))
+  }
 })
 
 test('setup reports NATTEN strict NAF availability separately from base wheelhouse install', () => {
@@ -973,7 +982,7 @@ test('wheelhouse docs separate end-user release assets from maintainer build and
 
   assert.match(readme, /release-backed wheelhouse/i)
   assert.match(readme, /vendored `wheels\/` fallback/i)
-  assert.match(readme, /--no-index --find-links/)
+  assert.match(readme, /--no-index --find-links|--no-index --no-deps --find-links/)
   assert.match(readme, /Linux `x64` \/ Python `cp312` \/ `cuda124`/)
   assert.match(readme, /Windows `x64` \/ Python `cp312` \/ `cuda124`/)
   assert.match(readme, /Windows `x64` \/ Python `cp311` \/ `cuda124`/)

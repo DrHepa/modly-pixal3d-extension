@@ -1,9 +1,17 @@
 pillow
+filelock
+fsspec
 imageio
 imageio-ffmpeg
+jinja2
+networkx
+numpy
 tqdm
 easydict
 opencv-python-headless
+scipy
+sympy==1.13.1
+typing-extensions>=4.10.0
 trimesh
 transformers==4.57.3
 safetensors>=0.8.0rc0

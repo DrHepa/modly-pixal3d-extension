@@ -62,6 +62,7 @@ WINDOWS_LOCAL_WHEEL_PACKAGES = [
 OPTIONAL_NATTEN_PACKAGES = ["natten==0.21.0"]
 PYTORCH_CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu124"
 PYTORCH_PIP_FLAGS = ["--no-cache-dir", "--retries", "5", "--timeout", "60"]
+PYTORCH_DIRECT_PIP_FLAGS = [*PYTORCH_PIP_FLAGS, "--no-deps"]
 PYTORCH_CUDA_PACKAGES = ["torch==2.6.0+cu124", "torchvision==0.21.0+cu124"]
 PYTORCH_AARCH64_PACKAGES = [
     "https://files.pythonhosted.org/packages/01/d6/455ab3fbb2c61c71c8842753b566012e1ed111e7a4c82e0e1c20d0c76b62/torch-2.6.0-cp312-cp312-manylinux_2_28_aarch64.whl#sha256=b789069020c5588c70d5c2158ac0aa23fd24a028f34a8b4fcb8fcb4d7efcf5fb",
@@ -147,7 +148,7 @@ def _install_prepare_dependencies(workspace_root: Path, *, wheelhouse_path: Path
     commands = [
         torch_install_command,
         [str(venv_python), "-m", "pip", "install", "-r", "requirements.txt"],
-        [str(venv_python), "-m", "pip", "install", "--no-index", "--find-links", str(wheelhouse), *local_wheel_packages],
+        [str(venv_python), "-m", "pip", "install", "--no-index", "--no-deps", "--find-links", str(wheelhouse), *local_wheel_packages],
     ]
     if _wheelhouse_contains_natten(wheelhouse):
         commands.append([str(venv_python), "-m", "pip", "install", "--no-index", "--find-links", str(wheelhouse), *OPTIONAL_NATTEN_PACKAGES])
@@ -186,7 +187,7 @@ def _torch_install_command_for_wheelhouse(venv_python: Path, wheelhouse: Path) -
         return [str(venv_python), "-m", "pip", "install", *PYTORCH_PIP_FLAGS, "--index-url", PYTORCH_CUDA_INDEX_URL, *PYTORCH_CUDA_PACKAGES]
     if "linux-x64-cp312-cuda124" in wheelhouse_text:
         return [str(venv_python), "-m", "pip", "install", *PYTORCH_PIP_FLAGS, "--index-url", PYTORCH_CUDA_INDEX_URL, *PYTORCH_CUDA_PACKAGES]
-    return [str(venv_python), "-m", "pip", "install", *PYTORCH_PIP_FLAGS, *PYTORCH_AARCH64_PACKAGES]
+    return [str(venv_python), "-m", "pip", "install", *PYTORCH_DIRECT_PIP_FLAGS, *PYTORCH_AARCH64_PACKAGES]
 
 
 def _natten_runtime_status(venv_python: Path, workspace_root: Path) -> dict[str, Any]:
