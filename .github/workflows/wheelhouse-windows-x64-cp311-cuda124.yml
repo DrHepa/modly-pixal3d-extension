@@ -1,0 +1,34 @@
+name: Wheelhouse Windows x64 cp311 cuda124
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-wheelhouse:
+    name: Build windows-x64-cp311-cuda124 wheelhouse candidate
+    runs-on: windows-latest
+    env:
+      WHEELHOUSE_LANE: windows-x64-cp311-cuda124
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build candidate wheelhouse archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host 'Building windows-x64-cp311-cuda124 candidate from exact-stack wheels.'
+          Write-Host 'This lane matches Modly python-build-standalone 3.11.9 install contract.'
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools/wheelhouse/build-windows-x64-cp312-cuda124.ps1 -Lane windows-x64-cp311-cuda124
+
+      - name: Upload candidate artifact only
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixal3d-wheelhouse-${{ env.WHEELHOUSE_LANE }}-candidate
+          path: build/wheelhouse/${{ env.WHEELHOUSE_LANE }}/dist/wheelhouse/*
+          if-no-files-found: error

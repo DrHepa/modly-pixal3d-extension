@@ -13,9 +13,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if ($Lane -ne "windows-x64-cp312-cuda124") {
+if (($Lane -ne "windows-x64-cp312-cuda124") -and ($Lane -ne "windows-x64-cp311-cuda124")) {
     throw "Unsupported Windows candidate lane: $Lane"
 }
+
+$PythonTag = if ($Lane -match "cp311") { "cp311" } else { "cp312" }
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 if ([string]::IsNullOrWhiteSpace($BuildRoot)) {
@@ -34,42 +36,42 @@ $archivePath = Join-Path $distDir $archiveName
 Remove-Item -Recurse -Force $workDir, $wheelhouseDir, $distDir -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $workDir, $wheelhouseDir, $distDir | Out-Null
 
-$exactStackPattern = "cu124torch2.6-cp312-cp312-win_amd64"
+$exactStackPattern = "cu124torch2.6-$PythonTag-$PythonTag-win_amd64"
 $externalWheels = @(
     @{
         Name = "flex_gemm_ap"
-        Url = "https://github.com/PozzettiAndrea/cuda-wheels/releases/download/flex_gemm_ap-latest/flex_gemm_ap-1.0.0%2Bcu124torch2.6-cp312-cp312-win_amd64.whl"
-        Filename = "flex_gemm_ap-1.0.0+cu124torch2.6-cp312-cp312-win_amd64.whl"
+        Url = "https://github.com/PozzettiAndrea/cuda-wheels/releases/download/flex_gemm_ap-latest/flex_gemm_ap-1.0.0%2Bcu124torch2.6-$PythonTag-$PythonTag-win_amd64.whl"
+        Filename = "flex_gemm_ap-1.0.0+cu124torch2.6-$PythonTag-$PythonTag-win_amd64.whl"
     },
     @{
         Name = "cumesh_vb"
-        Url = "https://github.com/PozzettiAndrea/cuda-wheels/releases/download/cumesh_vb-latest/cumesh_vb-1.0%2Bcu124torch2.6-cp312-cp312-win_amd64.whl"
-        Filename = "cumesh_vb-1.0+cu124torch2.6-cp312-cp312-win_amd64.whl"
+        Url = "https://github.com/PozzettiAndrea/cuda-wheels/releases/download/cumesh_vb-latest/cumesh_vb-1.0%2Bcu124torch2.6-$PythonTag-$PythonTag-win_amd64.whl"
+        Filename = "cumesh_vb-1.0+cu124torch2.6-$PythonTag-$PythonTag-win_amd64.whl"
     },
     @{
         Name = "o_voxel_vb_ap"
-        Url = "https://github.com/PozzettiAndrea/cuda-wheels/releases/download/o_voxel_vb_ap-latest/o_voxel_vb_ap-0.0.1%2Bcu124torch2.6-cp312-cp312-win_amd64.whl"
-        Filename = "o_voxel_vb_ap-0.0.1+cu124torch2.6-cp312-cp312-win_amd64.whl"
+        Url = "https://github.com/PozzettiAndrea/cuda-wheels/releases/download/o_voxel_vb_ap-latest/o_voxel_vb_ap-0.0.1%2Bcu124torch2.6-$PythonTag-$PythonTag-win_amd64.whl"
+        Filename = "o_voxel_vb_ap-0.0.1+cu124torch2.6-$PythonTag-$PythonTag-win_amd64.whl"
     },
     @{
         Name = "drtk"
-        Url = "https://github.com/PozzettiAndrea/cuda-wheels/releases/download/drtk-latest/drtk-0.1.0%2Bcu124torch2.6-cp312-cp312-win_amd64.whl"
-        Filename = "drtk-0.1.0+cu124torch2.6-cp312-cp312-win_amd64.whl"
+        Url = "https://github.com/PozzettiAndrea/cuda-wheels/releases/download/drtk-latest/drtk-0.1.0%2Bcu124torch2.6-$PythonTag-$PythonTag-win_amd64.whl"
+        Filename = "drtk-0.1.0+cu124torch2.6-$PythonTag-$PythonTag-win_amd64.whl"
     },
     @{
         Name = "flash_attn"
-        Url = "https://github.com/PozzettiAndrea/cuda-wheels/releases/download/flash_attn-latest/flash_attn-2.8.3%2Bcu124torch2.6-cp312-cp312-win_amd64.whl"
-        Filename = "flash_attn-2.8.3+cu124torch2.6-cp312-cp312-win_amd64.whl"
+        Url = "https://github.com/PozzettiAndrea/cuda-wheels/releases/download/flash_attn-latest/flash_attn-2.8.3%2Bcu124torch2.6-$PythonTag-$PythonTag-win_amd64.whl"
+        Filename = "flash_attn-2.8.3+cu124torch2.6-$PythonTag-$PythonTag-win_amd64.whl"
     },
     @{
         Name = "nvdiffrast"
-        Url = "https://github.com/PozzettiAndrea/cuda-wheels/releases/download/nvdiffrast-latest/nvdiffrast-0.4.0%2Bcu124torch2.6-cp312-cp312-win_amd64.whl"
-        Filename = "nvdiffrast-0.4.0+cu124torch2.6-cp312-cp312-win_amd64.whl"
+        Url = "https://github.com/PozzettiAndrea/cuda-wheels/releases/download/nvdiffrast-latest/nvdiffrast-0.4.0%2Bcu124torch2.6-$PythonTag-$PythonTag-win_amd64.whl"
+        Filename = "nvdiffrast-0.4.0+cu124torch2.6-$PythonTag-$PythonTag-win_amd64.whl"
     },
     @{
         Name = "nvdiffrec_render"
-        Url = "https://github.com/PozzettiAndrea/cuda-wheels/releases/download/nvdiffrec_render-latest/nvdiffrec_render-0.0.1%2Bcu124torch2.6-cp312-cp312-win_amd64.whl"
-        Filename = "nvdiffrec_render-0.0.1+cu124torch2.6-cp312-cp312-win_amd64.whl"
+        Url = "https://github.com/PozzettiAndrea/cuda-wheels/releases/download/nvdiffrec_render-latest/nvdiffrec_render-0.0.1%2Bcu124torch2.6-$PythonTag-$PythonTag-win_amd64.whl"
+        Filename = "nvdiffrec_render-0.0.1+cu124torch2.6-$PythonTag-$PythonTag-win_amd64.whl"
     }
 )
 
@@ -115,7 +117,7 @@ $metadata = [ordered]@{
     wheelhouse_version = $WheelhouseVersion
     status = $(if ($unresolvedRequired.Count -eq 0) { "candidate_complete" } else { "candidate_incomplete" })
     exact_stack = [ordered]@{
-        python_tag = "cp312"
+        python_tag = $PythonTag
         torch = "2.6"
         cuda = "cu124"
         platform_tag = "win_amd64"
