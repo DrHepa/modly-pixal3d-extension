@@ -14,6 +14,7 @@ PIXAL3D_MODEL_SOURCE = "TencentARC/Pixal3D"
 SUPPORTED_RUNTIME_LANES = {
     "linux-aarch64-cp312-cuda124",
     "linux-x64-cp312-cuda124",
+    "windows-x64-cp311-cuda124",
     "windows-x64-cp312-cuda124",
 }
 SUPPORTED_RUNTIME_LANE = "linux-aarch64-cp312-cuda124"

@@ -34,7 +34,7 @@ test('wheelhouse manifest is pinned, checksum-verifiable, and selects supported 
   assert.equal(manifest.release.immutable_commit, '47e78252f5cb185623ba3aad564d879d30809bb6')
   assert.notEqual(manifest.release.tag, 'latest')
   assert.match(manifest.release.immutable_commit, /^[0-9a-f]{40}$/)
-  assert.equal(manifest.assets.length, 3)
+  assert.equal(manifest.assets.length, 4)
   for (const asset of manifest.assets) {
     assert.match(asset.sha256, /^[0-9a-f]{64}$/)
     assert.ok(asset.size_bytes > 0)
@@ -52,6 +52,13 @@ test('wheelhouse manifest is pinned, checksum-verifiable, and selects supported 
   assert.ok(windowsAsset.packages.includes('nvdiffrec-render'))
   assert.ok(!windowsAsset.packages.includes('natten'))
   assert.match(windowsAsset.optional_packages[0].reason, /HAS_LIBNATTEN/)
+  const windowsCp311Asset = manifest.assets.find((asset) => asset.id === 'windows-x64-cp311-cuda124')
+  assert.ok(windowsCp311Asset)
+  assert.equal(windowsCp311Asset.filename, 'pixal3d-wheelhouse-v0.1.0-windows-x64-cp311-cuda124.zip')
+  assert.equal(windowsCp311Asset.size_bytes, 126801335)
+  assert.equal(windowsCp311Asset.sha256, '25469e3a7e36c92a52870161ac12330d6209959cfe0db63fee659a00c37f4af0')
+  assert.ok(windowsCp311Asset.packages.includes('flex-gemm-ap'))
+  assert.ok(!windowsCp311Asset.packages.includes('natten'))
   assert.equal(manifest.fallback.vendored_wheels, 'wheels/')
   assert.equal(manifest.fallback.require_hashes, true)
   assert.equal(manifest.fallback.wheels.length, 11)
@@ -103,6 +110,22 @@ print(json.dumps({'asset_id': asset['id'], 'cache_key': asset['cache_key'], 'has
     cache_key: 'pixal3d/0.1.0/windows-x64-cp312-cuda124',
     has_natten: false,
   })
+
+  const selectedWindowsCp311 = runPython(`
+import json
+from pathlib import Path
+from modly_wheelhouse import load_manifest, select_asset, validate_manifest
+manifest = load_manifest(Path('wheelhouse.manifest.json'))
+validate_manifest(manifest)
+asset = select_asset(manifest, {'os':'windows','arch':'x64','python_tag':'cp311','accelerator_lane':'cuda124'})
+print(json.dumps({'asset_id': asset['id'], 'cache_key': asset['cache_key'], 'has_natten': 'natten' in asset.get('packages', [])}))
+`)
+
+  assert.deepEqual(selectedWindowsCp311, {
+    asset_id: 'windows-x64-cp311-cuda124',
+    cache_key: 'pixal3d/0.1.0/windows-x64-cp311-cuda124',
+    has_natten: false,
+  })
 })
 
 test('wheelhouse lane helpers support Windows venv Python paths, win_amd64 tags, and consistent cuda124 runtime lanes', () => {
@@ -142,8 +165,8 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.win_native_compatible, true)
   assert.equal(result.win_x86_incompatible, false)
   assert.equal(result.linux_lane, 'linux-x64-cp312-cuda124')
-  assert.deepEqual(result.readiness_supported, ['linux-aarch64-cp312-cuda124', 'linux-x64-cp312-cuda124', 'windows-x64-cp312-cuda124'])
-  assert.deepEqual(result.runtime_supported, ['linux-aarch64-cp312-cuda124', 'linux-x64-cp312-cuda124', 'windows-x64-cp312-cuda124'])
+  assert.deepEqual(result.readiness_supported, ['linux-aarch64-cp312-cuda124', 'linux-x64-cp312-cuda124', 'windows-x64-cp311-cuda124', 'windows-x64-cp312-cuda124'])
+  assert.deepEqual(result.runtime_supported, ['linux-aarch64-cp312-cuda124', 'linux-x64-cp312-cuda124', 'windows-x64-cp311-cuda124', 'windows-x64-cp312-cuda124'])
 })
 
 test('logical storage paths accept Windows separators without allowing escapes', () => {
@@ -229,11 +252,12 @@ test('linux x64 cp312 cuda124 wheelhouse workflow is documented and manifest-bac
   const scriptPath = join(repoRoot, 'tools', 'wheelhouse', 'build-linux-x64-cp312-cuda124.sh')
   const recipe = readFileSync(join(repoRoot, 'tools', 'wheelhouse', 'README.md'), 'utf8')
 
-  assert.deepEqual(manifest.assets.map((asset) => asset.id), [
+  assert.deepEqual([...manifest.assets.map((asset) => asset.id)].sort(), [
     'linux-aarch64-cp312-cuda124',
     'linux-x64-cp312-cuda124',
+    'windows-x64-cp311-cuda124',
     'windows-x64-cp312-cuda124',
-  ])
+  ].sort())
   assert.equal(existsSync(workflowPath), true)
 
   const workflow = readFileSync(workflowPath, 'utf8')
@@ -341,7 +365,8 @@ test('windows x64 cp312 cuda124 workflow is exact-stack and manifest-backed', ()
 
   assert.match(recipe, /Windows x64 lane/)
   assert.doesNotMatch(recipe, /Windows lane is intentionally \*\*not declared as supported\*\*/)
-  assert.match(recipe, /Python `cp312`, PyTorch `2\.6`, CUDA `12\.4`, and `win_amd64`/)
+  assert.match(recipe, /python-build-standalone `3\.11\.9`/)
+  assert.match(recipe, /windows-x64-cp311-cuda124` is the primary GitHub-install lane/)
   assert.match(recipe, /WINDOWS-CANDIDATE\.json/)
   assert.match(recipe, /`nvdiffrast`/)
   assert.match(recipe, /`nvdiffrec_render`/)
@@ -509,7 +534,7 @@ print(json.dumps(setup.run_setup(['--json'])))
     status: 'available',
     release_tag: 'wheelhouse-v0.1.0',
     wheelhouse_version: '0.1.0',
-    asset_count: 3,
+    asset_count: 4,
   })
 })
 
@@ -926,6 +951,7 @@ test('wheelhouse docs separate end-user release assets from maintainer build and
   assert.match(readme, /--no-index --find-links/)
   assert.match(readme, /Linux `x64` \/ Python `cp312` \/ `cuda124`/)
   assert.match(readme, /Windows `x64` \/ Python `cp312` \/ `cuda124`/)
+  assert.match(readme, /Windows `x64` \/ Python `cp311` \/ `cuda124`/)
   assert.match(readme, /o-voxel-vb-ap/)
   assert.doesNotMatch(readme, /- `natten==0\.21\.0`/)
   assert.match(readme, /natten\.HAS_LIBNATTEN/)

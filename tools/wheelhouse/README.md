@@ -22,6 +22,7 @@ Published lanes:
 ```text
 pixal3d-wheelhouse-v0.1.0-linux-aarch64-cp312-cuda124.zip
 pixal3d-wheelhouse-v0.1.0-linux-x64-cp312-cuda124.zip
+pixal3d-wheelhouse-v0.1.0-windows-x64-cp311-cuda124.zip
 pixal3d-wheelhouse-v0.1.0-windows-x64-cp312-cuda124.zip
 ```
 
@@ -46,7 +47,7 @@ The candidate recipe in `build-linux-x64-cp312-cuda124.sh` is staged deliberatel
 
 The Linux x64 base wheelhouse deliberately does **not** block on NATTEN/libnatten. NATTEN is only needed for strict NAF; setup probes `natten.HAS_LIBNATTEN` and must keep/fall back to non-strict NAF unless that value is `True`. Maintainers can opt into a strict NATTEN attempt with `WHEELHOUSE_BUILD_STRICT_NATTEN=1`, but a failed optional NATTEN build does not invalidate the base Pixal3D wheelhouse. Hosted Linux x64 builds intentionally narrow NATTEN's optional default arch list to `WHEELHOUSE_NATTEN_CUDA_ARCH=8.9` and wrap each native package build with `WHEELHOUSE_NATIVE_BUILD_TIMEOUT=60m`. NATTEN can otherwise spend the full GitHub Actions job timeout compiling kernels for every CUDA architecture before the remaining native packages are attempted.
 
-Windows wheelhouses must follow the exact-stack policy used by Pixal3D-ComfyUI references: Python ABI, PyTorch minor, CUDA minor, platform tag, and GPU architecture/SM coverage must all match. For the `windows-x64-cp312-cuda124` lane, the baseline stack is Python `cp312`, PyTorch `2.6`, CUDA `12.4`, and `win_amd64`. The base lane uses exact-stack Pozzetti wheels for `flex_gemm_ap`, `cumesh_vb`, `o_voxel_vb_ap`, `drtk`, `flash_attn`, `nvdiffrast`, and `nvdiffrec_render`. Do not publish or auto-install generic Windows NATTEN wheels; use curated exact-stack artifacts only, and keep fallback NAF first-class when `HAS_LIBNATTEN` is unavailable.
+Windows wheelhouses must follow the exact-stack policy used by Pixal3D-ComfyUI references: Python ABI, PyTorch minor, CUDA minor, platform tag, and GPU architecture/SM coverage must all match. Modly's packaged app currently embeds python-build-standalone `3.11.9`, so `windows-x64-cp311-cuda124` is the primary GitHub-install lane; `windows-x64-cp312-cuda124` remains available for development environments running Python 3.12. The base lanes use exact-stack Pozzetti wheels for `flex_gemm_ap`, `cumesh_vb`, `o_voxel_vb_ap`, `drtk`, `flash_attn`, `nvdiffrast`, and `nvdiffrec_render`. Do not publish or auto-install generic Windows NATTEN wheels; use curated exact-stack artifacts only, and keep fallback NAF first-class when `HAS_LIBNATTEN` is unavailable.
 
 Native source directories can be supplied with:
 

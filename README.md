@@ -29,6 +29,7 @@ Current published wheelhouse targets:
 
 - Linux `aarch64` / Python `cp312` / `cuda124`
 - Linux `x64` / Python `cp312` / `cuda124`
+- Windows `x64` / Python `cp311` / `cuda124` — Modly packaged app install contract
 - Windows `x64` / Python `cp312` / `cuda124`
 
 Included packaged dependencies:
