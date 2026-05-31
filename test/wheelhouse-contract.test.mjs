@@ -20,7 +20,7 @@ function runPython(source) {
   return JSON.parse(result.stdout)
 }
 
-test('wheelhouse manifest is pinned, checksum-verifiable, and selects the linux aarch64 cp312 cuda124 lane', () => {
+test('wheelhouse manifest is pinned, checksum-verifiable, and selects supported cp312 cuda124 lanes', () => {
   const extensionManifest = JSON.parse(readFileSync(join(repoRoot, 'manifest.json'), 'utf8'))
   const manifest = JSON.parse(readFileSync(join(repoRoot, 'wheelhouse.manifest.json'), 'utf8'))
 
@@ -34,9 +34,15 @@ test('wheelhouse manifest is pinned, checksum-verifiable, and selects the linux 
   assert.equal(manifest.release.immutable_commit, '47e78252f5cb185623ba3aad564d879d30809bb6')
   assert.notEqual(manifest.release.tag, 'latest')
   assert.match(manifest.release.immutable_commit, /^[0-9a-f]{40}$/)
-  assert.equal(manifest.assets.length, 1)
-  assert.match(manifest.assets[0].sha256, /^[0-9a-f]{64}$/)
-  assert.ok(manifest.assets[0].size_bytes > 0)
+  assert.equal(manifest.assets.length, 2)
+  for (const asset of manifest.assets) {
+    assert.match(asset.sha256, /^[0-9a-f]{64}$/)
+    assert.ok(asset.size_bytes > 0)
+  }
+  const x64Asset = manifest.assets.find((asset) => asset.id === 'linux-x64-cp312-cuda124')
+  assert.ok(x64Asset)
+  assert.ok(!x64Asset.packages.includes('natten'))
+  assert.match(x64Asset.optional_packages[0].reason, /HAS_LIBNATTEN/)
   assert.equal(manifest.fallback.vendored_wheels, 'wheels/')
   assert.equal(manifest.fallback.require_hashes, true)
   assert.equal(manifest.fallback.wheels.length, 11)
@@ -55,6 +61,22 @@ print(json.dumps({'asset_id': asset['id'], 'release_tag': manifest['release']['t
     asset_id: 'linux-aarch64-cp312-cuda124',
     release_tag: 'wheelhouse-v0.1.0',
     cache_key: 'pixal3d/0.1.0/linux-aarch64-cp312-cuda124',
+  })
+
+  const selectedX64 = runPython(`
+import json
+from pathlib import Path
+from modly_wheelhouse import load_manifest, select_asset, validate_manifest
+manifest = load_manifest(Path('wheelhouse.manifest.json'))
+validate_manifest(manifest)
+asset = select_asset(manifest, {'os':'linux','arch':'x64','python_tag':'cp312','accelerator_lane':'cuda124'})
+print(json.dumps({'asset_id': asset['id'], 'cache_key': asset['cache_key'], 'has_natten': 'natten' in asset.get('packages', [])}))
+`)
+
+  assert.deepEqual(selectedX64, {
+    asset_id: 'linux-x64-cp312-cuda124',
+    cache_key: 'pixal3d/0.1.0/linux-x64-cp312-cuda124',
+    has_natten: false,
   })
 })
 
@@ -99,13 +121,13 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.runtime_supported, 'linux-aarch64-cp312-cuda124')
 })
 
-test('linux x64 cp312 cuda124 wheelhouse workflow is documented but not added to supported manifest lanes', () => {
+test('linux x64 cp312 cuda124 wheelhouse workflow is documented and manifest-backed', () => {
   const manifest = JSON.parse(readFileSync(join(repoRoot, 'wheelhouse.manifest.json'), 'utf8'))
   const workflowPath = join(repoRoot, '.github', 'workflows', 'wheelhouse-linux-x64-cp312-cuda124.yml')
   const scriptPath = join(repoRoot, 'tools', 'wheelhouse', 'build-linux-x64-cp312-cuda124.sh')
   const recipe = readFileSync(join(repoRoot, 'tools', 'wheelhouse', 'README.md'), 'utf8')
 
-  assert.deepEqual(manifest.assets.map((asset) => asset.id), ['linux-aarch64-cp312-cuda124'])
+  assert.deepEqual(manifest.assets.map((asset) => asset.id), ['linux-aarch64-cp312-cuda124', 'linux-x64-cp312-cuda124'])
   assert.equal(existsSync(workflowPath), true)
 
   const workflow = readFileSync(workflowPath, 'utf8')
@@ -263,7 +285,7 @@ base = load_manifest(Path('wheelhouse.manifest.json'))
 validate_manifest(base)
 out = {}
 for name, manifest, evidence in [
-    ('unsupported', base, {'os':'linux','arch':'x64','python_tag':'cp312','accelerator_lane':'cuda124'}),
+    ('unsupported', base, {'os':'linux','arch':'x64','python_tag':'cp312','accelerator_lane':'cuda125'}),
     ('ambiguous', copy.deepcopy(base), {'os':'linux','arch':'aarch64','python_tag':'cp312','accelerator_lane':'cuda124'}),
 ]:
     if name == 'ambiguous':
@@ -330,7 +352,7 @@ print(json.dumps(setup.run_setup(['--json'])))
     status: 'available',
     release_tag: 'wheelhouse-v0.1.0',
     wheelhouse_version: '0.1.0',
-    asset_count: 1,
+    asset_count: 2,
   })
 })
 
@@ -699,9 +721,11 @@ with tempfile.TemporaryDirectory() as tmp:
 test('MVP wheelhouse release archive uses stdlib-extractable zip instead of tar.zst', () => {
   const manifest = JSON.parse(readFileSync(join(repoRoot, 'wheelhouse.manifest.json'), 'utf8'))
 
-  assert.equal(manifest.assets[0].compression, 'zip')
-  assert.match(manifest.assets[0].filename, /\.zip$/)
-  assert.doesNotMatch(manifest.assets[0].filename, /\.tar\.zst$/)
+  for (const asset of manifest.assets) {
+    assert.equal(asset.compression, 'zip')
+    assert.match(asset.filename, /\.zip$/)
+    assert.doesNotMatch(asset.filename, /\.tar\.zst$/)
+  }
 })
 
 test('wheelhouse docs separate end-user release assets from maintainer build and publish recipes', () => {

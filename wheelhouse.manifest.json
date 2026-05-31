@@ -34,6 +34,37 @@
         "python_tag": "cp312",
         "accelerator_lane": "cuda124"
       }
+    },
+    {
+      "id": "linux-x64-cp312-cuda124",
+      "filename": "pixal3d-wheelhouse-v0.1.0-linux-x64-cp312-cuda124.zip",
+      "size_bytes": 59696369,
+      "sha256": "653fc38a9e0ab8a43bee4cfd1d078bb1a2465612585731569d61f966e2df1f26",
+      "compression": "zip",
+      "packages": [
+        "utils3d",
+        "pipeline",
+        "moge",
+        "naf",
+        "o-voxel",
+        "cumesh",
+        "flex-gemm",
+        "nvdiffrast",
+        "nvdiffrec-render",
+        "pixal3d-core"
+      ],
+      "optional_packages": [
+        {
+          "name": "natten",
+          "reason": "strict NAF requires natten.HAS_LIBNATTEN == True; no official torch2.6/cu124 linux x64 libnatten wheel is available"
+        }
+      ],
+      "selectors": {
+        "os": "linux",
+        "arch": "x64",
+        "python_tag": "cp312",
+        "accelerator_lane": "cuda124"
+      }
     }
   ],
   "checksums": {
