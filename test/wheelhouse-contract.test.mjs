@@ -146,6 +146,54 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.runtime_supported, 'linux-aarch64-cp312-cuda124')
 })
 
+test('setup.py can be loaded through runpy from a different current directory', () => {
+  const result = spawnSync(python, ['-c', `
+import os, runpy, tempfile
+os.chdir(tempfile.gettempdir())
+runpy.run_path(${JSON.stringify(join(repoRoot, 'setup.py'))}, run_name='pixal3d_setup_probe')
+print('ok')
+`], { encoding: 'utf8' })
+
+  assert.equal(result.status, 0, `STDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}`)
+  assert.match(result.stdout, /ok/)
+})
+
+test('setup installs torch before requirements and native wheelhouse packages', () => {
+  const result = runPython(`
+import json, tempfile
+from pathlib import Path
+import setup
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    venv_python = root / 'venv' / 'bin' / 'python'
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text('#!/usr/bin/env python3\\n', encoding='utf-8')
+    linux_x64 = root / '.modly' / 'cache' / 'wheelhouse' / 'pixal3d' / '0.1.0' / 'linux-x64-cp312-cuda124' / 'extracted'
+    linux_x64.mkdir(parents=True)
+    linux_aarch64 = root / '.modly' / 'cache' / 'wheelhouse' / 'pixal3d' / '0.1.0' / 'linux-aarch64-cp312-cuda124' / 'extracted'
+    linux_aarch64.mkdir(parents=True)
+    calls = []
+    def fake_run(command, *, cwd):
+        calls.append(command)
+        return {'args': command, 'returncode': 0, 'stdout_tail': '{}\\n' if command[1] == '-c' else '', 'stderr_tail': '', 'ok': True}
+    setup._run_setup_command = fake_run
+    setup._install_prepare_dependencies(root, wheelhouse_path=linux_x64)
+    x64_commands = calls[:]
+    calls.clear()
+    setup._install_prepare_dependencies(root, wheelhouse_path=linux_aarch64)
+    print(json.dumps({'x64': x64_commands[:3], 'aarch64': calls[:3]}, sort_keys=True))
+`)
+
+  assert.deepEqual(result.x64[0].slice(2, 5), ['pip', 'install', '--index-url'])
+  assert.ok(result.x64[0].includes('https://download.pytorch.org/whl/cu124'))
+  assert.ok(result.x64[0].includes('torch==2.6.0+cu124'))
+  assert.ok(result.x64[0].includes('torchvision==0.21.0+cu124'))
+  assert.deepEqual(result.x64[1].slice(2), ['pip', 'install', '-r', 'requirements.txt'])
+  assert.deepEqual(result.x64[2].slice(2, 7), ['pip', 'install', '--no-index', '--find-links', result.x64[2][6]])
+  assert.deepEqual(result.aarch64[0].slice(2), ['pip', 'install', 'torch==2.6.0', 'torchvision==0.21.0'])
+})
+
 test('linux x64 cp312 cuda124 wheelhouse workflow is documented and manifest-backed', () => {
   const manifest = JSON.parse(readFileSync(join(repoRoot, 'wheelhouse.manifest.json'), 'utf8'))
   const workflowPath = join(repoRoot, '.github', 'workflows', 'wheelhouse-linux-x64-cp312-cuda124.yml')
@@ -651,9 +699,9 @@ with tempfile.TemporaryDirectory() as tmp:
 
   assert.equal(result.status, 'installed')
   assert.match(result.wheelhouse, /linux-aarch64-cp312-cuda124\/extracted$/)
-  assert.deepEqual(result.commands[1].slice(2, 7), ['pip', 'install', '--no-index', '--find-links', result.wheelhouse])
-  assert.ok(result.commands[1].includes('pixal3d-core==0.1.0+modly'))
-  assert.ok(!result.commands[1].includes('natten==0.21.0'))
+  assert.deepEqual(result.commands[2].slice(2, 7), ['pip', 'install', '--no-index', '--find-links', result.wheelhouse])
+  assert.ok(result.commands[2].includes('pixal3d-core==0.1.0+modly'))
+  assert.ok(!result.commands[2].includes('natten==0.21.0'))
 })
 
 test('setup dependency install uses Windows exact-stack package names for win_amd64 wheelhouses', () => {
@@ -676,7 +724,7 @@ with tempfile.TemporaryDirectory() as tmp:
         return {'args': command, 'returncode': 0, 'stdout_tail': '{}\\n' if command[1] == '-c' else '', 'stderr_tail': '', 'ok': True}
     setup._run_setup_command = fake_run
     result = setup._install_prepare_dependencies(root, wheelhouse_path=wheelhouse)
-    print(json.dumps({'status': result['status'], 'packages': result['local_wheel_packages'], 'install_command': calls[1]}, sort_keys=True))
+    print(json.dumps({'status': result['status'], 'packages': result['local_wheel_packages'], 'install_command': calls[2]}, sort_keys=True))
 `)
 
   assert.equal(result.status, 'installed')

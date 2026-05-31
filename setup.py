@@ -8,6 +8,10 @@ import venv as stdlib_venv
 from pathlib import Path
 from typing import Any
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
 from pixal3d_extension.pipeline_patch import patch_pipeline, restore_pipeline
 from pixal3d_extension.paths import ModlyLayout, resolve_modly_layout, resolve_storage_path
 from pixal3d_extension.readiness import check_readiness, check_setup_readiness
@@ -56,6 +60,9 @@ WINDOWS_LOCAL_WHEEL_PACKAGES = [
 ]
 
 OPTIONAL_NATTEN_PACKAGES = ["natten==0.21.0"]
+PYTORCH_CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu124"
+PYTORCH_CUDA_PACKAGES = ["torch==2.6.0+cu124", "torchvision==0.21.0+cu124"]
+PYTORCH_AARCH64_PACKAGES = ["torch==2.6.0", "torchvision==0.21.0"]
 
 RUNTIME_DIRS = [
     "models/pixal3d/generate",
@@ -132,7 +139,9 @@ def _install_prepare_dependencies(workspace_root: Path, *, wheelhouse_path: Path
         return {"status": "failed", "code": "wheelhouse_missing", "wheelhouse": str(wheelhouse), "commands": []}
 
     local_wheel_packages = _local_wheel_packages_for_wheelhouse(wheelhouse)
+    torch_install_command = _torch_install_command_for_wheelhouse(venv_python, wheelhouse)
     commands = [
+        torch_install_command,
         [str(venv_python), "-m", "pip", "install", "-r", "requirements.txt"],
         [str(venv_python), "-m", "pip", "install", "--no-index", "--find-links", str(wheelhouse), *local_wheel_packages],
     ]
@@ -165,6 +174,15 @@ def _local_wheel_packages_for_wheelhouse(wheelhouse: Path) -> list[str]:
     if any(wheelhouse.glob("*win_amd64.whl")):
         return WINDOWS_LOCAL_WHEEL_PACKAGES
     return LOCAL_WHEEL_PACKAGES
+
+
+def _torch_install_command_for_wheelhouse(venv_python: Path, wheelhouse: Path) -> list[str]:
+    wheelhouse_text = str(wheelhouse).replace("\\", "/")
+    if "windows-x64-cp312-cuda124" in wheelhouse_text or any(wheelhouse.glob("*win_amd64.whl")):
+        return [str(venv_python), "-m", "pip", "install", "--index-url", PYTORCH_CUDA_INDEX_URL, *PYTORCH_CUDA_PACKAGES]
+    if "linux-x64-cp312-cuda124" in wheelhouse_text:
+        return [str(venv_python), "-m", "pip", "install", "--index-url", PYTORCH_CUDA_INDEX_URL, *PYTORCH_CUDA_PACKAGES]
+    return [str(venv_python), "-m", "pip", "install", *PYTORCH_AARCH64_PACKAGES]
 
 
 def _natten_runtime_status(venv_python: Path, workspace_root: Path) -> dict[str, Any]:
