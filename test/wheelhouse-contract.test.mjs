@@ -34,7 +34,7 @@ test('wheelhouse manifest is pinned, checksum-verifiable, and selects supported 
   assert.equal(manifest.release.immutable_commit, '47e78252f5cb185623ba3aad564d879d30809bb6')
   assert.notEqual(manifest.release.tag, 'latest')
   assert.match(manifest.release.immutable_commit, /^[0-9a-f]{40}$/)
-  assert.equal(manifest.assets.length, 2)
+  assert.equal(manifest.assets.length, 3)
   for (const asset of manifest.assets) {
     assert.match(asset.sha256, /^[0-9a-f]{64}$/)
     assert.ok(asset.size_bytes > 0)
@@ -43,6 +43,15 @@ test('wheelhouse manifest is pinned, checksum-verifiable, and selects supported 
   assert.ok(x64Asset)
   assert.ok(!x64Asset.packages.includes('natten'))
   assert.match(x64Asset.optional_packages[0].reason, /HAS_LIBNATTEN/)
+  const windowsAsset = manifest.assets.find((asset) => asset.id === 'windows-x64-cp312-cuda124')
+  assert.ok(windowsAsset)
+  assert.equal(windowsAsset.filename, 'pixal3d-wheelhouse-v0.1.0-windows-x64-cp312-cuda124.zip')
+  assert.equal(windowsAsset.size_bytes, 126804446)
+  assert.equal(windowsAsset.sha256, 'cbb5a853576552bfe62807c793e60db9a64950f2c0f98bce7e0135d5cdf0b5c9')
+  assert.ok(windowsAsset.packages.includes('flex-gemm-ap'))
+  assert.ok(windowsAsset.packages.includes('nvdiffrec-render'))
+  assert.ok(!windowsAsset.packages.includes('natten'))
+  assert.match(windowsAsset.optional_packages[0].reason, /HAS_LIBNATTEN/)
   assert.equal(manifest.fallback.vendored_wheels, 'wheels/')
   assert.equal(manifest.fallback.require_hashes, true)
   assert.equal(manifest.fallback.wheels.length, 11)
@@ -76,6 +85,22 @@ print(json.dumps({'asset_id': asset['id'], 'cache_key': asset['cache_key'], 'has
   assert.deepEqual(selectedX64, {
     asset_id: 'linux-x64-cp312-cuda124',
     cache_key: 'pixal3d/0.1.0/linux-x64-cp312-cuda124',
+    has_natten: false,
+  })
+
+  const selectedWindows = runPython(`
+import json
+from pathlib import Path
+from modly_wheelhouse import load_manifest, select_asset, validate_manifest
+manifest = load_manifest(Path('wheelhouse.manifest.json'))
+validate_manifest(manifest)
+asset = select_asset(manifest, {'os':'windows','arch':'x64','python_tag':'cp312','accelerator_lane':'cuda124'})
+print(json.dumps({'asset_id': asset['id'], 'cache_key': asset['cache_key'], 'has_natten': 'natten' in asset.get('packages', [])}))
+`)
+
+  assert.deepEqual(selectedWindows, {
+    asset_id: 'windows-x64-cp312-cuda124',
+    cache_key: 'pixal3d/0.1.0/windows-x64-cp312-cuda124',
     has_natten: false,
   })
 })
@@ -127,7 +152,11 @@ test('linux x64 cp312 cuda124 wheelhouse workflow is documented and manifest-bac
   const scriptPath = join(repoRoot, 'tools', 'wheelhouse', 'build-linux-x64-cp312-cuda124.sh')
   const recipe = readFileSync(join(repoRoot, 'tools', 'wheelhouse', 'README.md'), 'utf8')
 
-  assert.deepEqual(manifest.assets.map((asset) => asset.id), ['linux-aarch64-cp312-cuda124', 'linux-x64-cp312-cuda124'])
+  assert.deepEqual(manifest.assets.map((asset) => asset.id), [
+    'linux-aarch64-cp312-cuda124',
+    'linux-x64-cp312-cuda124',
+    'windows-x64-cp312-cuda124',
+  ])
   assert.equal(existsSync(workflowPath), true)
 
   const workflow = readFileSync(workflowPath, 'utf8')
@@ -190,13 +219,15 @@ test('linux x64 cp312 cuda124 wheelhouse workflow is documented and manifest-bac
   assert.match(recipe, /native-sources\.linux-x64-cp312-cuda124\.env\.example/)
 })
 
-test('windows x64 cp312 cuda124 candidate workflow is exact-stack and not manifest-backed', () => {
+test('windows x64 cp312 cuda124 workflow is exact-stack and manifest-backed', () => {
   const manifest = JSON.parse(readFileSync(join(repoRoot, 'wheelhouse.manifest.json'), 'utf8'))
   const workflowPath = join(repoRoot, '.github', 'workflows', 'wheelhouse-windows-x64-cp312-cuda124.yml')
   const scriptPath = join(repoRoot, 'tools', 'wheelhouse', 'build-windows-x64-cp312-cuda124.ps1')
   const recipe = readFileSync(join(repoRoot, 'tools', 'wheelhouse', 'README.md'), 'utf8')
 
-  assert.equal(manifest.assets.some((asset) => asset.id === 'windows-x64-cp312-cuda124'), false)
+  const windowsAsset = manifest.assets.find((asset) => asset.id === 'windows-x64-cp312-cuda124')
+  assert.ok(windowsAsset)
+  assert.equal(windowsAsset.filename, 'pixal3d-wheelhouse-v0.1.0-windows-x64-cp312-cuda124.zip')
   assert.equal(existsSync(workflowPath), true)
   assert.equal(existsSync(scriptPath), true)
 
@@ -223,8 +254,8 @@ test('windows x64 cp312 cuda124 candidate workflow is exact-stack and not manife
   assert.match(script, /Compress-Archive/)
   assert.match(script, /Do not add to wheelhouse\.manifest\.json until this candidate archive is uploaded to the pinned release and checksum-pinned/)
 
-  assert.match(recipe, /Candidate Windows x64 lane/)
-  assert.match(recipe, /not declared as supported/i)
+  assert.match(recipe, /Windows x64 lane/)
+  assert.doesNotMatch(recipe, /Windows lane is intentionally \*\*not declared as supported\*\*/)
   assert.match(recipe, /Python `cp312`, PyTorch `2\.6`, CUDA `12\.4`, and `win_amd64`/)
   assert.match(recipe, /WINDOWS-CANDIDATE\.json/)
   assert.match(recipe, /`nvdiffrast`/)
@@ -327,7 +358,6 @@ validate_manifest(base)
 out = {}
 for name, manifest, evidence in [
     ('unsupported', base, {'os':'linux','arch':'x64','python_tag':'cp312','accelerator_lane':'cuda125'}),
-    ('windows', base, {'os':'windows','arch':'x64','python_tag':'cp312','accelerator_lane':'cuda124'}),
     ('ambiguous', copy.deepcopy(base), {'os':'linux','arch':'aarch64','python_tag':'cp312','accelerator_lane':'cuda124'}),
 ]:
     if name == 'ambiguous':
@@ -343,7 +373,6 @@ print(json.dumps(out, sort_keys=True))
   assert.deepEqual(result, {
     ambiguous: { code: 'ambiguous_lane', downloads_started: false, installs_started: false },
     unsupported: { code: 'unsupported_lane', downloads_started: false, installs_started: false },
-    windows: { code: 'unsupported_lane', downloads_started: false, installs_started: false },
   })
 })
 
@@ -395,7 +424,7 @@ print(json.dumps(setup.run_setup(['--json'])))
     status: 'available',
     release_tag: 'wheelhouse-v0.1.0',
     wheelhouse_version: '0.1.0',
-    asset_count: 2,
+    asset_count: 3,
   })
 })
 
@@ -627,6 +656,38 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.ok(!result.commands[1].includes('natten==0.21.0'))
 })
 
+test('setup dependency install uses Windows exact-stack package names for win_amd64 wheelhouses', () => {
+  const result = runPython(`
+import json, tempfile
+from pathlib import Path
+import setup
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    venv_python = root / 'venv' / 'Scripts' / 'python.exe'
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text('', encoding='utf-8')
+    wheelhouse = root / 'windows-wheelhouse'
+    wheelhouse.mkdir()
+    (wheelhouse / 'flex_gemm_ap-1.0.0+cu124torch2.6-cp312-cp312-win_amd64.whl').write_text('', encoding='utf-8')
+    calls = []
+    def fake_run(command, *, cwd):
+        calls.append(command)
+        return {'args': command, 'returncode': 0, 'stdout_tail': '{}\\n' if command[1] == '-c' else '', 'stderr_tail': '', 'ok': True}
+    setup._run_setup_command = fake_run
+    result = setup._install_prepare_dependencies(root, wheelhouse_path=wheelhouse)
+    print(json.dumps({'status': result['status'], 'packages': result['local_wheel_packages'], 'install_command': calls[1]}, sort_keys=True))
+`)
+
+  assert.equal(result.status, 'installed')
+  for (const pkg of ['o-voxel-vb-ap==0.0.1', 'cumesh-vb==1.0', 'flex-gemm-ap==1.0.0', 'drtk==0.1.0', 'flash-attn==2.8.3', 'nvdiffrec-render==0.0.1']) {
+    assert.ok(result.packages.includes(pkg), `${pkg} missing`)
+    assert.ok(result.install_command.includes(pkg), `${pkg} not installed`)
+  }
+  assert.ok(!result.packages.includes('o-voxel==0.0.1'))
+  assert.ok(!result.packages.includes('flex-gemm==1.0.0'))
+})
+
 test('setup reports NATTEN strict NAF availability separately from base wheelhouse install', () => {
   const result = runPython(`
 import json, tempfile
@@ -779,7 +840,8 @@ test('wheelhouse docs separate end-user release assets from maintainer build and
   assert.match(readme, /vendored `wheels\/` fallback/i)
   assert.match(readme, /--no-index --find-links/)
   assert.match(readme, /Linux `x64` \/ Python `cp312` \/ `cuda124`/)
-  assert.match(readme, /Windows `x64` \/ Python `cp312` \/ `cuda124` is under candidate investigation only/)
+  assert.match(readme, /Windows `x64` \/ Python `cp312` \/ `cuda124`/)
+  assert.match(readme, /o-voxel-vb-ap/)
   assert.doesNotMatch(readme, /- `natten==0\.21\.0`/)
   assert.match(readme, /natten\.HAS_LIBNATTEN/)
   assert.equal(existsSync(wheelhouseReadmePath), true)

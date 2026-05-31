@@ -29,8 +29,7 @@ Current published wheelhouse targets:
 
 - Linux `aarch64` / Python `cp312` / `cuda124`
 - Linux `x64` / Python `cp312` / `cuda124`
-
-Windows `x64` / Python `cp312` / `cuda124` is under candidate investigation only; it is not declared as a supported manifest lane until a real checksum-pinned release asset exists.
+- Windows `x64` / Python `cp312` / `cuda124`
 
 Included packaged dependencies:
 
@@ -44,6 +43,8 @@ Included packaged dependencies:
 - `flex-gemm==1.0.0`
 - `nvdiffrast==0.4.0`
 - `nvdiffrec-render==0.0.0`
+
+On Windows, the equivalent exact-stack native package distributions are installed from the Windows lane where names differ, such as `o-voxel-vb-ap`, `cumesh-vb`, `flex-gemm-ap`, `drtk`, and `flash-attn`.
 
 `natten`/`libnatten` is intentionally optional. Setup probes `natten.HAS_LIBNATTEN` and strict NAF is available only when that value is `True`; otherwise the extension must use the NAF fallback path.
 

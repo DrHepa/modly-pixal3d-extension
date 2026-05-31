@@ -40,6 +40,21 @@ LOCAL_WHEEL_PACKAGES = [
     "pixal3d-core==0.1.0+modly",
 ]
 
+WINDOWS_LOCAL_WHEEL_PACKAGES = [
+    "utils3d==1.3+modly.headless",
+    "pipeline==1.0.0+modly",
+    "moge==2.0.0+modly",
+    "naf==0.1.0+modly",
+    "o-voxel-vb-ap==0.0.1",
+    "cumesh-vb==1.0",
+    "flex-gemm-ap==1.0.0",
+    "drtk==0.1.0",
+    "flash-attn==2.8.3",
+    "nvdiffrast==0.4.0",
+    "nvdiffrec-render==0.0.1",
+    "pixal3d-core==0.1.0+modly",
+]
+
 OPTIONAL_NATTEN_PACKAGES = ["natten==0.21.0"]
 
 RUNTIME_DIRS = [
@@ -116,9 +131,10 @@ def _install_prepare_dependencies(workspace_root: Path, *, wheelhouse_path: Path
     if not wheelhouse.exists():
         return {"status": "failed", "code": "wheelhouse_missing", "wheelhouse": str(wheelhouse), "commands": []}
 
+    local_wheel_packages = _local_wheel_packages_for_wheelhouse(wheelhouse)
     commands = [
         [str(venv_python), "-m", "pip", "install", "-r", "requirements.txt"],
-        [str(venv_python), "-m", "pip", "install", "--no-index", "--find-links", str(wheelhouse), *LOCAL_WHEEL_PACKAGES],
+        [str(venv_python), "-m", "pip", "install", "--no-index", "--find-links", str(wheelhouse), *local_wheel_packages],
     ]
     if _wheelhouse_contains_natten(wheelhouse):
         commands.append([str(venv_python), "-m", "pip", "install", "--no-index", "--find-links", str(wheelhouse), *OPTIONAL_NATTEN_PACKAGES])
@@ -134,7 +150,7 @@ def _install_prepare_dependencies(workspace_root: Path, *, wheelhouse_path: Path
         "code": "dependencies_installed",
         "venv_python": str(venv_python),
         "wheelhouse": str(wheelhouse),
-        "local_wheel_packages": LOCAL_WHEEL_PACKAGES,
+        "local_wheel_packages": local_wheel_packages,
         "optional_natten_packages": OPTIONAL_NATTEN_PACKAGES,
         "natten_runtime": _natten_runtime_status(venv_python, workspace_root),
         "commands": results,
@@ -143,6 +159,12 @@ def _install_prepare_dependencies(workspace_root: Path, *, wheelhouse_path: Path
 
 def _wheelhouse_contains_natten(wheelhouse: Path) -> bool:
     return any(wheelhouse.glob("natten-*.whl"))
+
+
+def _local_wheel_packages_for_wheelhouse(wheelhouse: Path) -> list[str]:
+    if any(wheelhouse.glob("*win_amd64.whl")):
+        return WINDOWS_LOCAL_WHEEL_PACKAGES
+    return LOCAL_WHEEL_PACKAGES
 
 
 def _natten_runtime_status(venv_python: Path, workspace_root: Path) -> dict[str, Any]:
