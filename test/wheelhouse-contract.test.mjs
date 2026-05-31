@@ -242,8 +242,9 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.deepEqual(result.x64[1].slice(2), ['pip', 'install', '-r', 'requirements.txt'])
   assert.deepEqual(result.x64[2].slice(2, 7), ['pip', 'install', '--no-index', '--find-links', result.x64[2][6]])
   assert.deepEqual(result.aarch64[0].slice(2, 7), ['pip', 'install', '--no-cache-dir', '--retries', '5'])
-  assert.ok(result.aarch64[0].includes('torch==2.6.0'))
-  assert.ok(result.aarch64[0].includes('torchvision==0.21.0'))
+  assert.ok(result.aarch64[0].some((arg) => /torch-2\.6\.0-cp312-cp312-manylinux_2_28_aarch64\.whl#sha256=/.test(arg)))
+  assert.ok(result.aarch64[0].some((arg) => /torchvision-0\.21\.0-1-cp312-cp312-manylinux_2_28_aarch64\.whl#sha256=/.test(arg)))
+  assert.ok(!result.aarch64[0].includes('torch==2.6.0'))
 })
 
 test('linux x64 cp312 cuda124 wheelhouse workflow is documented and manifest-backed', () => {
@@ -858,6 +859,30 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.deepEqual(result.calls.map((call) => call.step), ['prepare_wheelhouse', 'install'])
   assert.equal(result.calls[1].wheelhouse_path, result.wheelhouse)
   assert.equal(result.wheelhouse_prepare.selected_asset, 'linux-aarch64-cp312-cuda124')
+})
+
+test('setup prepare fails and exits nonzero when dependency installation fails', () => {
+  const result = runPython(`
+import json, tempfile
+from pathlib import Path
+import setup
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    verified = root / '.modly' / 'cache' / 'wheelhouse' / 'pixal3d' / '0.1.0' / 'linux-aarch64-cp312-cuda124' / 'extracted'
+    verified.mkdir(parents=True)
+    setup._create_prepare_paths = lambda _layout: ([], [])
+    setup._prepare_wheelhouse_for_setup = lambda _workspace_root: {'status': 'ready', 'wheelhouse_path': str(verified), 'selected_asset': 'linux-aarch64-cp312-cuda124'}
+    setup._install_prepare_dependencies = lambda *_args, **_kwargs: {'status': 'failed', 'code': 'dependency_install_failed', 'commands': [{'ok': False}]}
+    result = setup.run_setup(['--workspace-root', str(root), '--prepare', '--json'])
+    print(json.dumps({'status': result['status'], 'dependency_code': result['dependency_install']['code'], 'next_steps': result['next_steps']}, sort_keys=True))
+`)
+
+  assert.deepEqual(result, {
+    status: 'failed',
+    dependency_code: 'dependency_install_failed',
+    next_steps: ['fix dependency installation failure', 'rerun setup'],
+  })
 })
 
 test('setup prepare stops before dependency install when wheelhouse preparation fails structurally', () => {

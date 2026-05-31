@@ -63,7 +63,10 @@ OPTIONAL_NATTEN_PACKAGES = ["natten==0.21.0"]
 PYTORCH_CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu124"
 PYTORCH_PIP_FLAGS = ["--no-cache-dir", "--retries", "5", "--timeout", "60"]
 PYTORCH_CUDA_PACKAGES = ["torch==2.6.0+cu124", "torchvision==0.21.0+cu124"]
-PYTORCH_AARCH64_PACKAGES = ["torch==2.6.0", "torchvision==0.21.0"]
+PYTORCH_AARCH64_PACKAGES = [
+    "https://files.pythonhosted.org/packages/01/d6/455ab3fbb2c61c71c8842753b566012e1ed111e7a4c82e0e1c20d0c76b62/torch-2.6.0-cp312-cp312-manylinux_2_28_aarch64.whl#sha256=b789069020c5588c70d5c2158ac0aa23fd24a028f34a8b4fcb8fcb4d7efcf5fb",
+    "https://files.pythonhosted.org/packages/52/5b/76ca113a853b19c7b1da761f8a72cb6429b3bd0bf932537d8df4657f47c3/torchvision-0.21.0-1-cp312-cp312-manylinux_2_28_aarch64.whl#sha256=ffa2a16499508fe6798323e455f312c7c55f2a88901c9a7c0fb1efa86cf7e327",
+]
 
 RUNTIME_DIRS = [
     "models/pixal3d/generate",
@@ -342,16 +345,19 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
                     "setup_readiness": check_setup_readiness(workspace_root),
                     "next_steps": ["preseed a verified wheelhouse release asset or fix the wheelhouse manifest"],
                 }
+        install_failed = dependency_install is not None and dependency_install.get("status") != "installed"
         result.update(
             {
-                "status": "prepared",
+                "status": "failed" if install_failed else "prepared",
                 "created": created,
                 "skipped": skipped,
                 "wheelhouse_prepare": wheelhouse_prepare,
                 "dependency_install": dependency_install,
                 "installs_started": dependency_install is not None,
                 "setup_readiness": check_setup_readiness(workspace_root),
-                "next_steps": ["download model assets from Modly UI", "rerun readiness", "run generation"],
+                "next_steps": ["fix dependency installation failure", "rerun setup"]
+                if install_failed
+                else ["download model assets from Modly UI", "rerun readiness", "run generation"],
             }
         )
         return result
@@ -376,6 +382,8 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
 def main() -> None:
     result = run_setup()
     print(json.dumps(result, indent=2, sort_keys=True))
+    if result.get("status") == "failed":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
