@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import PurePosixPath
 
 from pixal3d_extension.paths import resolve_modly_layout, resolve_storage_path
 
@@ -15,7 +15,7 @@ class AssetManifest:
 
     @property
     def sentinel_paths(self) -> tuple[str, ...]:
-        return tuple(str(Path(self.local_root) / sentinel) for sentinel in self.sentinels)
+        return tuple(str(PurePosixPath(self.local_root) / sentinel) for sentinel in self.sentinels)
 
 
 PRIMARY_ASSET = AssetManifest(

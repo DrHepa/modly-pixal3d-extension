@@ -61,6 +61,7 @@ WINDOWS_LOCAL_WHEEL_PACKAGES = [
 
 OPTIONAL_NATTEN_PACKAGES = ["natten==0.21.0"]
 PYTORCH_CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu124"
+PYTORCH_PIP_FLAGS = ["--no-cache-dir", "--retries", "5", "--timeout", "60"]
 PYTORCH_CUDA_PACKAGES = ["torch==2.6.0+cu124", "torchvision==0.21.0+cu124"]
 PYTORCH_AARCH64_PACKAGES = ["torch==2.6.0", "torchvision==0.21.0"]
 
@@ -179,10 +180,10 @@ def _local_wheel_packages_for_wheelhouse(wheelhouse: Path) -> list[str]:
 def _torch_install_command_for_wheelhouse(venv_python: Path, wheelhouse: Path) -> list[str]:
     wheelhouse_text = str(wheelhouse).replace("\\", "/")
     if "windows-x64-cp312-cuda124" in wheelhouse_text or any(wheelhouse.glob("*win_amd64.whl")):
-        return [str(venv_python), "-m", "pip", "install", "--index-url", PYTORCH_CUDA_INDEX_URL, *PYTORCH_CUDA_PACKAGES]
+        return [str(venv_python), "-m", "pip", "install", *PYTORCH_PIP_FLAGS, "--index-url", PYTORCH_CUDA_INDEX_URL, *PYTORCH_CUDA_PACKAGES]
     if "linux-x64-cp312-cuda124" in wheelhouse_text:
-        return [str(venv_python), "-m", "pip", "install", "--index-url", PYTORCH_CUDA_INDEX_URL, *PYTORCH_CUDA_PACKAGES]
-    return [str(venv_python), "-m", "pip", "install", *PYTORCH_AARCH64_PACKAGES]
+        return [str(venv_python), "-m", "pip", "install", *PYTORCH_PIP_FLAGS, "--index-url", PYTORCH_CUDA_INDEX_URL, *PYTORCH_CUDA_PACKAGES]
+    return [str(venv_python), "-m", "pip", "install", *PYTORCH_PIP_FLAGS, *PYTORCH_AARCH64_PACKAGES]
 
 
 def _natten_runtime_status(venv_python: Path, workspace_root: Path) -> dict[str, Any]:

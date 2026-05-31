@@ -21,18 +21,23 @@ class ModlyLayout:
 
 
 def is_safe_relative_path(value: str) -> bool:
+    value = normalize_logical_path(value)
     if not value or value.startswith(("/", "file://", "http://", "https://")):
         return False
-    if "\\" in value or ":" in value:
+    if ":" in value:
         return False
     parts = PurePosixPath(value).parts
     return all(part not in {"", ".", ".."} and not part.startswith(".") for part in parts)
 
 
+def normalize_logical_path(value: str) -> str:
+    return value.replace("\\", "/")
+
+
 def require_safe_relative_path(value: str) -> str:
     if not is_safe_relative_path(value):
         raise ValueError(f"unsafe relative path: {value!r}")
-    return value
+    return normalize_logical_path(value)
 
 
 def is_contained_path(root: str | Path, candidate: str | Path) -> bool:
@@ -49,8 +54,8 @@ def require_contained_path(root: str | Path, value: str, *, allowed_root: str | 
             raise ValueError(f"unsafe absolute path: {value!r}")
         candidate = raw.resolve()
     else:
-        require_safe_relative_path(value)
-        candidate = (base / raw).resolve()
+        safe_value = require_safe_relative_path(value)
+        candidate = (base / Path(*PurePosixPath(safe_value).parts)).resolve()
 
     if not is_contained_path(base, candidate):
         raise ValueError(f"path escapes workspace root: {value!r}")
@@ -69,8 +74,8 @@ def resolve_modly_layout(workspace_root: str | Path, *, ext_dir: str | Path | No
 
 
 def resolve_storage_path(layout: ModlyLayout, logical_path: str) -> Path:
-    require_safe_relative_path(logical_path)
-    relative = PurePosixPath(logical_path)
+    safe_path = require_safe_relative_path(logical_path)
+    relative = PurePosixPath(safe_path)
     if relative.parts and relative.parts[0] == MODELS_PREFIX:
         return (layout.modly_home / Path(*relative.parts)).resolve()
     return (layout.ext_dir / Path(*relative.parts)).resolve()

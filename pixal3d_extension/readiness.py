@@ -6,6 +6,11 @@ from pixal3d_extension.assets import AUXILIARY_ASSETS, PRIMARY_ASSET, check_asse
 from pixal3d_extension.paths import resolve_modly_layout, resolve_storage_path
 from pixal3d_extension.pipeline_patch import validate_pipeline_patch
 
+SUPPORTED_RUNTIME_LANES = {
+    "linux-aarch64-cp312-cuda124",
+    "linux-x64-cp312-cuda124",
+    "windows-x64-cp312-cuda124",
+}
 SUPPORTED_RUNTIME_LANE = "linux-aarch64-cp312-cuda124"
 
 SETUP_REQUIRED_PATHS = [
@@ -85,12 +90,12 @@ def check_readiness(
     if patch_result["status"] != "ready":
         return {"status": "blocked", "code": patch_result["code"], "pipeline_patch": patch_result, "generation_allowed": False}
 
-    if runtime_lane != SUPPORTED_RUNTIME_LANE:
+    if runtime_lane not in SUPPORTED_RUNTIME_LANES:
         return {
             "status": "blocked",
             "code": "unsupported_lane",
             "runtime_lane": runtime_lane,
-            "supported_runtime_lane": SUPPORTED_RUNTIME_LANE,
+            "supported_runtime_lanes": sorted(SUPPORTED_RUNTIME_LANES),
             "generation_allowed": False,
         }
 

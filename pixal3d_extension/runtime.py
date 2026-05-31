@@ -11,6 +11,11 @@ from typing import Any, Callable
 from pixal3d_extension.paths import is_contained_path, require_contained_path
 
 PIXAL3D_MODEL_SOURCE = "TencentARC/Pixal3D"
+SUPPORTED_RUNTIME_LANES = {
+    "linux-aarch64-cp312-cuda124",
+    "linux-x64-cp312-cuda124",
+    "windows-x64-cp312-cuda124",
+}
 SUPPORTED_RUNTIME_LANE = "linux-aarch64-cp312-cuda124"
 
 
@@ -80,7 +85,7 @@ def _preflight_runtime(job: dict) -> dict | None:
         return result
 
     runtime_lane = job.get("runtime_lane")
-    if runtime_lane and runtime_lane != SUPPORTED_RUNTIME_LANE:
+    if runtime_lane and runtime_lane not in SUPPORTED_RUNTIME_LANES:
         return _failure("unsupported_lane", f"runtime lane {runtime_lane!r} is not production-supported")
 
     asset_readiness = job.get("asset_readiness") or {}

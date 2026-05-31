@@ -131,8 +131,8 @@ with tempfile.TemporaryDirectory() as tmp:
         'win_native_compatible': _wheel_is_compatible('native-1.0.0-cp312-cp312-win_amd64.whl', win_runtime),
         'win_x86_incompatible': _wheel_is_compatible('native-1.0.0-cp312-cp312-win32.whl', win_runtime),
         'linux_lane': runtime_lane_id({'os':'linux','arch':'x64','python_tag':'cp312','accelerator_lane':'cuda124'}),
-        'readiness_supported': readiness.SUPPORTED_RUNTIME_LANE,
-        'runtime_supported': runtime.SUPPORTED_RUNTIME_LANE,
+        'readiness_supported': sorted(readiness.SUPPORTED_RUNTIME_LANES),
+        'runtime_supported': sorted(runtime.SUPPORTED_RUNTIME_LANES),
     }, sort_keys=True))
 `)
 
@@ -142,8 +142,34 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.win_native_compatible, true)
   assert.equal(result.win_x86_incompatible, false)
   assert.equal(result.linux_lane, 'linux-x64-cp312-cuda124')
-  assert.equal(result.readiness_supported, 'linux-aarch64-cp312-cuda124')
-  assert.equal(result.runtime_supported, 'linux-aarch64-cp312-cuda124')
+  assert.deepEqual(result.readiness_supported, ['linux-aarch64-cp312-cuda124', 'linux-x64-cp312-cuda124', 'windows-x64-cp312-cuda124'])
+  assert.deepEqual(result.runtime_supported, ['linux-aarch64-cp312-cuda124', 'linux-x64-cp312-cuda124', 'windows-x64-cp312-cuda124'])
+})
+
+test('logical storage paths accept Windows separators without allowing escapes', () => {
+  const result = runPython(`
+import json, tempfile
+from pathlib import Path
+from pixal3d_extension.paths import require_safe_relative_path, resolve_modly_layout, resolve_storage_path
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp) / 'Modly' / 'extensions' / 'pixal3d'
+    root.mkdir(parents=True)
+    layout = resolve_modly_layout(root)
+    normalized = require_safe_relative_path('models\\\\pixal3d\\\\generate\\\\pipeline.json')
+    resolved = resolve_storage_path(layout, 'models\\\\pixal3d\\\\generate\\\\pipeline.json')
+    errors = []
+    for value in ['..\\\\escape', 'C:\\\\tmp\\\\x', '.hidden\\\\x']:
+        try:
+            require_safe_relative_path(value)
+        except ValueError:
+            errors.append(value)
+    print(json.dumps({'normalized': normalized, 'resolved_suffix': str(resolved).replace('\\\\', '/').split('/Modly/')[-1], 'errors': errors}, sort_keys=True))
+`)
+
+  assert.equal(result.normalized, 'models/pixal3d/generate/pipeline.json')
+  assert.equal(result.resolved_suffix, 'models/pixal3d/generate/pipeline.json')
+  assert.deepEqual(result.errors, ['..\\escape', 'C:\\tmp\\x', '.hidden\\x'])
 })
 
 test('setup.py can be loaded through runpy from a different current directory', () => {
@@ -185,13 +211,16 @@ with tempfile.TemporaryDirectory() as tmp:
     print(json.dumps({'x64': x64_commands[:3], 'aarch64': calls[:3]}, sort_keys=True))
 `)
 
-  assert.deepEqual(result.x64[0].slice(2, 5), ['pip', 'install', '--index-url'])
+  assert.deepEqual(result.x64[0].slice(2, 7), ['pip', 'install', '--no-cache-dir', '--retries', '5'])
+  assert.ok(result.x64[0].includes('--timeout'))
   assert.ok(result.x64[0].includes('https://download.pytorch.org/whl/cu124'))
   assert.ok(result.x64[0].includes('torch==2.6.0+cu124'))
   assert.ok(result.x64[0].includes('torchvision==0.21.0+cu124'))
   assert.deepEqual(result.x64[1].slice(2), ['pip', 'install', '-r', 'requirements.txt'])
   assert.deepEqual(result.x64[2].slice(2, 7), ['pip', 'install', '--no-index', '--find-links', result.x64[2][6]])
-  assert.deepEqual(result.aarch64[0].slice(2), ['pip', 'install', 'torch==2.6.0', 'torchvision==0.21.0'])
+  assert.deepEqual(result.aarch64[0].slice(2, 7), ['pip', 'install', '--no-cache-dir', '--retries', '5'])
+  assert.ok(result.aarch64[0].includes('torch==2.6.0'))
+  assert.ok(result.aarch64[0].includes('torchvision==0.21.0'))
 })
 
 test('linux x64 cp312 cuda124 wheelhouse workflow is documented and manifest-backed', () => {
