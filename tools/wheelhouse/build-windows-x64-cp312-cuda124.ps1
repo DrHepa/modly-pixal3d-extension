@@ -60,6 +60,16 @@ $externalWheels = @(
         Name = "flash_attn"
         Url = "https://github.com/PozzettiAndrea/cuda-wheels/releases/download/flash_attn-latest/flash_attn-2.8.3%2Bcu124torch2.6-cp312-cp312-win_amd64.whl"
         Filename = "flash_attn-2.8.3+cu124torch2.6-cp312-cp312-win_amd64.whl"
+    },
+    @{
+        Name = "nvdiffrast"
+        Url = "https://github.com/PozzettiAndrea/cuda-wheels/releases/download/nvdiffrast-latest/nvdiffrast-0.4.0%2Bcu124torch2.6-cp312-cp312-win_amd64.whl"
+        Filename = "nvdiffrast-0.4.0+cu124torch2.6-cp312-cp312-win_amd64.whl"
+    },
+    @{
+        Name = "nvdiffrec_render"
+        Url = "https://github.com/PozzettiAndrea/cuda-wheels/releases/download/nvdiffrec_render-latest/nvdiffrec_render-0.0.1%2Bcu124torch2.6-cp312-cp312-win_amd64.whl"
+        Filename = "nvdiffrec_render-0.0.1+cu124torch2.6-cp312-cp312-win_amd64.whl"
     }
 )
 
@@ -98,10 +108,7 @@ foreach ($wheel in $externalWheels) {
     }
 }
 
-$unresolvedRequired = @(
-    "nvdiffrast win_amd64 cp312 torch2.6 cu124 exact-stack wheel",
-    "nvdiffrec_render win_amd64 cp312 torch2.6 cu124 exact-stack wheel"
-)
+$unresolvedRequired = @()
 
 $metadata = [ordered]@{
     lane = $Lane
@@ -122,10 +129,10 @@ $metadata = [ordered]@{
             reason = "strict NAF requires natten.HAS_LIBNATTEN == True; no verified torch2.6/cu124/cp312/win_amd64 libnatten wheel is available"
         }
     )
-    publish_policy = "Do not upload to release or add to wheelhouse.manifest.json while status is candidate_incomplete."
+    publish_policy = "Do not add to wheelhouse.manifest.json until this candidate archive is uploaded to the pinned release and checksum-pinned."
 }
 
-$metadataPath = Join-Path $wheelhouseDir "WINDOWS-CANDIDATE-NOT-PUBLISHABLE.json"
+$metadataPath = Join-Path $wheelhouseDir "WINDOWS-CANDIDATE.json"
 $metadata | ConvertTo-Json -Depth 8 | Set-Content -Path $metadataPath -Encoding UTF8
 
 if (($unresolvedRequired.Count -gt 0) -and (-not $allowIncompleteBuild)) {

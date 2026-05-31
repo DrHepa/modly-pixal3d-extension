@@ -203,30 +203,32 @@ test('windows x64 cp312 cuda124 candidate workflow is exact-stack and not manife
   const workflow = readFileSync(workflowPath, 'utf8')
   assert.match(workflow, /windows-latest/)
   assert.match(workflow, /windows-x64-cp312-cuda124/)
-  assert.match(workflow, /WHEELHOUSE_WINDOWS_ALLOW_INCOMPLETE: '1'/)
-  assert.match(workflow, /WINDOWS-CANDIDATE-NOT-PUBLISHABLE\.json/)
-  assert.match(workflow, /Do not upload to release or add to wheelhouse\.manifest\.json/)
+  assert.doesNotMatch(workflow, /WHEELHOUSE_WINDOWS_ALLOW_INCOMPLETE: '1'/)
+  assert.match(workflow, /Do not add to wheelhouse\.manifest\.json until the candidate archive is uploaded to the pinned release and checksum-pinned/)
   assert.match(workflow, /build-windows-x64-cp312-cuda124\.ps1/)
   assert.match(workflow, /pixal3d-wheelhouse-\$\{\{ env\.WHEELHOUSE_LANE \}\}-candidate/)
 
   const script = readFileSync(scriptPath, 'utf8')
   assert.match(script, /windows-x64-cp312-cuda124/)
   assert.match(script, /cu124torch2\.6-cp312-cp312-win_amd64/)
-  for (const wheel of ['flex_gemm_ap', 'cumesh_vb', 'o_voxel_vb_ap', 'drtk', 'flash_attn']) {
+  for (const wheel of ['flex_gemm_ap', 'cumesh_vb', 'o_voxel_vb_ap', 'drtk', 'flash_attn', 'nvdiffrast', 'nvdiffrec_render']) {
     assert.match(script, new RegExp(wheel))
   }
   assert.match(script, /Invoke-WebRequest/)
-  assert.match(script, /nvdiffrast win_amd64 cp312 torch2\.6 cu124 exact-stack wheel/)
-  assert.match(script, /nvdiffrec_render win_amd64 cp312 torch2\.6 cu124 exact-stack wheel/)
+  assert.match(script, /nvdiffrast-0\.4\.0\+cu124torch2\.6-cp312-cp312-win_amd64\.whl/)
+  assert.match(script, /nvdiffrec_render-0\.0\.1\+cu124torch2\.6-cp312-cp312-win_amd64\.whl/)
+  assert.match(script, /\$unresolvedRequired = @\(\)/)
   assert.match(script, /strict NAF requires natten\.HAS_LIBNATTEN == True/)
-  assert.match(script, /WHEELHOUSE_WINDOWS_ALLOW_INCOMPLETE=1 only to upload an inspection artifact/)
+  assert.match(script, /WINDOWS-CANDIDATE\.json/)
   assert.match(script, /Compress-Archive/)
-  assert.match(script, /Do not upload to release or add to wheelhouse\.manifest\.json/)
+  assert.match(script, /Do not add to wheelhouse\.manifest\.json until this candidate archive is uploaded to the pinned release and checksum-pinned/)
 
   assert.match(recipe, /Candidate Windows x64 lane/)
   assert.match(recipe, /not declared as supported/i)
   assert.match(recipe, /Python `cp312`, PyTorch `2\.6`, CUDA `12\.4`, and `win_amd64`/)
-  assert.match(recipe, /WINDOWS-CANDIDATE-NOT-PUBLISHABLE\.json/)
+  assert.match(recipe, /WINDOWS-CANDIDATE\.json/)
+  assert.match(recipe, /`nvdiffrast`/)
+  assert.match(recipe, /`nvdiffrec_render`/)
 })
 
 test('linux x64 native source refs are immutable and confidence-documented', () => {

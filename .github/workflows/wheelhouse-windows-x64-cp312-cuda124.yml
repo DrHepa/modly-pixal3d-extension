@@ -9,7 +9,6 @@ jobs:
     runs-on: windows-latest
     env:
       WHEELHOUSE_LANE: windows-x64-cp312-cuda124
-      WHEELHOUSE_WINDOWS_ALLOW_INCOMPLETE: '1'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,7 +23,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           Write-Host 'Building windows-x64-cp312-cuda124 candidate from exact-stack wheels.'
-          Write-Host 'Do not upload to release or add to wheelhouse.manifest.json while WINDOWS-CANDIDATE-NOT-PUBLISHABLE.json reports unresolved packages.'
+          Write-Host 'Do not add to wheelhouse.manifest.json until the candidate archive is uploaded to the pinned release and checksum-pinned.'
           powershell -NoProfile -ExecutionPolicy Bypass -File tools/wheelhouse/build-windows-x64-cp312-cuda124.ps1
 
       - name: Upload candidate artifact only
