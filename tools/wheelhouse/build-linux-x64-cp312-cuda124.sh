@@ -19,12 +19,15 @@ pure_wheels=(
 )
 
 native_packages=(
-  "natten"
   "o_voxel"
   "cumesh"
   "flex_gemm"
   "nvdiffrast"
   "nvdiffrec_render"
+)
+
+optional_native_packages=(
+  "natten"
 )
 
 declare -A source_dir_vars=(
@@ -194,9 +197,9 @@ maybe_fetch_source_ref() {
       echo "${package}: both ${url_var} and ${ref_var} are required for explicit source fetching." >&2
       return 1
     fi
-    git clone --recurse-submodules "${source_url}" "${source_dir}"
-    git -C "${source_dir}" checkout "${source_ref}"
-    git -C "${source_dir}" submodule update --init --recursive
+    git clone --recurse-submodules "${source_url}" "${source_dir}" >&2
+    git -C "${source_dir}" checkout "${source_ref}" >&2
+    git -C "${source_dir}" submodule update --init --recursive >&2
     return 0
   fi
 
@@ -299,11 +302,27 @@ build_native_wheels() {
       printf '  - %s\n' "${failed[@]}" >&2
     fi
     echo "Provide package source directories via *_SOURCE_DIR or explicit *_SOURCE_URL + *_SOURCE_REF with WHEELHOUSE_ALLOW_SOURCE_FETCH=1." >&2
-    echo "Native wheels are required for: ${native_packages[*]}." >&2
+    echo "Base Pixal3D native wheels are required for: ${native_packages[*]}." >&2
+    echo "NATTEN/libnatten is not required for the base wheelhouse; strict NAF must be enabled only when natten.HAS_LIBNATTEN is True." >&2
     echo "Pure wheels were copied from wheels/: ${pure_wheels[*]}." >&2
     echo "No placeholder wheelhouse archive will be created." >&2
     exit 1
   fi
+}
+
+build_optional_native_wheels() {
+  if [[ "${WHEELHOUSE_BUILD_STRICT_NATTEN:-0}" != "1" ]]; then
+    echo "Skipping optional NATTEN/libnatten build for ${lane}; base wheelhouse will use NAF fallback unless natten.HAS_LIBNATTEN is provided separately." >&2
+    return 0
+  fi
+
+  local package status
+  for package in "${optional_native_packages[@]}"; do
+    status="$(build_native_wheel "${package}")"
+    if [[ "${status}" != "built" ]]; then
+      echo "Optional ${package} wheel was not built (${status}); continuing with base wheelhouse fallback policy." >&2
+    fi
+  done
 }
 
 finalize_wheelhouse_archive() {
@@ -338,6 +357,7 @@ main() {
   configure_cuda_build_archs
   install_build_prerequisites
   copy_pure_wheels
+  build_optional_native_wheels
   build_native_wheels
   finalize_wheelhouse_archive
   echo "Built ${archive_path}"

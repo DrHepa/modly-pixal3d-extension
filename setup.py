@@ -31,7 +31,6 @@ LOCAL_WHEEL_PACKAGES = [
     "utils3d==1.3+modly.headless",
     "pipeline==1.0.0+modly",
     "moge==2.0.0+modly",
-    "natten==0.21.0",
     "naf==0.1.0+modly",
     "o-voxel==0.0.1",
     "cumesh==0.0.1",
@@ -40,6 +39,8 @@ LOCAL_WHEEL_PACKAGES = [
     "nvdiffrec-render==0.0.0",
     "pixal3d-core==0.1.0+modly",
 ]
+
+OPTIONAL_NATTEN_PACKAGES = ["natten==0.21.0"]
 
 RUNTIME_DIRS = [
     "models/pixal3d/generate",
@@ -118,8 +119,10 @@ def _install_prepare_dependencies(workspace_root: Path, *, wheelhouse_path: Path
     commands = [
         [str(venv_python), "-m", "pip", "install", "-r", "requirements.txt"],
         [str(venv_python), "-m", "pip", "install", "--no-index", "--find-links", str(wheelhouse), *LOCAL_WHEEL_PACKAGES],
-        [str(venv_python), "-m", "pip", "check"],
     ]
+    if _wheelhouse_contains_natten(wheelhouse):
+        commands.append([str(venv_python), "-m", "pip", "install", "--no-index", "--find-links", str(wheelhouse), *OPTIONAL_NATTEN_PACKAGES])
+    commands.append([str(venv_python), "-m", "pip", "check"])
     results: list[dict[str, Any]] = []
     for command in commands:
         result = _run_setup_command(command, cwd=workspace_root)
@@ -132,8 +135,40 @@ def _install_prepare_dependencies(workspace_root: Path, *, wheelhouse_path: Path
         "venv_python": str(venv_python),
         "wheelhouse": str(wheelhouse),
         "local_wheel_packages": LOCAL_WHEEL_PACKAGES,
+        "optional_natten_packages": OPTIONAL_NATTEN_PACKAGES,
+        "natten_runtime": _natten_runtime_status(venv_python, workspace_root),
         "commands": results,
     }
+
+
+def _wheelhouse_contains_natten(wheelhouse: Path) -> bool:
+    return any(wheelhouse.glob("natten-*.whl"))
+
+
+def _natten_runtime_status(venv_python: Path, workspace_root: Path) -> dict[str, Any]:
+    result = _run_setup_command(
+        [
+            str(venv_python),
+            "-c",
+            (
+                "import json\n"
+                "try:\n"
+                "    import natten\n"
+                "    print(json.dumps({'importable': True, 'version': getattr(natten, '__version__', None), "
+                "'HAS_LIBNATTEN': bool(getattr(natten, 'HAS_LIBNATTEN', False))}, sort_keys=True))\n"
+                "except Exception as exc:\n"
+                "    print(json.dumps({'importable': False, 'HAS_LIBNATTEN': False, 'error': f'{type(exc).__name__}: {exc}'}, sort_keys=True))\n"
+            ),
+        ],
+        cwd=workspace_root,
+    )
+    try:
+        payload = json.loads(result.get("stdout_tail", "").strip().splitlines()[-1])
+    except Exception:
+        payload = {"importable": False, "HAS_LIBNATTEN": False, "error": "natten runtime probe did not return JSON"}
+    payload["strict_naf_available"] = bool(payload.get("importable") and payload.get("HAS_LIBNATTEN"))
+    payload["fallback_required"] = not payload["strict_naf_available"]
+    return payload
 
 
 def _venv_python_path(workspace_root: Path) -> Path:

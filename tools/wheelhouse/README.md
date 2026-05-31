@@ -38,9 +38,11 @@ The candidate recipe in `build-linux-x64-cp312-cuda124.sh` is staged deliberatel
 1. Create isolated `work/`, `wheelhouse/`, and `dist/wheelhouse/` directories.
 2. Install Python build tooling and PyTorch from the CUDA 12.4 wheel index.
 3. Copy the existing pure Python wheels from `wheels/`: `pixal3d_core`, `pipeline`, `moge`, `naf`, and `utils3d`.
-4. Build native wheels only from explicit source directories or explicit source URLs/refs. The script fails with `missing native source directories` instead of creating fake wheels.
+4. Build base native wheels only from explicit source directories or explicit source URLs/refs. The script fails with `missing native source directories` instead of creating fake wheels.
 
-Hosted Linux x64 builds intentionally narrow NATTEN's default arch list to `WHEELHOUSE_NATTEN_CUDA_ARCH=8.9` and wrap each native package build with `WHEELHOUSE_NATIVE_BUILD_TIMEOUT=60m`. NATTEN can otherwise spend the full GitHub Actions job timeout compiling kernels for every CUDA architecture before the remaining native packages are attempted. Maintainers can override both variables for a release-grade rebuild after the probe is healthy.
+The Linux x64 base wheelhouse deliberately does **not** block on NATTEN/libnatten. NATTEN is only needed for strict NAF; setup probes `natten.HAS_LIBNATTEN` and must keep/fall back to non-strict NAF unless that value is `True`. Maintainers can opt into a strict NATTEN attempt with `WHEELHOUSE_BUILD_STRICT_NATTEN=1`, but a failed optional NATTEN build does not invalidate the base Pixal3D wheelhouse. Hosted Linux x64 builds intentionally narrow NATTEN's optional default arch list to `WHEELHOUSE_NATTEN_CUDA_ARCH=8.9` and wrap each native package build with `WHEELHOUSE_NATIVE_BUILD_TIMEOUT=60m`. NATTEN can otherwise spend the full GitHub Actions job timeout compiling kernels for every CUDA architecture before the remaining native packages are attempted.
+
+Windows wheelhouses must follow the exact-stack policy used by Pixal3D-ComfyUI references: Python ABI, PyTorch minor, CUDA minor, platform tag, and GPU architecture/SM coverage must all match. Do not publish or auto-install generic Windows NATTEN wheels; use curated exact-stack artifacts only, and keep fallback NAF first-class when `HAS_LIBNATTEN` is unavailable.
 
 Native source directories can be supplied with:
 

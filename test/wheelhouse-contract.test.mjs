@@ -153,6 +153,10 @@ test('linux x64 cp312 cuda124 wheelhouse workflow is documented but not added to
   assert.match(script, /Missing native source directories/)
   assert.match(script, /Invalid native source directories/)
   assert.match(script, /Failed native wheel builds/)
+  assert.match(script, /optional_native_packages=\(/)
+  assert.match(script, /WHEELHOUSE_BUILD_STRICT_NATTEN/)
+  assert.match(script, /Skipping optional NATTEN\/libnatten build/)
+  assert.match(script, /strict NAF must be enabled only when natten\.HAS_LIBNATTEN is True/)
   assert.match(script, /finalize_wheelhouse_archive\(\)/)
   assert.match(recipe, /linux-x64-cp312-cuda124/)
   assert.match(recipe, /not declared as supported/i)
@@ -202,9 +206,11 @@ test('linux x64 build recipe reuses pure wheels and fails clearly when native so
   assert.match(result.stderr, /Using TORCH_CUDA_ARCH_LIST=8\.0;8\.6;8\.9;9\.0/)
   assert.match(result.stderr, /Using NATTEN_CUDA_ARCH=8\.9/)
   assert.match(result.stderr, /Using WHEELHOUSE_NATIVE_BUILD_TIMEOUT=60m/)
-  for (const nativeName of ['natten', 'o_voxel', 'cumesh', 'flex_gemm', 'nvdiffrast', 'nvdiffrec_render']) {
+  for (const nativeName of ['o_voxel', 'cumesh', 'flex_gemm', 'nvdiffrast', 'nvdiffrec_render']) {
     assert.match(result.stderr, new RegExp(nativeName))
   }
+  assert.match(result.stderr, /Skipping optional NATTEN\/libnatten build/)
+  assert.doesNotMatch(result.stderr, /Missing native source directories[\s\S]*natten=/)
   assert.match(result.stderr, /No placeholder wheelhouse archive will be created/i)
 
   const copiedWheels = readdirSync(join(tmp, 'wheelhouse')).sort()
@@ -552,6 +558,37 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.match(result.wheelhouse, /linux-aarch64-cp312-cuda124\/extracted$/)
   assert.deepEqual(result.commands[1].slice(2, 7), ['pip', 'install', '--no-index', '--find-links', result.wheelhouse])
   assert.ok(result.commands[1].includes('pixal3d-core==0.1.0+modly'))
+  assert.ok(!result.commands[1].includes('natten==0.21.0'))
+})
+
+test('setup reports NATTEN strict NAF availability separately from base wheelhouse install', () => {
+  const result = runPython(`
+import json, tempfile
+from pathlib import Path
+import setup
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    venv_python = root / 'venv' / 'bin' / 'python'
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text('#!/usr/bin/env python3\\n', encoding='utf-8')
+    wheelhouse = root / 'wheelhouse'
+    wheelhouse.mkdir()
+    calls = []
+    def fake_run(command, *, cwd):
+        calls.append(command)
+        if command[1:] == ['-c', command[-1]]:
+            return {'args': command, 'returncode': 0, 'stdout_tail': '{"HAS_LIBNATTEN": false, "importable": true, "version": "0.21.0"}\\n', 'stderr_tail': '', 'ok': True}
+        return {'args': command, 'returncode': 0, 'stdout_tail': '', 'stderr_tail': '', 'ok': True}
+    setup._run_setup_command = fake_run
+    result = setup._install_prepare_dependencies(root, wheelhouse_path=wheelhouse)
+    print(json.dumps({'natten_runtime': result['natten_runtime'], 'commands': calls}, sort_keys=True))
+`)
+
+  assert.equal(result.natten_runtime.importable, true)
+  assert.equal(result.natten_runtime.HAS_LIBNATTEN, false)
+  assert.equal(result.natten_runtime.strict_naf_available, false)
+  assert.equal(result.natten_runtime.fallback_required, true)
 })
 
 test('setup prepare resolves the wheelhouse before dependency install and passes the verified local path', () => {
