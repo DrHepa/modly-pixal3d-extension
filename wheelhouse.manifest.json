@@ -102,8 +102,8 @@
     {
       "id": "windows-x64-cp311-cuda124",
       "filename": "pixal3d-wheelhouse-v0.1.0-windows-x64-cp311-cuda124.zip",
-      "size_bytes": 126801335,
-      "sha256": "25469e3a7e36c92a52870161ac12330d6209959cfe0db63fee659a00c37f4af0",
+      "size_bytes": 126801509,
+      "sha256": "a6a3576fdb9a3a59ba002de4b2eb8a06c26e12a167eaa4a4dd15daaf156ad04c",
       "compression": "zip",
       "packages": [
         "utils3d",
