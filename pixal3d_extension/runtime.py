@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib
+import math
 import os
 import random
 import sys
 import time
+import types
 import uuid
 from pathlib import Path
 from typing import Any, Callable
@@ -65,6 +67,108 @@ def _install_windows_native_module_aliases() -> None:
             sys.modules[upstream_name] = importlib.import_module(windows_name)
         except ModuleNotFoundError:
             continue
+
+
+def _install_natten_fallback() -> None:
+    """Provide a slow but correct top-level natten fallback when absent.
+
+    Upstream NAF first tries `natten.functional` and falls back to `from natten
+    import na2d` on any import error. We intentionally only provide the top-level
+    module so the legacy import path still fails and upstream selects the recent
+    `na2d(...)` call shape.
+    """
+
+    if "natten" in sys.modules:
+        return
+
+    try:
+        importlib.import_module("natten")
+        return
+    except ModuleNotFoundError as exc:
+        if exc.name != "natten":
+            return
+
+    import torch
+    import torch.nn.functional as torch_functional
+
+    def na2d(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        kernel_size: Any,
+        dilation: Any,
+        stride: int = 1,
+        backend: str | None = None,
+    ) -> torch.Tensor:
+        del backend
+        if stride != 1:
+            raise NotImplementedError("natten fallback only supports stride=1")
+        if q.ndim != 5 or k.ndim != 5 or v.ndim != 5:
+            raise ValueError("natten fallback expects q/k/v shaped as [b, h, w, n, d]")
+        if q.shape != k.shape or q.shape != v.shape:
+            raise ValueError("natten fallback expects q/k/v to share the same shape")
+
+        def normalize_pair(value: Any, name: str) -> tuple[int, int]:
+            if isinstance(value, int):
+                pair = (value, value)
+            elif isinstance(value, (tuple, list)) and len(value) == 2:
+                pair = (int(value[0]), int(value[1]))
+            else:
+                raise ValueError(f"natten fallback expected {name} to be an int or length-2 tuple")
+
+            if pair[0] <= 0 or pair[1] <= 0:
+                raise ValueError(f"natten fallback expected positive {name}")
+            return pair
+
+        kernel_h, kernel_w = normalize_pair(kernel_size, "kernel_size")
+        dilation_h, dilation_w = normalize_pair(dilation, "dilation")
+        if kernel_h % 2 == 0 or kernel_w % 2 == 0:
+            raise ValueError("natten fallback requires odd kernel_size values")
+
+        b, h, w, n, d = q.shape
+        bn = b * n
+        neighborhood_size = kernel_h * kernel_w
+        padding = ((kernel_h // 2) * dilation_h, (kernel_w // 2) * dilation_w)
+
+        q_heads = q.permute(0, 3, 4, 1, 2).reshape(bn, d, h, w)
+        k_heads = k.permute(0, 3, 4, 1, 2).reshape(bn, d, h, w)
+        v_heads = v.permute(0, 3, 4, 1, 2).reshape(bn, d, h, w)
+
+        q_dense = q_heads.reshape(bn, d, h * w).transpose(1, 2)
+        k_neighbors = torch_functional.unfold(
+            k_heads,
+            kernel_size=(kernel_h, kernel_w),
+            dilation=(dilation_h, dilation_w),
+            padding=padding,
+            stride=1,
+        ).reshape(bn, d, neighborhood_size, h * w).permute(0, 3, 2, 1)
+        v_neighbors = torch_functional.unfold(
+            v_heads,
+            kernel_size=(kernel_h, kernel_w),
+            dilation=(dilation_h, dilation_w),
+            padding=padding,
+            stride=1,
+        ).reshape(bn, d, neighborhood_size, h * w).permute(0, 3, 2, 1)
+
+        valid_neighbors = torch_functional.unfold(
+            torch.ones((1, 1, h, w), device=q.device, dtype=q.dtype),
+            kernel_size=(kernel_h, kernel_w),
+            dilation=(dilation_h, dilation_w),
+            padding=padding,
+            stride=1,
+        ).reshape(1, neighborhood_size, h * w).transpose(1, 2) > 0
+
+        scores = (q_dense.unsqueeze(2) * k_neighbors).sum(dim=-1) * (1.0 / math.sqrt(d))
+        scores = scores.masked_fill(~valid_neighbors, torch.finfo(scores.dtype).min)
+        attention = torch.softmax(scores, dim=-1)
+        out = (attention.unsqueeze(-1) * v_neighbors).sum(dim=2)
+
+        return out.transpose(1, 2).reshape(b, n, d, h, w).permute(0, 3, 4, 1, 2)
+
+    natten_module = types.ModuleType("natten")
+    natten_module.HAS_LIBNATTEN = False
+    natten_module.na2d = na2d
+    sys.modules["natten"] = natten_module
 
 
 def _silence_flex_gemm_autotuners() -> None:
@@ -196,6 +300,7 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
         else:
             _prepare_runtime_compat()
             _install_windows_native_module_aliases()
+            _install_natten_fallback()
             from inference import run_inference
             _silence_flex_gemm_autotuners()
 

@@ -855,7 +855,159 @@ test('runtime installs Windows native aliases before importing upstream inferenc
   assert.match(runtime, /"flex_gemm": "flex_gemm_ap"/)
   assert.match(runtime, /"o_voxel": "o_voxel_vb_ap"/)
   assert.match(runtime, /sys\.modules\[upstream_name\] = importlib\.import_module\(windows_name\)/)
-  assert.match(runtime, /_prepare_runtime_compat\(\)\n\s+_install_windows_native_module_aliases\(\)\n\s+from inference import run_inference/)
+  assert.match(runtime, /_prepare_runtime_compat\(\)\n\s+_install_windows_native_module_aliases\(\)\n\s+_install_natten_fallback\(\)\n\s+from inference import run_inference/)
+})
+
+test('runtime installs NATTEN fallback without exposing legacy natten.functional API', () => {
+  const result = runPython(`
+import json, sys, types
+from pixal3d_extension import runtime
+
+original_import_module = runtime.importlib.import_module
+original_os_name = runtime.os.name
+
+def fake_import_module(name):
+    if name == 'natten':
+        raise ModuleNotFoundError("No module named 'natten'", name='natten')
+    if name in {'cumesh_vb', 'flex_gemm_ap', 'o_voxel_vb_ap'}:
+        module = types.ModuleType(name)
+        module.alias_name = name
+        return module
+    return original_import_module(name)
+
+fake_torch = types.ModuleType('torch')
+fake_torch.Tensor = object
+fake_torch_nn = types.ModuleType('torch.nn')
+fake_torch_nn.Module = type('Module', (), {})
+fake_torch_functional = types.ModuleType('torch.nn.functional')
+fake_torch_functional.scaled_dot_product_attention = lambda q, k, v, dropout_p=0.0: v
+fake_torch.nn = fake_torch_nn
+fake_torch_nn.functional = fake_torch_functional
+sys.modules['torch'] = fake_torch
+sys.modules['torch.nn'] = fake_torch_nn
+sys.modules['torch.nn.functional'] = fake_torch_functional
+sys.modules.pop('natten', None)
+sys.modules.pop('natten.functional', None)
+
+runtime.importlib.import_module = fake_import_module
+runtime.os.name = 'nt'
+runtime._install_windows_native_module_aliases()
+runtime._install_natten_fallback()
+
+natten = sys.modules['natten']
+functional_import_failed = False
+try:
+    __import__('natten.functional', fromlist=['na2d_qk'])
+except ModuleNotFoundError:
+    functional_import_failed = True
+
+print(json.dumps({
+    'has_libnatten': natten.HAS_LIBNATTEN,
+    'has_na2d': callable(natten.na2d),
+    'legacy_import_failed': functional_import_failed,
+    'functional_loaded': 'natten.functional' in sys.modules,
+    'windows_aliases': {
+        'cumesh': getattr(sys.modules['cumesh'], 'alias_name', None),
+        'flex_gemm': getattr(sys.modules['flex_gemm'], 'alias_name', None),
+        'o_voxel': getattr(sys.modules['o_voxel'], 'alias_name', None),
+    },
+}, sort_keys=True))
+`)
+
+  assert.equal(result.has_libnatten, false)
+  assert.equal(result.has_na2d, true)
+  assert.equal(result.legacy_import_failed, true)
+  assert.equal(result.functional_loaded, false)
+  assert.deepEqual(result.windows_aliases, {
+    cumesh: 'cumesh_vb',
+    flex_gemm: 'flex_gemm_ap',
+    o_voxel: 'o_voxel_vb_ap',
+  })
+})
+
+test('runtime NATTEN fallback is local neighborhood attention, not dense global SDPA', () => {
+  const runtimeSource = readFileSync(join(repoRoot, 'pixal3d_extension', 'runtime.py'), 'utf8')
+  const fallbackBlock = runtimeSource.match(/def _install_natten_fallback\(\) -> None:[\s\S]*?(?=^def _silence_flex_gemm_autotuners\(\) -> None:)/m)
+  assert.ok(fallbackBlock)
+  assert.match(fallbackBlock[0], /torch_functional\.unfold\(/)
+  assert.match(fallbackBlock[0], /scores = scores\.masked_fill\(~valid_neighbors, torch\.finfo\(scores\.dtype\)\.min\)/)
+  assert.doesNotMatch(fallbackBlock[0], /scaled_dot_product_attention/)
+
+  const result = runPython(`
+import json, math, sys, types
+from pixal3d_extension import runtime
+
+try:
+    import torch
+    torch_available = True
+except ModuleNotFoundError:
+    torch_available = False
+    print(json.dumps({'torch_available': False}, sort_keys=True))
+    raise SystemExit(0)
+
+original_import_module = runtime.importlib.import_module
+
+def fake_import_module(name):
+    if name == 'natten':
+        raise ModuleNotFoundError("No module named 'natten'", name='natten')
+    return original_import_module(name)
+
+runtime.importlib.import_module = fake_import_module
+sys.modules.pop('natten', None)
+sys.modules.pop('natten.functional', None)
+runtime._install_natten_fallback()
+na2d = sys.modules['natten'].na2d
+
+q = torch.arange(1, 1 + 3 * 3, dtype=torch.float32).reshape(1, 3, 3, 1, 1)
+k = torch.arange(101, 101 + 3 * 3, dtype=torch.float32).reshape(1, 3, 3, 1, 1)
+v = torch.arange(1001, 1001 + 3 * 3, dtype=torch.float32).reshape(1, 3, 3, 1, 1)
+
+actual = na2d(q, k, v, kernel_size=(3, 3), dilation=(1, 1))
+
+def manual_na2d(q, k, v, kernel_size, dilation):
+    b, h, w, n, d = q.shape
+    kh, kw = kernel_size
+    dh, dw = dilation
+    out = torch.empty_like(q)
+    radius_h = kh // 2
+    radius_w = kw // 2
+    scale = 1.0 / math.sqrt(d)
+    for bi in range(b):
+        for yi in range(h):
+            for xi in range(w):
+                for ni in range(n):
+                    scores = []
+                    values = []
+                    for ky in range(kh):
+                        for kx in range(kw):
+                            src_y = yi + (ky - radius_h) * dh
+                            src_x = xi + (kx - radius_w) * dw
+                            if 0 <= src_y < h and 0 <= src_x < w:
+                                scores.append((q[bi, yi, xi, ni] * k[bi, src_y, src_x, ni]).sum() * scale)
+                                values.append(v[bi, src_y, src_x, ni])
+                    weights = torch.softmax(torch.stack(scores), dim=0)
+                    out[bi, yi, xi, ni] = sum(weight * value for weight, value in zip(weights, values))
+    return out
+
+expected = manual_na2d(q, k, v, kernel_size=(3, 3), dilation=(1, 1))
+global_scores = torch.softmax((q.reshape(1, 9, 1) * k.reshape(1, 1, 9)) * (1.0 / math.sqrt(1)), dim=-1)
+global_out = torch.matmul(global_scores, v.reshape(1, 9, 1)).reshape(1, 3, 3, 1, 1)
+
+print(json.dumps({
+    'torch_available': True,
+    'shape': list(actual.shape),
+    'matches_manual': bool(torch.allclose(actual, expected, atol=1e-6, rtol=1e-6)),
+    'differs_from_global': bool(not torch.allclose(actual, global_out, atol=1e-6, rtol=1e-6)),
+}, sort_keys=True))
+`)
+
+  if (result.torch_available) {
+    assert.deepEqual(result.shape, [1, 3, 3, 1, 1])
+    assert.equal(result.matches_manual, true)
+    assert.equal(result.differs_from_global, true)
+  } else {
+    assert.equal(result.torch_available, false)
+  }
 })
 
 test('requirements install supplies scipy before no-deps local wheelhouse install', () => {
