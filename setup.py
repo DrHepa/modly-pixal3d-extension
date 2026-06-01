@@ -60,14 +60,14 @@ WINDOWS_LOCAL_WHEEL_PACKAGES = [
 ]
 
 OPTIONAL_NATTEN_PACKAGES = ["natten==0.21.0"]
+LINUX_METADATA_PACKAGES = ["triton"]
+WINDOWS_METADATA_PACKAGES = ["triton-windows"]
 PYTORCH_CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu124"
 PYTORCH_PIP_FLAGS = ["--no-cache-dir", "--retries", "5", "--timeout", "60"]
 PYTORCH_DIRECT_PIP_FLAGS = [*PYTORCH_PIP_FLAGS, "--no-deps"]
 PYTORCH_CUDA_PACKAGES = ["torch==2.6.0+cu124", "torchvision==0.21.0+cu124"]
-PYTORCH_AARCH64_PACKAGES = [
-    "https://files.pythonhosted.org/packages/01/d6/455ab3fbb2c61c71c8842753b566012e1ed111e7a4c82e0e1c20d0c76b62/torch-2.6.0-cp312-cp312-manylinux_2_28_aarch64.whl#sha256=b789069020c5588c70d5c2158ac0aa23fd24a028f34a8b4fcb8fcb4d7efcf5fb",
-    "https://files.pythonhosted.org/packages/52/5b/76ca113a853b19c7b1da761f8a72cb6429b3bd0bf932537d8df4657f47c3/torchvision-0.21.0-1-cp312-cp312-manylinux_2_28_aarch64.whl#sha256=ffa2a16499508fe6798323e455f312c7c55f2a88901c9a7c0fb1efa86cf7e327",
-]
+PYTORCH_AARCH64_PACKAGES = ["torch==2.12.0", "torchvision==0.27.0"]
+PIP_BOOTSTRAP_PACKAGE = "https://files.pythonhosted.org/packages/44/3c/d717024885424591d5376220b5e836c2d5293ce2011523c9de23ff7bf068/pip-25.3-py3-none-any.whl#sha256=9655943313a94722b7774661c21049070f6bbb0a1516bf02f7c8d5d9201514cd"
 
 RUNTIME_DIRS = [
     "models/pixal3d/generate",
@@ -125,14 +125,38 @@ def _create_prepare_paths(layout: ModlyLayout) -> tuple[list[dict[str, str]], li
 
 
 def _run_setup_command(args: list[str], *, cwd: Path) -> dict[str, Any]:
-    completed = subprocess.run(args, cwd=cwd, text=True, capture_output=True)
+    attempts: list[dict[str, Any]] = []
+    max_attempts = 3 if _is_retryable_pip_json_command(args) else 1
+    completed = None
+    for attempt in range(1, max_attempts + 1):
+        completed = subprocess.run(args, cwd=cwd, text=True, capture_output=True)
+        attempts.append(
+            {
+                "attempt": attempt,
+                "returncode": completed.returncode,
+                "stdout_tail": completed.stdout[-1000:],
+                "stderr_tail": completed.stderr[-1000:],
+            }
+        )
+        if completed.returncode == 0 or not _looks_like_pip_json_decode_failure(completed.stderr):
+            break
+    assert completed is not None
     return {
         "args": args,
         "returncode": completed.returncode,
         "stdout_tail": completed.stdout[-4000:],
         "stderr_tail": completed.stderr[-4000:],
         "ok": completed.returncode == 0,
+        "attempts": attempts,
     }
+
+
+def _is_retryable_pip_json_command(args: list[str]) -> bool:
+    return len(args) >= 4 and args[1:4] == ["-m", "pip", "install"]
+
+
+def _looks_like_pip_json_decode_failure(stderr: str) -> bool:
+    return "json.decoder.JSONDecodeError" in stderr and "pip/_internal/index" in stderr
 
 
 def _install_prepare_dependencies(workspace_root: Path, *, wheelhouse_path: Path | None = None) -> dict[str, Any]:
@@ -146,19 +170,32 @@ def _install_prepare_dependencies(workspace_root: Path, *, wheelhouse_path: Path
     local_wheel_packages = _local_wheel_packages_for_wheelhouse(wheelhouse)
     torch_install_command = _torch_install_command_for_wheelhouse(venv_python, wheelhouse)
     commands = [
+        [str(venv_python), "-m", "pip", "install", "--no-deps", PIP_BOOTSTRAP_PACKAGE],
         torch_install_command,
-        [str(venv_python), "-m", "pip", "install", "-r", "requirements.txt"],
+        [str(venv_python), "-m", "pip", "install", *PYTORCH_PIP_FLAGS, "-r", "requirements.txt"],
+        [str(venv_python), "-m", "pip", "install", *PYTORCH_PIP_FLAGS, *_metadata_dependency_packages_for_wheelhouse(wheelhouse)],
         [str(venv_python), "-m", "pip", "install", "--no-index", "--no-deps", "--find-links", str(wheelhouse), *local_wheel_packages],
     ]
     if _wheelhouse_contains_natten(wheelhouse):
-        commands.append([str(venv_python), "-m", "pip", "install", "--no-index", "--find-links", str(wheelhouse), *OPTIONAL_NATTEN_PACKAGES])
-    commands.append([str(venv_python), "-m", "pip", "check"])
+        commands.append([str(venv_python), "-m", "pip", "install", "--no-index", "--no-deps", "--find-links", str(wheelhouse), *OPTIONAL_NATTEN_PACKAGES])
     results: list[dict[str, Any]] = []
     for command in commands:
         result = _run_setup_command(command, cwd=workspace_root)
         results.append(result)
         if not result["ok"]:
             return {"status": "failed", "code": "dependency_install_failed", "failed_command": command, "commands": results}
+    pip_check = _run_setup_command([str(venv_python), "-m", "pip", "check"], cwd=workspace_root)
+    runtime_check = _runtime_cuda_check(venv_python, workspace_root, wheelhouse)
+    pip_check_acceptable = pip_check["ok"] or _is_known_aarch64_nvidia_platform_check_false_positive(pip_check, wheelhouse)
+    if not pip_check_acceptable or not runtime_check["ok"]:
+        return {
+            "status": "failed",
+            "code": "dependency_runtime_check_failed" if pip_check_acceptable else "dependency_metadata_check_failed",
+            "failed_command": runtime_check["args"] if pip_check_acceptable else pip_check["args"],
+            "commands": results,
+            "pip_check": pip_check,
+            "runtime_check": runtime_check,
+        }
     return {
         "status": "installed",
         "code": "dependencies_installed",
@@ -167,8 +204,47 @@ def _install_prepare_dependencies(workspace_root: Path, *, wheelhouse_path: Path
         "local_wheel_packages": local_wheel_packages,
         "optional_natten_packages": OPTIONAL_NATTEN_PACKAGES,
         "natten_runtime": _natten_runtime_status(venv_python, workspace_root),
+        "pip_check": pip_check,
+        "runtime_check": runtime_check,
         "commands": results,
     }
+
+
+def _is_known_aarch64_nvidia_platform_check_false_positive(pip_check: dict[str, Any], wheelhouse: Path) -> bool:
+    if any(wheelhouse.glob("*win_amd64.whl")):
+        return False
+    output = f"{pip_check.get('stdout_tail', '')}\n{pip_check.get('stderr_tail', '')}"
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    return lines == ["nvidia-cusparselt-cu13 0.8.1 is not supported on this platform"]
+
+
+def _runtime_cuda_check(venv_python: Path, workspace_root: Path, wheelhouse: Path) -> dict[str, Any]:
+    native_imports = ["cumesh", "nvdiffrast", "nvdiffrec_render"]
+    if _wheelhouse_contains_natten(wheelhouse):
+        native_imports.append("natten")
+    code = (
+        "import importlib, json\n"
+        "payload = {'ok': False}\n"
+        "try:\n"
+        "    import torch\n"
+        "    payload['torch_version'] = torch.__version__\n"
+        "    payload['torch_cuda_version'] = torch.version.cuda\n"
+        "    payload['torch_cuda_available'] = bool(torch.cuda.is_available())\n"
+        f"    imports = {native_imports!r}\n"
+        "    for name in imports:\n"
+        "        importlib.import_module(name)\n"
+        "    payload['imports'] = imports\n"
+        "    payload['ok'] = bool(torch.version.cuda and torch.cuda.is_available())\n"
+        "except Exception as exc:\n"
+        "    payload['error'] = f'{type(exc).__name__}: {exc}'\n"
+        "print(json.dumps(payload, sort_keys=True))\n"
+    )
+    result = _run_setup_command([str(venv_python), "-c", code], cwd=workspace_root)
+    try:
+        payload = json.loads(result.get("stdout_tail", "").strip().splitlines()[-1])
+    except Exception:
+        payload = {"ok": False, "error": "runtime CUDA probe did not return JSON"}
+    return {**result, **payload, "ok": bool(result.get("ok") and payload.get("ok"))}
 
 
 def _wheelhouse_contains_natten(wheelhouse: Path) -> bool:
@@ -181,13 +257,19 @@ def _local_wheel_packages_for_wheelhouse(wheelhouse: Path) -> list[str]:
     return LOCAL_WHEEL_PACKAGES
 
 
+def _metadata_dependency_packages_for_wheelhouse(wheelhouse: Path) -> list[str]:
+    if any(wheelhouse.glob("*win_amd64.whl")):
+        return WINDOWS_METADATA_PACKAGES
+    return LINUX_METADATA_PACKAGES
+
+
 def _torch_install_command_for_wheelhouse(venv_python: Path, wheelhouse: Path) -> list[str]:
     wheelhouse_text = str(wheelhouse).replace("\\", "/")
     if "windows-x64-cp312-cuda124" in wheelhouse_text or any(wheelhouse.glob("*win_amd64.whl")):
         return [str(venv_python), "-m", "pip", "install", *PYTORCH_PIP_FLAGS, "--index-url", PYTORCH_CUDA_INDEX_URL, *PYTORCH_CUDA_PACKAGES]
     if "linux-x64-cp312-cuda124" in wheelhouse_text:
         return [str(venv_python), "-m", "pip", "install", *PYTORCH_PIP_FLAGS, "--index-url", PYTORCH_CUDA_INDEX_URL, *PYTORCH_CUDA_PACKAGES]
-    return [str(venv_python), "-m", "pip", "install", *PYTORCH_DIRECT_PIP_FLAGS, *PYTORCH_AARCH64_PACKAGES]
+    return [str(venv_python), "-m", "pip", "install", *PYTORCH_PIP_FLAGS, *PYTORCH_AARCH64_PACKAGES]
 
 
 def _natten_runtime_status(venv_python: Path, workspace_root: Path) -> dict[str, Any]:

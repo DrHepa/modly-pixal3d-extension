@@ -8,9 +8,11 @@ networkx
 numpy
 tqdm
 easydict
+einops
 opencv-python-headless
+opencv-python
 scipy
-sympy==1.13.1
+matplotlib
 typing-extensions>=4.10.0
 trimesh
 transformers==4.57.3

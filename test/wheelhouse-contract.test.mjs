@@ -144,7 +144,7 @@ with tempfile.TemporaryDirectory() as tmp:
     wheelhouse = root / 'wheels'
     wheelhouse.mkdir()
     calls = []
-    setup._run_setup_command = lambda command, *, cwd: calls.append({'command': command, 'cwd': str(cwd)}) or {'args': command, 'returncode': 0, 'stdout_tail': '', 'stderr_tail': '', 'ok': True}
+    setup._run_setup_command = lambda command, *, cwd: calls.append({'command': command, 'cwd': str(cwd)}) or {'args': command, 'returncode': 0, 'stdout_tail': '{"HAS_LIBNATTEN": false, "importable": true, "ok": true, "torch_cuda_available": true, "torch_cuda_version": "13.0"}\\n' if command[1] == '-c' else '', 'stderr_tail': '', 'ok': True}
     install = setup._install_prepare_dependencies(root)
     win_runtime = {'os':'windows','arch':'x64','python_tag':'cp312','accelerator_lane':'cuda124'}
     print(json.dumps({
@@ -225,27 +225,41 @@ with tempfile.TemporaryDirectory() as tmp:
     calls = []
     def fake_run(command, *, cwd):
         calls.append(command)
-        return {'args': command, 'returncode': 0, 'stdout_tail': '{}\\n' if command[1] == '-c' else '', 'stderr_tail': '', 'ok': True}
+        return {'args': command, 'returncode': 0, 'stdout_tail': '{"HAS_LIBNATTEN": false, "importable": true, "ok": true, "torch_cuda_available": true, "torch_cuda_version": "13.0"}\\n' if command[1] == '-c' else '', 'stderr_tail': '', 'ok': True}
     setup._run_setup_command = fake_run
     setup._install_prepare_dependencies(root, wheelhouse_path=linux_x64)
     x64_commands = calls[:]
     calls.clear()
     setup._install_prepare_dependencies(root, wheelhouse_path=linux_aarch64)
-    print(json.dumps({'x64': x64_commands[:3], 'aarch64': calls[:3]}, sort_keys=True))
+    print(json.dumps({'x64': x64_commands[:4], 'aarch64': calls[:4]}, sort_keys=True))
 `)
 
-  assert.deepEqual(result.x64[0].slice(2, 7), ['pip', 'install', '--no-cache-dir', '--retries', '5'])
-  assert.ok(result.x64[0].includes('--timeout'))
-  assert.ok(result.x64[0].includes('https://download.pytorch.org/whl/cu124'))
-  assert.ok(result.x64[0].includes('torch==2.6.0+cu124'))
-  assert.ok(result.x64[0].includes('torchvision==0.21.0+cu124'))
-  assert.deepEqual(result.x64[1].slice(2), ['pip', 'install', '-r', 'requirements.txt'])
-  assert.deepEqual(result.x64[2].slice(2, 8), ['pip', 'install', '--no-index', '--no-deps', '--find-links', result.x64[2][7]])
-  assert.deepEqual(result.aarch64[0].slice(2, 8), ['pip', 'install', '--no-cache-dir', '--retries', '5', '--timeout'])
-  assert.ok(result.aarch64[0].includes('--no-deps'))
-  assert.ok(result.aarch64[0].some((arg) => /torch-2\.6\.0-cp312-cp312-manylinux_2_28_aarch64\.whl#sha256=/.test(arg)))
-  assert.ok(result.aarch64[0].some((arg) => /torchvision-0\.21\.0-1-cp312-cp312-manylinux_2_28_aarch64\.whl#sha256=/.test(arg)))
-  assert.ok(!result.aarch64[0].includes('torch==2.6.0'))
+  assert.deepEqual(result.x64[0].slice(2, 5), ['pip', 'install', '--no-deps'])
+  assert.ok(result.x64[0].some((arg) => /pip-25\.3-py3-none-any\.whl#sha256=/.test(arg)))
+  assert.deepEqual(result.x64[1].slice(2, 7), ['pip', 'install', '--no-cache-dir', '--retries', '5'])
+  assert.ok(result.x64[1].includes('--timeout'))
+  assert.ok(result.x64[1].includes('https://download.pytorch.org/whl/cu124'))
+  assert.ok(result.x64[1].includes('torch==2.6.0+cu124'))
+  assert.ok(result.x64[1].includes('torchvision==0.21.0+cu124'))
+  assert.deepEqual(result.x64[2].slice(2, 7), ['pip', 'install', '--no-cache-dir', '--retries', '5'])
+  assert.ok(result.x64[2].includes('-r'))
+  assert.ok(result.x64[2].includes('requirements.txt'))
+  assert.ok(result.x64[3].includes('triton'))
+  assert.ok(result.aarch64[3].includes('triton'))
+  assert.deepEqual(result.aarch64[1].slice(2, 8), ['pip', 'install', '--no-cache-dir', '--retries', '5', '--timeout'])
+  assert.ok(!result.aarch64[1].includes('--no-deps'))
+  assert.ok(result.aarch64[1].includes('torch==2.12.0'))
+  assert.ok(result.aarch64[1].includes('torchvision==0.27.0'))
+  assert.ok(!result.aarch64[1].includes('torch==2.6.0'))
+})
+
+test('runtime suppresses upstream FlexGEMM autotuner verbose without disabling cache', () => {
+  const runtime = readFileSync(join(repoRoot, 'pixal3d_extension', 'runtime.py'), 'utf8')
+  assert.match(runtime, /def _silence_flex_gemm_autotuners\(\)/)
+  assert.match(runtime, /FLEX_GEMM_AUTOTUNER_VERBOSE"\] = "0"/)
+  assert.match(runtime, /value\.verbose = False/)
+  assert.match(runtime, /flex_gemm\.utils\.load_autotune_cache\(\)/)
+  assert.match(runtime, /from inference import run_inference\n\s+_silence_flex_gemm_autotuners\(\)/)
 })
 
 test('linux x64 cp312 cuda124 wheelhouse workflow is documented and manifest-backed', () => {
@@ -359,6 +373,12 @@ test('windows x64 cp312 cuda124 workflow is exact-stack and manifest-backed', ()
   assert.match(script, /Invoke-WebRequest/)
   assert.match(script, /nvdiffrast-0\.4\.0\+cu124torch2\.6-\$PythonTag-\$PythonTag-win_amd64\.whl/)
   assert.match(script, /nvdiffrec_render-0\.0\.1\+cu124torch2\.6-\$PythonTag-\$PythonTag-win_amd64\.whl/)
+  assert.match(script, /Repairing Windows pure-wheel dependency metadata/)
+  assert.match(script, /o-voxel-vb-ap==0\.0\.1; platform_system == "Windows"/)
+  assert.match(script, /cumesh-vb==1\.0; platform_system == "Windows"/)
+  assert.match(script, /flex-gemm-ap==1\.0\.0; platform_system == "Windows"/)
+  assert.match(script, /nvdiffrec-render==0\.0\.1; platform_system == "Windows"/)
+  assert.match(script, /natten; platform_system != "Windows"/)
   assert.match(script, /\$unresolvedRequired = @\(\)/)
   assert.match(script, /strict NAF requires natten\.HAS_LIBNATTEN == True/)
   assert.match(script, /WINDOWS-CANDIDATE\.json/)
@@ -755,7 +775,7 @@ with tempfile.TemporaryDirectory() as tmp:
     calls = []
     def fake_run(command, *, cwd):
         calls.append({'command': command, 'cwd': str(cwd)})
-        return {'args': command, 'returncode': 0, 'stdout_tail': '', 'stderr_tail': '', 'ok': True}
+        return {'args': command, 'returncode': 0, 'stdout_tail': '{"HAS_LIBNATTEN": false, "importable": true, "ok": true, "torch_cuda_available": true, "torch_cuda_version": "13.0"}\\n' if command[1] == '-c' else '', 'stderr_tail': '', 'ok': True}
     setup._run_setup_command = fake_run
     result = setup._install_prepare_dependencies(root, wheelhouse_path=verified)
     print(json.dumps({'status': result['status'], 'wheelhouse': result['wheelhouse'], 'commands': [call['command'] for call in calls]}, sort_keys=True))
@@ -763,9 +783,9 @@ with tempfile.TemporaryDirectory() as tmp:
 
   assert.equal(result.status, 'installed')
   assert.match(result.wheelhouse, /linux-aarch64-cp312-cuda124\/extracted$/)
-  assert.deepEqual(result.commands[2].slice(2, 8), ['pip', 'install', '--no-index', '--no-deps', '--find-links', result.wheelhouse])
-  assert.ok(result.commands[2].includes('pixal3d-core==0.1.0+modly'))
-  assert.ok(!result.commands[2].includes('natten==0.21.0'))
+  assert.deepEqual(result.commands[4].slice(2, 8), ['pip', 'install', '--no-index', '--no-deps', '--find-links', result.wheelhouse])
+  assert.ok(result.commands[4].includes('pixal3d-core==0.1.0+modly'))
+  assert.ok(!result.commands[4].includes('natten==0.21.0'))
 })
 
 test('setup dependency install uses Windows exact-stack package names for win_amd64 wheelhouses', () => {
@@ -785,13 +805,14 @@ with tempfile.TemporaryDirectory() as tmp:
     calls = []
     def fake_run(command, *, cwd):
         calls.append(command)
-        return {'args': command, 'returncode': 0, 'stdout_tail': '{}\\n' if command[1] == '-c' else '', 'stderr_tail': '', 'ok': True}
+        return {'args': command, 'returncode': 0, 'stdout_tail': '{"HAS_LIBNATTEN": false, "importable": true, "ok": true, "torch_cuda_available": true, "torch_cuda_version": "13.0"}\\n' if command[1] == '-c' else '', 'stderr_tail': '', 'ok': True}
     setup._run_setup_command = fake_run
     result = setup._install_prepare_dependencies(root, wheelhouse_path=wheelhouse)
-    print(json.dumps({'status': result['status'], 'packages': result['local_wheel_packages'], 'install_command': calls[2]}, sort_keys=True))
+    print(json.dumps({'status': result['status'], 'packages': result['local_wheel_packages'], 'metadata_command': calls[3], 'install_command': calls[4]}, sort_keys=True))
 `)
 
   assert.equal(result.status, 'installed')
+  assert.ok(result.metadata_command.includes('triton-windows'))
   for (const pkg of ['o-voxel-vb-ap==0.0.1', 'cumesh-vb==1.0', 'flex-gemm-ap==1.0.0', 'drtk==0.1.0', 'flash-attn==2.8.3', 'nvdiffrec-render==0.0.1']) {
     assert.ok(result.packages.includes(pkg), `${pkg} missing`)
     assert.ok(result.install_command.includes(pkg), `${pkg} not installed`)
@@ -803,9 +824,37 @@ with tempfile.TemporaryDirectory() as tmp:
 test('requirements install supplies scipy before no-deps local wheelhouse install', () => {
   const requirements = readFileSync(join(repoRoot, 'requirements.txt'), 'utf8')
   assert.match(requirements, /^scipy$/m)
-  for (const dependency of ['filelock', 'fsspec', 'jinja2', 'networkx', 'numpy', 'sympy==1.13.1', 'typing-extensions>=4.10.0']) {
+  for (const dependency of ['einops', 'filelock', 'fsspec', 'jinja2', 'matplotlib', 'networkx', 'numpy', 'opencv-python', 'typing-extensions>=4.10.0']) {
     assert.match(requirements, new RegExp(`^${dependency.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'))
   }
+})
+
+test('setup command retries pip JSON decode failures from truncated indexes', () => {
+  const result = runPython(`
+import json, subprocess, tempfile
+from pathlib import Path
+import setup
+
+calls = []
+class Completed:
+    def __init__(self, returncode, stdout='', stderr=''):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+def fake_run(args, *, cwd, text, capture_output):
+    calls.append(args)
+    if len(calls) < 3:
+        return Completed(2, stderr='Traceback\\n  File "pip/_internal/index/package_finder.py"\\njson.decoder.JSONDecodeError: Unterminated string')
+    return Completed(0, stdout='ok')
+
+subprocess.run = fake_run
+with tempfile.TemporaryDirectory() as tmp:
+    result = setup._run_setup_command(['/venv/bin/python', '-m', 'pip', 'install', '--no-cache-dir', '-r', 'requirements.txt'], cwd=Path(tmp))
+    print(json.dumps({'ok': result['ok'], 'returncode': result['returncode'], 'attempt_count': len(result['attempts'])}, sort_keys=True))
+`)
+
+  assert.deepEqual(result, { ok: true, returncode: 0, attempt_count: 3 })
 })
 
 test('setup reports NATTEN strict NAF availability separately from base wheelhouse install', () => {
@@ -825,7 +874,7 @@ with tempfile.TemporaryDirectory() as tmp:
     def fake_run(command, *, cwd):
         calls.append(command)
         if command[1:] == ['-c', command[-1]]:
-            return {'args': command, 'returncode': 0, 'stdout_tail': '{"HAS_LIBNATTEN": false, "importable": true, "version": "0.21.0"}\\n', 'stderr_tail': '', 'ok': True}
+            return {'args': command, 'returncode': 0, 'stdout_tail': '{"HAS_LIBNATTEN": false, "importable": true, "ok": true, "torch_cuda_available": true, "torch_cuda_version": "13.0", "version": "0.21.0"}\\n', 'stderr_tail': '', 'ok': True}
         return {'args': command, 'returncode': 0, 'stdout_tail': '', 'stderr_tail': '', 'ok': True}
     setup._run_setup_command = fake_run
     result = setup._install_prepare_dependencies(root, wheelhouse_path=wheelhouse)

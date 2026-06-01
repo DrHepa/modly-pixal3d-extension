@@ -93,6 +93,106 @@ foreach ($pattern in $pureWheelPatterns) {
     $copiedPure += $matches[0].Name
 }
 
+$repairScript = @'
+import base64
+import csv
+import hashlib
+import io
+import sys
+import tempfile
+import zipfile
+from pathlib import Path
+
+
+def wheel_by_prefix(wheelhouse: Path, prefix: str) -> Path:
+    matches = sorted(wheelhouse.glob(f"{prefix}-*.whl"))
+    if len(matches) != 1:
+        raise SystemExit(f"Expected exactly one wheel matching {prefix}-*.whl, found {len(matches)}")
+    return matches[0]
+
+
+def hash_record(data: bytes) -> tuple[str, str]:
+    digest = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode("ascii")
+    return f"sha256={digest}", str(len(data))
+
+
+def rewrite_record(record_text: str, replacements: dict[str, bytes]) -> str:
+    output = io.StringIO()
+    writer = csv.writer(output, lineterminator="\n")
+    for row in csv.reader(io.StringIO(record_text)):
+        if not row:
+            continue
+        path = row[0]
+        if path in replacements:
+            digest, size = hash_record(replacements[path])
+            writer.writerow([path, digest, size])
+        elif path.endswith(".dist-info/RECORD"):
+            writer.writerow([path, "", ""])
+        else:
+            writer.writerow(row)
+    return output.getvalue()
+
+
+def patch_wheel_metadata(wheel_path: Path, replace_requires: dict[str, list[str]]) -> None:
+    with zipfile.ZipFile(wheel_path, "r") as src:
+        names = src.namelist()
+        metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
+        record_name = next(name for name in names if name.endswith(".dist-info/RECORD"))
+        metadata = src.read(metadata_name).decode("utf-8")
+        new_lines = []
+        for line in metadata.splitlines():
+            if line.startswith("Requires-Dist: "):
+                requirement = line.removeprefix("Requires-Dist: ").split(";", 1)[0].strip()
+                normalized = requirement.split()[0].split("==", 1)[0].lower().replace("_", "-")
+                if normalized in replace_requires:
+                    new_lines.extend(replace_requires[normalized])
+                    continue
+            new_lines.append(line)
+        metadata_bytes = ("\n".join(new_lines) + "\n").encode("utf-8")
+        replacements = {metadata_name: metadata_bytes}
+        record_bytes = rewrite_record(src.read(record_name).decode("utf-8"), replacements).encode("utf-8")
+        replacements[record_name] = record_bytes
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".whl") as tmp:
+            tmp_path = Path(tmp.name)
+        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as dst:
+            for item in src.infolist():
+                data = replacements.get(item.filename, src.read(item.filename))
+                dst.writestr(item, data)
+    tmp_path.replace(wheel_path)
+
+
+wheelhouse = Path(sys.argv[1])
+patch_wheel_metadata(
+    wheel_by_prefix(wheelhouse, "pixal3d_core"),
+    {
+        "natten": ['Requires-Dist: natten==0.21.0; platform_system != "Windows"'],
+        "o-voxel": [
+            'Requires-Dist: o-voxel==0.0.1; platform_system != "Windows"',
+            'Requires-Dist: o-voxel-vb-ap==0.0.1; platform_system == "Windows"',
+        ],
+        "cumesh": [
+            'Requires-Dist: cumesh==0.0.1; platform_system != "Windows"',
+            'Requires-Dist: cumesh-vb==1.0; platform_system == "Windows"',
+        ],
+        "flex-gemm": [
+            'Requires-Dist: flex-gemm==1.0.0; platform_system != "Windows"',
+            'Requires-Dist: flex-gemm-ap==1.0.0; platform_system == "Windows"',
+        ],
+        "nvdiffrec-render": [
+            'Requires-Dist: nvdiffrec-render==0.0.0; platform_system != "Windows"',
+            'Requires-Dist: nvdiffrec-render==0.0.1; platform_system == "Windows"',
+        ],
+    },
+)
+patch_wheel_metadata(
+    wheel_by_prefix(wheelhouse, "naf"),
+    {"natten": ['Requires-Dist: natten; platform_system != "Windows"']},
+)
+'@
+
+Write-Host "Repairing Windows pure-wheel dependency metadata for exact-stack native aliases."
+$repairScript | python - $wheelhouseDir
+
 $downloaded = @()
 foreach ($wheel in $externalWheels) {
     if ($wheel.Filename -notmatch [regex]::Escape($exactStackPattern)) {

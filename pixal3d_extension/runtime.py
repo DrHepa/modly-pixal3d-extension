@@ -32,10 +32,52 @@ def _prepare_runtime_compat() -> None:
     os.environ.setdefault("ATTN_BACKEND", "sdpa")
     os.environ.setdefault("SPARSE_ATTN_BACKEND", "sdpa")
     os.environ.setdefault("SPARSE_CONV_BACKEND", "flex_gemm")
+    os.environ.setdefault("FLEX_GEMM_AUTOTUNER_VERBOSE", "0")
     import torch
 
     if not hasattr(torch.nn.Module, "all_tied_weights_keys"):
         torch.nn.Module.all_tied_weights_keys = {}
+
+
+def _silence_flex_gemm_autotuners() -> None:
+    """Keep FlexGEMM autotuning/cache enabled but prevent upstream verbose prints.
+
+    Pixal3D upstream's inference module sets FLEX_GEMM_AUTOTUNER_VERBOSE=1 at
+    import time. That is useful in a terminal, but Modly's subprocess bridge
+    treats stdout as a structured protocol channel. Existing autotuner instances
+    capture the verbose flag during construction, so resetting the environment
+    alone is not enough after importing inference.py.
+    """
+
+    os.environ["FLEX_GEMM_AUTOTUNER_VERBOSE"] = "0"
+    try:
+        import flex_gemm
+        from flex_gemm.utils.autotuner import PersistentCacheAutoTuner
+    except Exception:
+        return
+
+    def silence_module(module_name: str) -> None:
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            return
+        for value in vars(module).values():
+            if isinstance(value, PersistentCacheAutoTuner):
+                value.verbose = False
+
+    try:
+        for package in ("flex_gemm.kernels.triton.spconv", "flex_gemm.kernels.triton.grid_sample"):
+            root = importlib.import_module(package)
+            package_path = getattr(root, "__path__", None)
+            if package_path is None:
+                continue
+            import pkgutil
+
+            for module in pkgutil.iter_modules(package_path, f"{package}."):
+                silence_module(module.name)
+        flex_gemm.utils.load_autotune_cache()
+    except Exception:
+        return
 
 
 def _failure(code: str, message: str) -> dict:
@@ -126,6 +168,7 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
         else:
             _prepare_runtime_compat()
             from inference import run_inference
+            _silence_flex_gemm_autotuners()
 
             seed = int(params.get("seed", -1))
             if seed == -1:
