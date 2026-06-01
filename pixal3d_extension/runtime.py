@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.machinery
 import math
 import os
 import random
@@ -166,6 +167,9 @@ def _install_natten_fallback() -> None:
         return out.transpose(1, 2).reshape(b, n, d, h, w).permute(0, 3, 4, 1, 2)
 
     natten_module = types.ModuleType("natten")
+    natten_module.__loader__ = None
+    natten_module.__package__ = "natten"
+    natten_module.__spec__ = importlib.machinery.ModuleSpec("natten", loader=None, is_package=False)
     natten_module.HAS_LIBNATTEN = False
     natten_module.na2d = na2d
     sys.modules["natten"] = natten_module

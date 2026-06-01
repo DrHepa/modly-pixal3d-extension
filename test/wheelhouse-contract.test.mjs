@@ -860,7 +860,7 @@ test('runtime installs Windows native aliases before importing upstream inferenc
 
 test('runtime installs NATTEN fallback without exposing legacy natten.functional API', () => {
   const result = runPython(`
-import json, sys, types
+import importlib.util, json, sys, types
 from pixal3d_extension import runtime
 
 original_import_module = runtime.importlib.import_module
@@ -904,6 +904,8 @@ except ModuleNotFoundError:
 print(json.dumps({
     'has_libnatten': natten.HAS_LIBNATTEN,
     'has_na2d': callable(natten.na2d),
+    'has_spec': natten.__spec__ is not None,
+    'find_spec_name': importlib.util.find_spec('natten').name,
     'legacy_import_failed': functional_import_failed,
     'functional_loaded': 'natten.functional' in sys.modules,
     'windows_aliases': {
@@ -916,6 +918,8 @@ print(json.dumps({
 
   assert.equal(result.has_libnatten, false)
   assert.equal(result.has_na2d, true)
+  assert.equal(result.has_spec, true)
+  assert.equal(result.find_spec_name, 'natten')
   assert.equal(result.legacy_import_failed, true)
   assert.equal(result.functional_loaded, false)
   assert.deepEqual(result.windows_aliases, {
