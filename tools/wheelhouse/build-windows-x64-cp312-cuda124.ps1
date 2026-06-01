@@ -152,7 +152,7 @@ def patch_wheel_metadata(wheel_path: Path, replace_requires: dict[str, list[str]
         replacements = {metadata_name: metadata_bytes}
         record_bytes = rewrite_record(src.read(record_name).decode("utf-8"), replacements).encode("utf-8")
         replacements[record_name] = record_bytes
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".whl") as tmp:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".whl", dir=wheel_path.parent) as tmp:
             tmp_path = Path(tmp.name)
         with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as dst:
             for item in src.infolist():
@@ -192,6 +192,9 @@ patch_wheel_metadata(
 
 Write-Host "Repairing Windows pure-wheel dependency metadata for exact-stack native aliases."
 $repairScript | python - $wheelhouseDir
+if ($LASTEXITCODE -ne 0) {
+    throw "Windows pure-wheel dependency metadata repair failed with exit code $LASTEXITCODE."
+}
 
 $downloaded = @()
 foreach ($wheel in $externalWheels) {
