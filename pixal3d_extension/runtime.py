@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import os
 import random
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -37,6 +38,33 @@ def _prepare_runtime_compat() -> None:
 
     if not hasattr(torch.nn.Module, "all_tied_weights_keys"):
         torch.nn.Module.all_tied_weights_keys = {}
+
+
+def _install_windows_native_module_aliases() -> None:
+    """Expose Windows exact-stack native wheels under upstream module names.
+
+    The Windows wheels are published as alias packages (`cumesh_vb`,
+    `flex_gemm_ap`, `o_voxel_vb_ap`) while Pixal3D upstream imports the Linux
+    module names (`cumesh`, `flex_gemm`, `o_voxel`). Keep the installed package
+    names exact-stack, but provide import aliases before importing upstream
+    inference code.
+    """
+
+    if os.name != "nt":
+        return
+
+    aliases = {
+        "cumesh": "cumesh_vb",
+        "flex_gemm": "flex_gemm_ap",
+        "o_voxel": "o_voxel_vb_ap",
+    }
+    for upstream_name, windows_name in aliases.items():
+        if upstream_name in sys.modules:
+            continue
+        try:
+            sys.modules[upstream_name] = importlib.import_module(windows_name)
+        except ModuleNotFoundError:
+            continue
 
 
 def _silence_flex_gemm_autotuners() -> None:
@@ -167,6 +195,7 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
             )
         else:
             _prepare_runtime_compat()
+            _install_windows_native_module_aliases()
             from inference import run_inference
             _silence_flex_gemm_autotuners()
 

@@ -220,10 +220,11 @@ def _is_known_aarch64_nvidia_platform_check_false_positive(pip_check: dict[str, 
 
 def _runtime_cuda_check(venv_python: Path, workspace_root: Path, wheelhouse: Path) -> dict[str, Any]:
     native_imports = _native_import_modules_for_wheelhouse(wheelhouse)
+    upstream_imports = _upstream_import_modules_for_wheelhouse(wheelhouse)
     if _wheelhouse_contains_natten(wheelhouse):
         native_imports.append("natten")
     code = (
-        "import importlib, json\n"
+        "import importlib, json, sys\n"
         "payload = {'ok': False}\n"
         "try:\n"
         "    import torch\n"
@@ -233,7 +234,14 @@ def _runtime_cuda_check(venv_python: Path, workspace_root: Path, wheelhouse: Pat
         f"    imports = {native_imports!r}\n"
         "    for name in imports:\n"
         "        importlib.import_module(name)\n"
+        f"    aliases = {_windows_native_aliases_for_wheelhouse(wheelhouse)!r}\n"
+        "    for upstream_name, windows_name in aliases.items():\n"
+        "        sys.modules.setdefault(upstream_name, importlib.import_module(windows_name))\n"
+        f"    upstream_imports = {upstream_imports!r}\n"
+        "    for name in upstream_imports:\n"
+        "        importlib.import_module(name)\n"
         "    payload['imports'] = imports\n"
+        "    payload['upstream_imports'] = upstream_imports\n"
         "    payload['ok'] = bool(torch.version.cuda and torch.cuda.is_available())\n"
         "except Exception as exc:\n"
         "    payload['error'] = f'{type(exc).__name__}: {exc}'\n"
@@ -251,6 +259,18 @@ def _native_import_modules_for_wheelhouse(wheelhouse: Path) -> list[str]:
     if any(wheelhouse.glob("*win_amd64.whl")):
         return ["cumesh_vb", "flex_gemm_ap", "o_voxel_vb_ap", "nvdiffrast", "nvdiffrec_render"]
     return ["cumesh", "flex_gemm", "o_voxel", "nvdiffrast", "nvdiffrec_render"]
+
+
+def _upstream_import_modules_for_wheelhouse(wheelhouse: Path) -> list[str]:
+    if any(wheelhouse.glob("*win_amd64.whl")):
+        return ["cumesh", "flex_gemm", "o_voxel"]
+    return []
+
+
+def _windows_native_aliases_for_wheelhouse(wheelhouse: Path) -> dict[str, str]:
+    if any(wheelhouse.glob("*win_amd64.whl")):
+        return {"cumesh": "cumesh_vb", "flex_gemm": "flex_gemm_ap", "o_voxel": "o_voxel_vb_ap"}
+    return {}
 
 
 def _wheelhouse_contains_natten(wheelhouse: Path) -> bool:

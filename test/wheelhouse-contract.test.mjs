@@ -837,11 +837,25 @@ with tempfile.TemporaryDirectory() as tmp:
     print(json.dumps({
         'linux': setup._native_import_modules_for_wheelhouse(linux),
         'windows': setup._native_import_modules_for_wheelhouse(windows),
+        'windows_aliases': setup._windows_native_aliases_for_wheelhouse(windows),
+        'windows_upstream': setup._upstream_import_modules_for_wheelhouse(windows),
     }, sort_keys=True))
 `)
 
   assert.deepEqual(result.linux, ['cumesh', 'flex_gemm', 'o_voxel', 'nvdiffrast', 'nvdiffrec_render'])
   assert.deepEqual(result.windows, ['cumesh_vb', 'flex_gemm_ap', 'o_voxel_vb_ap', 'nvdiffrast', 'nvdiffrec_render'])
+  assert.deepEqual(result.windows_aliases, { cumesh: 'cumesh_vb', flex_gemm: 'flex_gemm_ap', o_voxel: 'o_voxel_vb_ap' })
+  assert.deepEqual(result.windows_upstream, ['cumesh', 'flex_gemm', 'o_voxel'])
+})
+
+test('runtime installs Windows native aliases before importing upstream inference', () => {
+  const runtime = readFileSync(join(repoRoot, 'pixal3d_extension', 'runtime.py'), 'utf8')
+  assert.match(runtime, /def _install_windows_native_module_aliases\(\)/)
+  assert.match(runtime, /"cumesh": "cumesh_vb"/)
+  assert.match(runtime, /"flex_gemm": "flex_gemm_ap"/)
+  assert.match(runtime, /"o_voxel": "o_voxel_vb_ap"/)
+  assert.match(runtime, /sys\.modules\[upstream_name\] = importlib\.import_module\(windows_name\)/)
+  assert.match(runtime, /_prepare_runtime_compat\(\)\n\s+_install_windows_native_module_aliases\(\)\n\s+from inference import run_inference/)
 })
 
 test('requirements install supplies scipy before no-deps local wheelhouse install', () => {
