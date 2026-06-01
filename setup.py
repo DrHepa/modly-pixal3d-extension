@@ -219,7 +219,7 @@ def _is_known_aarch64_nvidia_platform_check_false_positive(pip_check: dict[str, 
 
 
 def _runtime_cuda_check(venv_python: Path, workspace_root: Path, wheelhouse: Path) -> dict[str, Any]:
-    native_imports = ["cumesh", "nvdiffrast", "nvdiffrec_render"]
+    native_imports = _native_import_modules_for_wheelhouse(wheelhouse)
     if _wheelhouse_contains_natten(wheelhouse):
         native_imports.append("natten")
     code = (
@@ -245,6 +245,12 @@ def _runtime_cuda_check(venv_python: Path, workspace_root: Path, wheelhouse: Pat
     except Exception:
         payload = {"ok": False, "error": "runtime CUDA probe did not return JSON"}
     return {**result, **payload, "ok": bool(result.get("ok") and payload.get("ok"))}
+
+
+def _native_import_modules_for_wheelhouse(wheelhouse: Path) -> list[str]:
+    if any(wheelhouse.glob("*win_amd64.whl")):
+        return ["cumesh_vb", "flex_gemm_ap", "o_voxel_vb_ap", "nvdiffrast", "nvdiffrec_render"]
+    return ["cumesh", "flex_gemm", "o_voxel", "nvdiffrast", "nvdiffrec_render"]
 
 
 def _wheelhouse_contains_natten(wheelhouse: Path) -> bool:

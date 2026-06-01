@@ -821,6 +821,29 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.ok(!result.packages.includes('flex-gemm==1.0.0'))
 })
 
+test('setup runtime CUDA probe uses Windows exact-stack import modules', () => {
+  const result = runPython(`
+import json, tempfile
+from pathlib import Path
+import setup
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    linux = root / 'linux-wheelhouse'
+    windows = root / 'windows-wheelhouse'
+    linux.mkdir()
+    windows.mkdir()
+    (windows / 'cumesh_vb-1.0+cu124torch2.6-cp311-cp311-win_amd64.whl').write_text('', encoding='utf-8')
+    print(json.dumps({
+        'linux': setup._native_import_modules_for_wheelhouse(linux),
+        'windows': setup._native_import_modules_for_wheelhouse(windows),
+    }, sort_keys=True))
+`)
+
+  assert.deepEqual(result.linux, ['cumesh', 'flex_gemm', 'o_voxel', 'nvdiffrast', 'nvdiffrec_render'])
+  assert.deepEqual(result.windows, ['cumesh_vb', 'flex_gemm_ap', 'o_voxel_vb_ap', 'nvdiffrast', 'nvdiffrec_render'])
+})
+
 test('requirements install supplies scipy before no-deps local wheelhouse install', () => {
   const requirements = readFileSync(join(repoRoot, 'requirements.txt'), 'utf8')
   assert.match(requirements, /^scipy$/m)
