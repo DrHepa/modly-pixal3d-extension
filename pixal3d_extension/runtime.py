@@ -106,8 +106,10 @@ def _install_natten_fallback() -> None:
             raise NotImplementedError("natten fallback only supports stride=1")
         if q.ndim != 5 or k.ndim != 5 or v.ndim != 5:
             raise ValueError("natten fallback expects q/k/v shaped as [b, h, w, n, d]")
-        if q.shape != k.shape or q.shape != v.shape:
-            raise ValueError("natten fallback expects q/k/v to share the same shape")
+        if q.shape != k.shape:
+            raise ValueError("natten fallback expects q and k to share the same shape")
+        if v.shape[:4] != q.shape[:4]:
+            raise ValueError("natten fallback expects v to share q/k [b, h, w, n] dimensions")
 
         def normalize_pair(value: Any, name: str) -> tuple[int, int]:
             if isinstance(value, int):
@@ -126,30 +128,31 @@ def _install_natten_fallback() -> None:
         if kernel_h % 2 == 0 or kernel_w % 2 == 0:
             raise ValueError("natten fallback requires odd kernel_size values")
 
-        b, h, w, n, d = q.shape
+        b, h, w, n, d_qk = q.shape
+        d_v = v.shape[-1]
         bn = b * n
         neighborhood_size = kernel_h * kernel_w
         padding = ((kernel_h // 2) * dilation_h, (kernel_w // 2) * dilation_w)
 
-        q_heads = q.permute(0, 3, 4, 1, 2).reshape(bn, d, h, w)
-        k_heads = k.permute(0, 3, 4, 1, 2).reshape(bn, d, h, w)
-        v_heads = v.permute(0, 3, 4, 1, 2).reshape(bn, d, h, w)
+        q_heads = q.permute(0, 3, 4, 1, 2).reshape(bn, d_qk, h, w)
+        k_heads = k.permute(0, 3, 4, 1, 2).reshape(bn, d_qk, h, w)
+        v_heads = v.permute(0, 3, 4, 1, 2).reshape(bn, d_v, h, w)
 
-        q_dense = q_heads.reshape(bn, d, h * w).transpose(1, 2)
+        q_dense = q_heads.reshape(bn, d_qk, h * w).transpose(1, 2)
         k_neighbors = torch_functional.unfold(
             k_heads,
             kernel_size=(kernel_h, kernel_w),
             dilation=(dilation_h, dilation_w),
             padding=padding,
             stride=1,
-        ).reshape(bn, d, neighborhood_size, h * w).permute(0, 3, 2, 1)
+        ).reshape(bn, d_qk, neighborhood_size, h * w).permute(0, 3, 2, 1)
         v_neighbors = torch_functional.unfold(
             v_heads,
             kernel_size=(kernel_h, kernel_w),
             dilation=(dilation_h, dilation_w),
             padding=padding,
             stride=1,
-        ).reshape(bn, d, neighborhood_size, h * w).permute(0, 3, 2, 1)
+        ).reshape(bn, d_v, neighborhood_size, h * w).permute(0, 3, 2, 1)
 
         valid_neighbors = torch_functional.unfold(
             torch.ones((1, 1, h, w), device=q.device, dtype=q.dtype),
@@ -159,12 +162,12 @@ def _install_natten_fallback() -> None:
             stride=1,
         ).reshape(1, neighborhood_size, h * w).transpose(1, 2) > 0
 
-        scores = (q_dense.unsqueeze(2) * k_neighbors).sum(dim=-1) * (1.0 / math.sqrt(d))
+        scores = (q_dense.unsqueeze(2) * k_neighbors).sum(dim=-1) * (1.0 / math.sqrt(d_qk))
         scores = scores.masked_fill(~valid_neighbors, torch.finfo(scores.dtype).min)
         attention = torch.softmax(scores, dim=-1)
         out = (attention.unsqueeze(-1) * v_neighbors).sum(dim=2)
 
-        return out.transpose(1, 2).reshape(b, n, d, h, w).permute(0, 3, 4, 1, 2)
+        return out.transpose(1, 2).reshape(b, n, d_v, h, w).permute(0, 3, 4, 1, 2)
 
     natten_module = types.ModuleType("natten")
     natten_module.__loader__ = None

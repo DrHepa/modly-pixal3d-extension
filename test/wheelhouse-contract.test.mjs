@@ -1047,20 +1047,21 @@ sys.modules.pop('natten.functional', None)
 runtime._install_natten_fallback()
 na2d = sys.modules['natten'].na2d
 
-q = torch.arange(1, 1 + 3 * 3, dtype=torch.float32).reshape(1, 3, 3, 1, 1)
-k = torch.arange(101, 101 + 3 * 3, dtype=torch.float32).reshape(1, 3, 3, 1, 1)
-v = torch.arange(1001, 1001 + 3 * 3, dtype=torch.float32).reshape(1, 3, 3, 1, 1)
+q = torch.arange(1, 1 + 3 * 3 * 2, dtype=torch.float32).reshape(1, 3, 3, 1, 2)
+k = torch.arange(101, 101 + 3 * 3 * 2, dtype=torch.float32).reshape(1, 3, 3, 1, 2)
+v = torch.arange(1001, 1001 + 3 * 3 * 3, dtype=torch.float32).reshape(1, 3, 3, 1, 3)
 
 actual = na2d(q, k, v, kernel_size=(3, 3), dilation=(1, 1))
 
 def manual_na2d(q, k, v, kernel_size, dilation):
-    b, h, w, n, d = q.shape
+    b, h, w, n, d_qk = q.shape
+    d_v = v.shape[-1]
     kh, kw = kernel_size
     dh, dw = dilation
-    out = torch.empty_like(q)
+    out = torch.empty((b, h, w, n, d_v), dtype=v.dtype, device=v.device)
     radius_h = kh // 2
     radius_w = kw // 2
-    scale = 1.0 / math.sqrt(d)
+    scale = 1.0 / math.sqrt(d_qk)
     for bi in range(b):
         for yi in range(h):
             for xi in range(w):
@@ -1079,8 +1080,8 @@ def manual_na2d(q, k, v, kernel_size, dilation):
     return out
 
 expected = manual_na2d(q, k, v, kernel_size=(3, 3), dilation=(1, 1))
-global_scores = torch.softmax((q.reshape(1, 9, 1) * k.reshape(1, 1, 9)) * (1.0 / math.sqrt(1)), dim=-1)
-global_out = torch.matmul(global_scores, v.reshape(1, 9, 1)).reshape(1, 3, 3, 1, 1)
+global_scores = torch.softmax(torch.matmul(q.reshape(1, 9, 2), k.reshape(1, 9, 2).transpose(1, 2)) * (1.0 / math.sqrt(2)), dim=-1)
+global_out = torch.matmul(global_scores, v.reshape(1, 9, 3)).reshape(1, 3, 3, 1, 3)
 
 print(json.dumps({
     'torch_available': True,
@@ -1091,7 +1092,7 @@ print(json.dumps({
 `)
 
   if (result.torch_available) {
-    assert.deepEqual(result.shape, [1, 3, 3, 1, 1])
+    assert.deepEqual(result.shape, [1, 3, 3, 1, 3])
     assert.equal(result.matches_manual, true)
     assert.equal(result.differs_from_global, true)
   } else {
