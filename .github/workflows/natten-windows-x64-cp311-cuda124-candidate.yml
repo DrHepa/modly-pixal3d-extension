@@ -1,4 +1,4 @@
-name: NATTEN Windows x64 cp311 cuda124 candidate
+name: NATTEN v0.21.0 Windows x64 cp311 th26 cu124 candidate
 
 on:
   workflow_dispatch:
@@ -10,10 +10,10 @@ on:
 
 jobs:
   build-natten-candidate:
-    name: Build natten v0.17.5 windows-x64-cp311-cuda124 candidate
+    name: Build natten v0.21.0 windows-x64-cp311-th26-cu124 candidate
     runs-on: windows-latest
     env:
-      NATTEN_VERSION: v0.17.5
+      NATTEN_VERSION: v0.21.0
       PYTHON_VERSION: '3.11'
       PYTORCH_CUDA_INDEX: https://download.pytorch.org/whl/cu124
       TORCH_VERSION: 2.6.0+cu124
@@ -63,7 +63,7 @@ jobs:
           python -m pip install --index-url $env:PYTORCH_CUDA_INDEX torch==$env:TORCH_VERSION torchvision==$env:TORCHVISION_VERSION
           python -m pip install cmake ninja packaging wheel setuptools
 
-      - name: Clone NATTEN v0.17.5 with submodules
+      - name: Clone NATTEN v0.21.0 with submodules
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -76,9 +76,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $repoRoot = Get-Location
-          $workRoot = Join-Path $repoRoot 'build\natten-windows-x64-cp311-cuda124-candidate'
+          $workRoot = Join-Path $repoRoot 'build\natten-0.21.0-windows-x64-cp311-cuda124-candidate'
           $wheelDir = Join-Path $workRoot 'dist'
-          $reportPath = Join-Path $workRoot 'NATTEN-CANDIDATE.json'
+          $reportPath = Join-Path $workRoot 'NATTEN-0.21.0-CANDIDATE.json'
           $verificationPath = Join-Path $workRoot 'verification.json'
           New-Item -ItemType Directory -Force -Path $wheelDir | Out-Null
           $archList = if ([string]::IsNullOrWhiteSpace($env:INPUT_CUDA_ARCH_LIST)) { '7.5;8.6;8.9' } else { $env:INPUT_CUDA_ARCH_LIST }
@@ -111,8 +111,8 @@ jobs:
               import torch
               payload = {
                   "importable": True,
-                  "version": getattr(natten, "__version__", None),
-                  "HAS_LIBNATTEN": bool(getattr(natten, "HAS_LIBNATTEN", False)),
+                  "__version__": getattr(natten, "__version__", None),
+                  "HAS_LIBNATTEN": getattr(natten, "HAS_LIBNATTEN", None),
                   "torch_version": torch.__version__,
                   "torch_cuda_version": torch.version.cuda,
               }
@@ -159,7 +159,7 @@ jobs:
             wheel_filenames = @($wheels | ForEach-Object { $_.Name })
             verification = [ordered]@{
               importable = [bool]$verification.importable
-              natten_version = $verification.version
+              natten_version = $verification.__version__
               has_libnatten = [bool]$verification.HAS_LIBNATTEN
               verification_blocked = $verification.verification_blocked
               error = $verification.error
@@ -176,9 +176,9 @@ jobs:
       - name: Upload candidate artifact only
         uses: actions/upload-artifact@v4
         with:
-          name: natten-windows-x64-cp311-cuda124-candidate
+          name: natten-0.21.0-windows-x64-cp311-cuda124-candidate
           path: |
-            build/natten-windows-x64-cp311-cuda124-candidate/dist/*.whl
-            build/natten-windows-x64-cp311-cuda124-candidate/NATTEN-CANDIDATE.json
-            build/natten-windows-x64-cp311-cuda124-candidate/verification.json
+            build/natten-0.21.0-windows-x64-cp311-cuda124-candidate/dist/*.whl
+            build/natten-0.21.0-windows-x64-cp311-cuda124-candidate/NATTEN-0.21.0-CANDIDATE.json
+            build/natten-0.21.0-windows-x64-cp311-cuda124-candidate/verification.json
           if-no-files-found: error

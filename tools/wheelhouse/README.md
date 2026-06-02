@@ -51,7 +51,7 @@ Windows wheelhouses must follow the exact-stack policy used by Pixal3D-ComfyUI r
 
 ## Windows NATTEN candidate workflow
 
-`.github/workflows/natten-windows-x64-cp311-cuda124-candidate.yml` is a manual GitHub Actions probe for building a native Windows `win_amd64` NATTEN wheel from `SHI-Labs/NATTEN` tag `v0.17.5` against Python `3.11`, torch `2.6.0+cu124`, and CUDA `12.4`.
+`.github/workflows/natten-windows-x64-cp311-cuda124-candidate.yml` is a manual GitHub Actions probe for building a native Windows `win_amd64` NATTEN wheel from `SHI-Labs/NATTEN` tag `v0.21.0` against Python `3.11`, torch `2.6.0+cu124`, torchvision `0.21.0+cu124`, and CUDA `12.4.1`. This candidate is the closest Windows port to upstream `requirements_th26_cu124.txt`.
 
 This workflow is candidate-only:
 
@@ -59,7 +59,8 @@ This workflow is candidate-only:
 - It must not update `wheelhouse.manifest.json`.
 - It accepts `workflow_dispatch` input `cuda_arch_list` with default `7.5;8.6;8.9` so maintainers can narrow or expand SM coverage deliberately.
 - It provisions the Windows CUDA toolkit as a full toolkit install and sets up the x64 MSVC developer environment before building; do not switch back to the minimal `nvcc`/`cudart-dev` subpackage install unless it has been revalidated on `windows-latest`.
-- It writes `NATTEN-CANDIDATE.json` and `verification.json` alongside the built wheel.
+- It writes `NATTEN-0.21.0-CANDIDATE.json` and `verification.json` alongside the built wheel.
+- If import succeeds, `verification.json` records both `natten.__version__` and `natten.HAS_LIBNATTEN`.
 - It must verify `natten.HAS_LIBNATTEN == True` before any future wheelhouse integration or setup-policy change.
 - GitHub-hosted Windows runners do not expose an NVIDIA driver/GPU; if importing NATTEN is blocked by `Found no NVIDIA driver`, the workflow records `"verification_blocked": "no_nvidia_driver"` in `verification.json` and still uploads the wheel for verification on a real Windows NVIDIA machine.
 
