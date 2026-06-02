@@ -33,7 +33,11 @@ jobs:
         with:
           cuda: ${{ env.CUDA_VERSION }}
           method: network
-          sub-packages: '["nvcc", "cudart-dev"]'
+
+      - name: Set up MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
 
       - name: Verify CUDA 12.4 nvcc is available
         shell: pwsh
@@ -47,6 +51,7 @@ jobs:
             throw 'CUDA 12.4 nvcc is unavailable; fail clearly instead of uploading a placeholder candidate artifact.'
           }
           $env:Path = "$($env:CUDA_PATH)\bin;$($env:CUDA_PATH)\libnvvp;$env:Path"
+          cl
           nvcc --version
           "CUDA_PATH=$env:CUDA_PATH" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
