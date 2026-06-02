@@ -69,6 +69,40 @@ jobs:
           $ErrorActionPreference = 'Stop'
           git clone --branch $env:NATTEN_VERSION --depth 1 --recurse-submodules https://github.com/SHI-Labs/NATTEN.git build\natten-src
 
+      - name: Patch NATTEN MSVC-incompatible warning flags
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sourceRoot = 'build\natten-src'
+          $candidateFiles = Get-ChildItem -Path $sourceRoot -Recurse -File -Include '*.py', '*.cmake', 'CMakeLists.txt'
+          $replacements = [ordered]@{
+            '-Xcompiler -Wall' = ''
+            '-Xcompiler=-Wconversion' = ''
+            '-Xcompiler=-fno-strict-aliasing' = ''
+            '"-Wall"' = '""'
+            '"-Wconversion"' = '""'
+            '"-fno-strict-aliasing"' = '""'
+            "'-Wall'" = "''"
+            "'-Wconversion'" = "''"
+            "'-fno-strict-aliasing'" = "''"
+          }
+          $patched = @()
+          foreach ($file in $candidateFiles) {
+            $before = Get-Content -Path $file.FullName -Raw
+            $after = $before
+            foreach ($entry in $replacements.GetEnumerator()) {
+              $after = $after.Replace($entry.Key, $entry.Value)
+            }
+            if ($after -ne $before) {
+              Set-Content -Path $file.FullName -Value $after -Encoding utf8
+              $patched += $file.FullName
+            }
+          }
+          if ($patched.Count -lt 1) {
+            throw 'Expected to patch NATTEN GCC-only compiler flags for MSVC, but no source files changed.'
+          }
+          $patched | ForEach-Object { "Patched MSVC-incompatible flags in $_" }
+
       - name: Build NATTEN wheel candidate
         shell: pwsh
         env:

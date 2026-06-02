@@ -59,6 +59,7 @@ This workflow is candidate-only:
 - It must not update `wheelhouse.manifest.json`.
 - It accepts `workflow_dispatch` input `cuda_arch_list` with default `7.5;8.6;8.9` so maintainers can narrow or expand SM coverage deliberately.
 - It provisions the Windows CUDA toolkit as a full toolkit install and sets up the x64 MSVC developer environment before building; do not switch back to the minimal `nvcc`/`cudart-dev` subpackage install unless it has been revalidated on `windows-latest`.
+- It applies a post-clone Windows build patch that removes MSVC-incompatible GCC warning flags such as `-Wconversion` and `-fno-strict-aliasing`; upstream `v0.21.0` otherwise passes those flags through `nvcc -Xcompiler` to `cl.exe` and fails before producing a wheel.
 - It writes `NATTEN-0.21.0-CANDIDATE.json` and `verification.json` alongside the built wheel.
 - If import succeeds, `verification.json` records both `natten.__version__` and `natten.HAS_LIBNATTEN`.
 - It must verify `natten.HAS_LIBNATTEN == True` before any future wheelhouse integration or setup-policy change.

@@ -478,6 +478,10 @@ test('windows cp311 cuda124 NATTEN candidate workflow is manual, exact-stack, an
   assert.match(workflow, /arch: x64/)
   assert.match(workflow, /\n\s+cl\n\s+nvcc --version/)
   assert.match(workflow, /git clone --branch \$env:NATTEN_VERSION --depth 1 --recurse-submodules https:\/\/github\.com\/SHI-Labs\/NATTEN\.git/)
+  assert.match(workflow, /Patch NATTEN MSVC-incompatible warning flags/)
+  assert.match(workflow, /-Xcompiler=-Wconversion/)
+  assert.match(workflow, /-Xcompiler=-fno-strict-aliasing/)
+  assert.match(workflow, /Expected to patch NATTEN GCC-only compiler flags for MSVC/)
   assert.match(workflow, /NATTEN_VERSION: v0\.21\.0/)
   assert.doesNotMatch(workflow, /NATTEN_VERSION: v0\.17\.5/)
   assert.match(workflow, /\$env:TORCH_CUDA_ARCH_LIST = \$archList/)
@@ -511,6 +515,7 @@ test('windows cp311 cuda124 NATTEN candidate workflow is manual, exact-stack, an
   assert.match(recipe, /NATTEN-0\.21\.0-CANDIDATE\.json/)
   assert.match(recipe, /natten\.__version__/)
   assert.match(recipe, /verify `natten\.HAS_LIBNATTEN == True`/)
+  assert.match(recipe, /MSVC-incompatible GCC warning flags/)
 
   assert.ok(!manifest.includes('natten-windows-x64-cp311-cuda124-candidate'))
   assert.ok(!manifest.includes('v0.17.5'))
