@@ -262,6 +262,65 @@ test('runtime suppresses upstream FlexGEMM autotuner verbose without disabling c
   assert.match(runtime, /from inference import run_inference\n\s+_silence_flex_gemm_autotuners\(\)/)
 })
 
+test('low_vram schema is UI-compatible select and runtime parses values explicitly', () => {
+  const manifest = JSON.parse(readFileSync(join(repoRoot, 'manifest.json'), 'utf8'))
+  const manifestParam = manifest.nodes[0].params_schema.find((param) => param.id === 'low_vram')
+  assert.ok(manifestParam)
+  assert.equal(manifestParam.type, 'select')
+  assert.equal(manifestParam.default, 'low_vram')
+  assert.deepEqual(manifestParam.options, [
+    { value: 'low_vram', label: 'Low VRAM' },
+    { value: 'standard', label: 'Standard' },
+  ])
+
+  const generatorSchema = runPython(`
+import json
+from generator import Pixal3DGenerator
+schema = Pixal3DGenerator.params_schema()
+low_vram = next(param for param in schema if param['id'] == 'low_vram')
+print(json.dumps(low_vram, sort_keys=True))
+`)
+  assert.equal(generatorSchema.type, 'select')
+  assert.equal(generatorSchema.default, 'low_vram')
+  assert.deepEqual(generatorSchema.options, [
+    { value: 'low_vram', label: 'Low VRAM' },
+    { value: 'standard', label: 'Standard' },
+  ])
+
+  const runtime = readFileSync(join(repoRoot, 'pixal3d_extension', 'runtime.py'), 'utf8')
+  assert.match(runtime, /def _parse_low_vram\(value: Any, default: bool = True\) -> bool:/)
+  assert.doesNotMatch(runtime, /bool\(params\.get\("low_vram", False\)\)/)
+
+  const parsed = runPython(`
+import json
+from pixal3d_extension.runtime import _parse_low_vram
+print(json.dumps({
+    'default_none': _parse_low_vram(None),
+    'bool_true': _parse_low_vram(True),
+    'bool_false': _parse_low_vram(False),
+    'string_true': _parse_low_vram('true'),
+    'string_false': _parse_low_vram('false'),
+    'string_low_vram': _parse_low_vram('low_vram'),
+    'string_standard': _parse_low_vram('standard'),
+    'int_one': _parse_low_vram(1),
+    'int_zero': _parse_low_vram(0),
+    'unknown_uses_default_false': _parse_low_vram('maybe', default=False),
+}, sort_keys=True))
+`)
+  assert.deepEqual(parsed, {
+    bool_false: false,
+    bool_true: true,
+    default_none: true,
+    int_one: true,
+    int_zero: false,
+    string_false: false,
+    string_low_vram: true,
+    string_standard: false,
+    string_true: true,
+    unknown_uses_default_false: false,
+  })
+})
+
 test('linux x64 cp312 cuda124 wheelhouse workflow is documented and manifest-backed', () => {
   const manifest = JSON.parse(readFileSync(join(repoRoot, 'wheelhouse.manifest.json'), 'utf8'))
   const workflowPath = join(repoRoot, '.github', 'workflows', 'wheelhouse-linux-x64-cp312-cuda124.yml')
@@ -864,15 +923,10 @@ import importlib.util, json, sys, types
 from pixal3d_extension import runtime
 
 original_import_module = runtime.importlib.import_module
-original_os_name = runtime.os.name
 
 def fake_import_module(name):
     if name == 'natten':
         raise ModuleNotFoundError("No module named 'natten'", name='natten')
-    if name in {'cumesh_vb', 'flex_gemm_ap', 'o_voxel_vb_ap'}:
-        module = types.ModuleType(name)
-        module.alias_name = name
-        return module
     return original_import_module(name)
 
 fake_torch = types.ModuleType('torch')
@@ -890,8 +944,6 @@ sys.modules.pop('natten', None)
 sys.modules.pop('natten.functional', None)
 
 runtime.importlib.import_module = fake_import_module
-runtime.os.name = 'nt'
-runtime._install_windows_native_module_aliases()
 runtime._install_natten_fallback()
 
 natten = sys.modules['natten']
@@ -908,11 +960,6 @@ print(json.dumps({
     'find_spec_name': importlib.util.find_spec('natten').name,
     'legacy_import_failed': functional_import_failed,
     'functional_loaded': 'natten.functional' in sys.modules,
-    'windows_aliases': {
-        'cumesh': getattr(sys.modules['cumesh'], 'alias_name', None),
-        'flex_gemm': getattr(sys.modules['flex_gemm'], 'alias_name', None),
-        'o_voxel': getattr(sys.modules['o_voxel'], 'alias_name', None),
-    },
 }, sort_keys=True))
 `)
 
@@ -922,11 +969,49 @@ print(json.dumps({
   assert.equal(result.find_spec_name, 'natten')
   assert.equal(result.legacy_import_failed, true)
   assert.equal(result.functional_loaded, false)
-  assert.deepEqual(result.windows_aliases, {
-    cumesh: 'cumesh_vb',
-    flex_gemm: 'flex_gemm_ap',
-    o_voxel: 'o_voxel_vb_ap',
-  })
+})
+
+test('runtime still installs NATTEN fallback on Windows when native libnatten is absent', () => {
+  const result = runPython(`
+import json, sys, types
+from pixal3d_extension import runtime
+
+original_import_module = runtime.importlib.import_module
+
+def fake_import_module(name):
+    if name == 'natten':
+        raise ModuleNotFoundError("No module named 'natten'", name='natten')
+    return original_import_module(name)
+
+fake_torch = types.ModuleType('torch')
+fake_torch.Tensor = object
+fake_torch_nn = types.ModuleType('torch.nn')
+fake_torch_nn.Module = type('Module', (), {})
+fake_torch_functional = types.ModuleType('torch.nn.functional')
+fake_torch.nn = fake_torch_nn
+fake_torch_nn.functional = fake_torch_functional
+sys.modules['torch'] = fake_torch
+sys.modules['torch.nn'] = fake_torch_nn
+sys.modules['torch.nn.functional'] = fake_torch_functional
+sys.modules.pop('natten', None)
+sys.modules.pop('natten.functional', None)
+
+runtime.importlib.import_module = fake_import_module
+runtime.os.name = 'nt'
+runtime._install_natten_fallback()
+
+print(json.dumps({
+    'has_natten': 'natten' in sys.modules,
+    'has_libnatten': sys.modules['natten'].HAS_LIBNATTEN,
+    'has_na2d': callable(sys.modules['natten'].na2d),
+    'has_spec': sys.modules['natten'].__spec__ is not None,
+}, sort_keys=True))
+`)
+
+  assert.equal(result.has_natten, true)
+  assert.equal(result.has_libnatten, false)
+  assert.equal(result.has_na2d, true)
+  assert.equal(result.has_spec, true)
 })
 
 test('runtime NATTEN fallback is local neighborhood attention, not dense global SDPA', () => {

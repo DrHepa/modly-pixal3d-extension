@@ -220,6 +220,25 @@ def _failure(code: str, message: str) -> dict:
     return {"status": "failed", "code": code, "message": message, "generation_allowed": False}
 
 
+def _parse_low_vram(value: Any, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if value in (0, 1):
+            return bool(value)
+        return default
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on", "low_vram", "low-vram", "low vram"}:
+            return True
+        if normalized in {"false", "0", "no", "off", "standard"}:
+            return False
+        return default
+    return default
+
+
 def _resolve_glb(output_dir: Path, pipeline_result: Any) -> Path | None:
     if isinstance(pipeline_result, dict) and pipeline_result.get("glb_path"):
         candidate = Path(pipeline_result["glb_path"])
@@ -291,6 +310,7 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
 
     try:
         params = job.get("params") or {}
+        parsed_low_vram = _parse_low_vram(params.get("low_vram"), default=True)
         if pipeline_factory is not None:
             pipeline = pipeline_factory(job.get("model_source") or PIXAL3D_MODEL_SOURCE)
             result = pipeline(
@@ -298,7 +318,7 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
                 output_dir=str(output_dir),
                 seed=params.get("seed"),
                 resolution=params.get("resolution", 1024),
-                low_vram=params.get("low_vram", False),
+                low_vram=parsed_low_vram,
                 manual_fov=params.get("manual_fov"),
             )
         else:
@@ -306,6 +326,7 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
             _install_windows_native_module_aliases()
             _install_natten_fallback()
             from inference import run_inference
+
             _silence_flex_gemm_autotuners()
 
             seed = int(params.get("seed", -1))
@@ -318,7 +339,7 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
                 seed=seed,
                 model_path=job.get("model_source") or PIXAL3D_MODEL_SOURCE,
                 manual_fov=float(params.get("manual_fov") or -1.0),
-                low_vram=bool(params.get("low_vram", False)),
+                low_vram=parsed_low_vram,
                 resolution=int(params.get("resolution", 1024)),
             )
             result = {"glb_path": str(glb_path), "pbr": {}}
@@ -337,7 +358,7 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
         "params": {
             "seed": params.get("seed"),
             "resolution": params.get("resolution", 1024),
-            "low_vram": params.get("low_vram", False),
+            "low_vram": parsed_low_vram,
             "manual_fov": params.get("manual_fov"),
         },
     }

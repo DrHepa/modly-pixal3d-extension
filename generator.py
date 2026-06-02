@@ -66,9 +66,13 @@ class Pixal3DGenerator:
             {
                 "id": "low_vram",
                 "label": "Low VRAM",
-                "type": "boolean",
-                "default": False,
-                "tooltip": "Use lower-memory generation settings when available.",
+                "type": "select",
+                "default": "low_vram",
+                "options": [
+                    {"value": "low_vram", "label": "Low VRAM"},
+                    {"value": "standard", "label": "Standard"},
+                ],
+                "tooltip": "Prefer low-VRAM mode for safer Pixal3D generation; Standard loads all models on GPU.",
             },
             {
                 "id": "seed",
