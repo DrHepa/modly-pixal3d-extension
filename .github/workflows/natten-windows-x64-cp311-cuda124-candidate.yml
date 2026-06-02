@@ -104,7 +104,44 @@ jobs:
           }
           $wheelPath = $wheels[0].FullName
           python -m pip install --force-reinstall --no-deps $wheelPath
-          $verificationRaw = python -c "import json, natten, torch; print(json.dumps({'importable': True, 'version': getattr(natten, '__version__', None), 'HAS_LIBNATTEN': bool(getattr(natten, 'HAS_LIBNATTEN', False)), 'torch_version': torch.__version__, 'torch_cuda_version': torch.version.cuda}, sort_keys=True))"
+          $verifyScript = @'
+import json
+try:
+    import natten
+    import torch
+    payload = {
+        "importable": True,
+        "version": getattr(natten, "__version__", None),
+        "HAS_LIBNATTEN": bool(getattr(natten, "HAS_LIBNATTEN", False)),
+        "torch_version": torch.__version__,
+        "torch_cuda_version": torch.version.cuda,
+    }
+except RuntimeError as exc:
+    message = str(exc)
+    if "Found no NVIDIA driver" in message:
+        payload = {
+            "importable": False,
+            "HAS_LIBNATTEN": False,
+            "verification_blocked": "no_nvidia_driver",
+            "error": message,
+        }
+    else:
+        payload = {
+            "importable": False,
+            "HAS_LIBNATTEN": False,
+            "verification_blocked": "runtime_error",
+            "error": message,
+        }
+except Exception as exc:
+    payload = {
+        "importable": False,
+        "HAS_LIBNATTEN": False,
+        "verification_blocked": type(exc).__name__,
+        "error": str(exc),
+    }
+print(json.dumps(payload, sort_keys=True))
+'@
+          $verificationRaw = $verifyScript | python -
           $verificationRaw | Set-Content -Path $verificationPath -Encoding utf8
           $verification = Get-Content -Path $verificationPath -Raw | ConvertFrom-Json
           $report = [ordered]@{
@@ -124,6 +161,8 @@ jobs:
               importable = [bool]$verification.importable
               natten_version = $verification.version
               has_libnatten = [bool]$verification.HAS_LIBNATTEN
+              verification_blocked = $verification.verification_blocked
+              error = $verification.error
               torch_version = $verification.torch_version
               torch_cuda_version = $verification.torch_cuda_version
             }
@@ -131,7 +170,7 @@ jobs:
           }
           $report | ConvertTo-Json -Depth 6 | Set-Content -Path $reportPath -Encoding utf8
           if (-not $verification.HAS_LIBNATTEN) {
-            Write-Warning 'Built candidate imports natten, but HAS_LIBNATTEN is not True. Keep this candidate out of wheelhouse integration.'
+            Write-Warning 'Built candidate could not be fully verified with HAS_LIBNATTEN=True on this runner. Keep this candidate out of wheelhouse integration until verified on a real NVIDIA Windows machine.'
           }
 
       - name: Upload candidate artifact only

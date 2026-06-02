@@ -61,6 +61,7 @@ This workflow is candidate-only:
 - It provisions the Windows CUDA toolkit as a full toolkit install and sets up the x64 MSVC developer environment before building; do not switch back to the minimal `nvcc`/`cudart-dev` subpackage install unless it has been revalidated on `windows-latest`.
 - It writes `NATTEN-CANDIDATE.json` and `verification.json` alongside the built wheel.
 - It must verify `natten.HAS_LIBNATTEN == True` before any future wheelhouse integration or setup-policy change.
+- GitHub-hosted Windows runners do not expose an NVIDIA driver/GPU; if importing NATTEN is blocked by `Found no NVIDIA driver`, the workflow records `"verification_blocked": "no_nvidia_driver"` in `verification.json` and still uploads the wheel for verification on a real Windows NVIDIA machine.
 
 Treat a successful build with `HAS_LIBNATTEN=False` as a failed integration candidate. The artifact may still be useful for compiler-log inspection, but it is NOT publishable and must not be wired into release-backed wheelhouse lanes.
 
