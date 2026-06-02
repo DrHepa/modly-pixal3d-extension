@@ -1,0 +1,140 @@
+name: NATTEN Windows x64 cp311 cuda124 candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      cuda_arch_list:
+        description: CUDA arch list for the NATTEN candidate build
+        required: true
+        default: '7.5;8.6;8.9'
+
+jobs:
+  build-natten-candidate:
+    name: Build natten v0.17.5 windows-x64-cp311-cuda124 candidate
+    runs-on: windows-latest
+    env:
+      NATTEN_VERSION: v0.17.5
+      PYTHON_VERSION: '3.11'
+      PYTORCH_CUDA_INDEX: https://download.pytorch.org/whl/cu124
+      TORCH_VERSION: 2.6.0+cu124
+      TORCHVISION_VERSION: 0.21.0+cu124
+      CUDA_VERSION: 12.4.1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install CUDA 12.4 toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: ${{ env.CUDA_VERSION }}
+          method: network
+          sub-packages: '["nvcc", "cudart-dev"]'
+
+      - name: Verify CUDA 12.4 nvcc is available
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:CUDA_PATH) {
+            $env:CUDA_PATH = Join-Path $env:ProgramFiles 'NVIDIA GPU Computing Toolkit\CUDA\v12.4'
+          }
+          $nvccPath = Join-Path $env:CUDA_PATH 'bin\nvcc.exe'
+          if (-not (Test-Path $nvccPath)) {
+            throw 'CUDA 12.4 nvcc is unavailable; fail clearly instead of uploading a placeholder candidate artifact.'
+          }
+          $env:Path = "$($env:CUDA_PATH)\bin;$($env:CUDA_PATH)\libnvvp;$env:Path"
+          nvcc --version
+          "CUDA_PATH=$env:CUDA_PATH" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install torch 2.6.0+cu124 and build dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install --upgrade pip
+          python -m pip install --index-url $env:PYTORCH_CUDA_INDEX torch==$env:TORCH_VERSION torchvision==$env:TORCHVISION_VERSION
+          python -m pip install cmake ninja packaging wheel setuptools
+
+      - name: Clone NATTEN v0.17.5 with submodules
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git clone --branch $env:NATTEN_VERSION --depth 1 --recurse-submodules https://github.com/SHI-Labs/NATTEN.git build\natten-src
+
+      - name: Build NATTEN wheel candidate
+        shell: pwsh
+        env:
+          INPUT_CUDA_ARCH_LIST: ${{ github.event.inputs.cuda_arch_list }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repoRoot = Get-Location
+          $workRoot = Join-Path $repoRoot 'build\natten-windows-x64-cp311-cuda124-candidate'
+          $wheelDir = Join-Path $workRoot 'dist'
+          $reportPath = Join-Path $workRoot 'NATTEN-CANDIDATE.json'
+          $verificationPath = Join-Path $workRoot 'verification.json'
+          New-Item -ItemType Directory -Force -Path $wheelDir | Out-Null
+          $archList = if ([string]::IsNullOrWhiteSpace($env:INPUT_CUDA_ARCH_LIST)) { '7.5;8.6;8.9' } else { $env:INPUT_CUDA_ARCH_LIST }
+          $env:CUDA_ARCH_LIST = $archList
+          $env:TORCH_CUDA_ARCH_LIST = $archList
+          $env:NATTEN_CUDA_ARCH = $archList
+          $env:USE_NINJA = '1'
+          $env:CMAKE_GENERATOR = 'Ninja'
+          if (-not $env:CUDA_PATH) {
+            $env:CUDA_PATH = Join-Path $env:ProgramFiles 'NVIDIA GPU Computing Toolkit\CUDA\v12.4'
+          }
+          $env:Path = "$($env:CUDA_PATH)\bin;$($env:Path)"
+          Push-Location build\natten-src
+          try {
+            python -m pip wheel . --no-build-isolation --no-deps --wheel-dir $wheelDir
+          }
+          finally {
+            Pop-Location
+          }
+          $wheels = @(Get-ChildItem -Path $wheelDir -Filter '*.whl' -File)
+          if ($wheels.Count -lt 1) {
+            throw 'NATTEN candidate build produced no wheels.'
+          }
+          $wheelPath = $wheels[0].FullName
+          python -m pip install --force-reinstall --no-deps $wheelPath
+          $verificationRaw = python -c "import json, natten, torch; print(json.dumps({'importable': True, 'version': getattr(natten, '__version__', None), 'HAS_LIBNATTEN': bool(getattr(natten, 'HAS_LIBNATTEN', False)), 'torch_version': torch.__version__, 'torch_cuda_version': torch.version.cuda}, sort_keys=True))"
+          $verificationRaw | Set-Content -Path $verificationPath -Encoding utf8
+          $verification = Get-Content -Path $verificationPath -Raw | ConvertFrom-Json
+          $report = [ordered]@{
+            package = 'natten'
+            candidate_only = $true
+            source_repository = 'https://github.com/SHI-Labs/NATTEN'
+            source_tag = $env:NATTEN_VERSION
+            python_version = $env:PYTHON_VERSION
+            torch_version = $env:TORCH_VERSION
+            torchvision_version = $env:TORCHVISION_VERSION
+            torch_cuda_index = $env:PYTORCH_CUDA_INDEX
+            cuda_version = $env:CUDA_VERSION
+            cuda_path = $env:CUDA_PATH
+            cuda_arch_list = $archList
+            wheel_filenames = @($wheels | ForEach-Object { $_.Name })
+            verification = [ordered]@{
+              importable = [bool]$verification.importable
+              natten_version = $verification.version
+              has_libnatten = [bool]$verification.HAS_LIBNATTEN
+              torch_version = $verification.torch_version
+              torch_cuda_version = $verification.torch_cuda_version
+            }
+            publish_policy = 'Candidate artifact only. Verify HAS_LIBNATTEN=True before any wheelhouse integration, and do not update wheelhouse.manifest.json from this workflow.'
+          }
+          $report | ConvertTo-Json -Depth 6 | Set-Content -Path $reportPath -Encoding utf8
+          if (-not $verification.HAS_LIBNATTEN) {
+            Write-Warning 'Built candidate imports natten, but HAS_LIBNATTEN is not True. Keep this candidate out of wheelhouse integration.'
+          }
+
+      - name: Upload candidate artifact only
+        uses: actions/upload-artifact@v4
+        with:
+          name: natten-windows-x64-cp311-cuda124-candidate
+          path: |
+            build/natten-windows-x64-cp311-cuda124-candidate/dist/*.whl
+            build/natten-windows-x64-cp311-cuda124-candidate/NATTEN-CANDIDATE.json
+            build/natten-windows-x64-cp311-cuda124-candidate/verification.json
+          if-no-files-found: error

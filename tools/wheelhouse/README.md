@@ -49,6 +49,20 @@ The Linux x64 base wheelhouse deliberately does **not** block on NATTEN/libnatte
 
 Windows wheelhouses must follow the exact-stack policy used by Pixal3D-ComfyUI references: Python ABI, PyTorch minor, CUDA minor, platform tag, and GPU architecture/SM coverage must all match. Modly's packaged app currently embeds python-build-standalone `3.11.9`, so `windows-x64-cp311-cuda124` is the primary GitHub-install lane; `windows-x64-cp312-cuda124` remains available for development environments running Python 3.12. The base lanes use exact-stack Pozzetti wheels for `flex_gemm_ap`, `cumesh_vb`, `o_voxel_vb_ap`, `drtk`, `flash_attn`, `nvdiffrast`, and `nvdiffrec_render`. Do not publish or auto-install generic Windows NATTEN wheels; use curated exact-stack artifacts only, and keep fallback NAF first-class when `HAS_LIBNATTEN` is unavailable.
 
+## Windows NATTEN candidate workflow
+
+`.github/workflows/natten-windows-x64-cp311-cuda124-candidate.yml` is a manual GitHub Actions probe for building a native Windows `win_amd64` NATTEN wheel from `SHI-Labs/NATTEN` tag `v0.17.5` against Python `3.11`, torch `2.6.0+cu124`, and CUDA `12.4`.
+
+This workflow is candidate-only:
+
+- It uploads a GitHub Actions artifact, not a release asset.
+- It must not update `wheelhouse.manifest.json`.
+- It accepts `workflow_dispatch` input `cuda_arch_list` with default `7.5;8.6;8.9` so maintainers can narrow or expand SM coverage deliberately.
+- It writes `NATTEN-CANDIDATE.json` and `verification.json` alongside the built wheel.
+- It must verify `natten.HAS_LIBNATTEN == True` before any future wheelhouse integration or setup-policy change.
+
+Treat a successful build with `HAS_LIBNATTEN=False` as a failed integration candidate. The artifact may still be useful for compiler-log inspection, but it is NOT publishable and must not be wired into release-backed wheelhouse lanes.
+
 Native source directories can be supplied with:
 
 ```bash
