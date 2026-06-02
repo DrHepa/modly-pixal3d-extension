@@ -103,6 +103,21 @@ jobs:
           }
           $patched | ForEach-Object { "Patched MSVC-incompatible flags in $_" }
 
+      - name: Patch vendored CUTLASS C++17 detection for MSVC
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $platformHeader = 'build\natten-src\third_party\cutlass\include\cutlass\platform\platform.h'
+          $before = Get-Content -Path $platformHeader -Raw
+          $needle = '#if (201703L <=__cplusplus)'
+          $replacement = '#if (201703L <=__cplusplus) || (defined(_MSVC_LANG) && (201703L <= _MSVC_LANG))'
+          if (-not $before.Contains($needle)) {
+            throw 'Expected CUTLASS platform.h C++17 detection guard was not found.'
+          }
+          $after = $before.Replace($needle, $replacement)
+          Set-Content -Path $platformHeader -Value $after -Encoding utf8
+          Write-Host 'Patched vendored CUTLASS platform.h to use _MSVC_LANG for C++17 detection.'
+
       - name: Build NATTEN wheel candidate
         shell: pwsh
         env:

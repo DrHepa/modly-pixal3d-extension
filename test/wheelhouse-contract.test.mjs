@@ -482,6 +482,10 @@ test('windows cp311 cuda124 NATTEN candidate workflow is manual, exact-stack, an
   assert.match(workflow, /-Xcompiler=-Wconversion/)
   assert.match(workflow, /-Xcompiler=-fno-strict-aliasing/)
   assert.match(workflow, /Expected to patch NATTEN GCC-only compiler flags for MSVC/)
+  assert.match(workflow, /Patch vendored CUTLASS C\+\+17 detection for MSVC/)
+  assert.match(workflow, /third_party\\cutlass\\include\\cutlass\\platform\\platform\.h/)
+  assert.match(workflow, /_MSVC_LANG/)
+  assert.match(workflow, /Expected CUTLASS platform\.h C\+\+17 detection guard was not found/)
   assert.match(workflow, /NATTEN_VERSION: v0\.21\.0/)
   assert.doesNotMatch(workflow, /NATTEN_VERSION: v0\.17\.5/)
   assert.match(workflow, /\$env:TORCH_CUDA_ARCH_LIST = \$archList/)
@@ -516,6 +520,7 @@ test('windows cp311 cuda124 NATTEN candidate workflow is manual, exact-stack, an
   assert.match(recipe, /natten\.__version__/)
   assert.match(recipe, /verify `natten\.HAS_LIBNATTEN == True`/)
   assert.match(recipe, /MSVC-incompatible GCC warning flags/)
+  assert.match(recipe, /CUTLASS C\+\+17 detection/)
 
   assert.ok(!manifest.includes('natten-windows-x64-cp311-cuda124-candidate'))
   assert.ok(!manifest.includes('v0.17.5'))
