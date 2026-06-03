@@ -67,7 +67,7 @@ Practical implications:
 - that input-dependent tilt is expected Pixal3D behavior, not a Modly orientation bug;
 - do not apply a fixed post-export pitch correction to all Pixal3D outputs, because it can break already-upright generations.
 
-The extension preserves Pixal3D's upstream GLB export orientation. It must not add an extra hardcoded yaw rotation after export; doing so can flip the generated mesh away from Modly's default camera.
+The extension preserves Pixal3D's input-dependent tilt/pitch behavior, but it now rewrites the final exported GLB with a fixed 180 degree yaw around glTF's Y-up axis. That correction is applied to the asset itself so Modly UI and downstream consumers receive the same front-facing orientation.
 
 ## Remaining runtime requirement
 

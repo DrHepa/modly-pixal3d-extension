@@ -250,6 +250,16 @@ def _resolve_glb(output_dir: Path, pipeline_result: Any) -> Path | None:
     return matches[0] if matches else None
 
 
+def _apply_final_glb_yaw_rotation(glb_path: Path) -> Path:
+    import trimesh
+
+    scene = trimesh.load(glb_path, file_type="glb", force="scene", process=False)
+    rotation = trimesh.transformations.rotation_matrix(math.pi, [0.0, 1.0, 0.0])
+    scene.apply_transform(rotation)
+    glb_path.write_bytes(scene.export(file_type="glb"))
+    return glb_path
+
+
 def _resolve_job_paths(job: dict) -> tuple[Path, Path] | dict:
     workspace_root = job.get("workspace_root")
     if not workspace_root:
@@ -352,6 +362,11 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
     glb_path = _resolve_glb(output_dir, result)
     if glb_path is None:
         return _failure("output_missing", "Pixal3D runtime did not produce a GLB output")
+
+    try:
+        glb_path = _apply_final_glb_yaw_rotation(glb_path)
+    except Exception as exc:
+        return _failure("runtime_failed", f"failed to rotate final GLB output: {exc}")
 
     pbr = result.get("pbr", {}) if isinstance(result, dict) else {}
     return {
