@@ -124,11 +124,11 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $helpersHeader = 'build\natten-src\csrc\include\natten\helpers.h'
           $before = Get-Content -Path $helpersHeader -Raw
-          $needle = 'not logsumexp.is_sparse()'
+          $needle = 'not x.is_sparse()'
           if (-not $before.Contains($needle)) {
             throw 'Expected NATTEN helpers.h alternative-token check was not found.'
           }
-          $after = $before.Replace($needle, '!logsumexp.is_sparse()')
+          $after = $before.Replace($needle, '!x.is_sparse()')
           Set-Content -Path $helpersHeader -Value $after -Encoding utf8
           Write-Host 'Patched NATTEN helpers.h to avoid the C++ alternative token not under nvcc/MSVC.'
 
