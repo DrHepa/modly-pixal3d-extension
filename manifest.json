@@ -99,7 +99,8 @@
   "platforms": [
     { "platform": "linux-aarch64-cp312-nvidia-cuda", "status": "prepared" },
     { "platform": "linux-x64-nvidia-cuda", "status": "wheelhouse-needed" },
-    { "platform": "windows-x64", "status": "unsupported" },
+    { "platform": "windows-x64-cp311-nvidia-cuda", "status": "setup-validated" },
+    { "platform": "windows-x64-cp312-nvidia-cuda", "status": "prepared" },
     { "platform": "amd-rocm", "status": "unsupported" },
     { "platform": "macos", "status": "unsupported" },
     { "platform": "cpu-only", "status": "unsupported" }

@@ -1,6 +1,6 @@
 # Pixal3D Modly Extension
 
-Pixal3D image-to-3D model extension for Modly.
+Pixal3D image-to-3D model extension for Modly. It converts a single input image into a textured GLB mesh using the upstream `TencentARC/Pixal3D` model family and Modly-managed model storage.
 
 This repository contains only the extension runtime, setup entrypoint, and a release-backed wheelhouse contract needed to prepare Pixal3D dependencies from a GitHub install. Model weights are not included; Modly downloads model assets through its UI into the normal Modly model storage.
 
@@ -45,9 +45,11 @@ Included packaged dependencies:
 - `nvdiffrast==0.4.0`
 - `nvdiffrec-render==0.0.0`
 
+The Windows `x64` / Python `cp311` / `cuda124` lane used by the packaged Modly app also includes `natten==0.21.0` with native `libnatten` available. Setup verifies the wheelhouse checksum, installs from the verified archive, and probes native CUDA/NATTEN availability before reporting success.
+
 On Windows, the equivalent exact-stack native package distributions are installed from the Windows lane where names differ, such as `o-voxel-vb-ap`, `cumesh-vb`, `flex-gemm-ap`, `drtk`, and `flash-attn`.
 
-`natten`/`libnatten` is intentionally optional. Setup probes `natten.HAS_LIBNATTEN` and strict NAF is available only when that value is `True`; otherwise the extension must use the NAF fallback path.
+`natten`/`libnatten` availability is lane-specific. Linux `aarch64` and Windows `x64`/`cp311`/`cuda124` include verified native NATTEN. Other lanes may treat NATTEN as optional; setup probes `natten.HAS_LIBNATTEN` and strict NAF is available only when that value is `True`.
 
 ## Modly contract
 
@@ -72,3 +74,10 @@ The extension preserves Pixal3D's input-dependent tilt/pitch behavior, but it no
 ## Remaining runtime requirement
 
 After setup succeeds, use Modly UI to download Pixal3D/DINO/RMBG/NAF/MoGe model assets. Real generation should be validated only after those assets are present.
+
+## Publication status
+
+- Repository visibility: public.
+- Primary Modly packaged-app lane: Windows `x64` / Python `cp311` / CUDA `12.4`.
+- Setup contract: release-backed wheelhouse with checksum verification and native import probes.
+- Runtime note: use Low VRAM mode on 8GB-class GPUs; generation quality and orientation depend on the input view, with a final 180 degree GLB yaw correction applied for Modly/downstream front-facing consumption.
