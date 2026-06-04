@@ -80,4 +80,5 @@ After setup succeeds, use Modly UI to download Pixal3D/DINO/RMBG/NAF/MoGe model 
 - Repository visibility: public.
 - Primary Modly packaged-app lane: Windows `x64` / Python `cp311` / CUDA `12.4`.
 - Setup contract: release-backed wheelhouse with checksum verification and native import probes.
+- Runtime status: Windows `x64` / Python `cp311` / CUDA `12.4` has been validated through a complete Modly Low VRAM 1024 generation, including native NATTEN sampling, GLB extraction, final GLB save, and Modly workspace fetch.
 - Runtime note: use Low VRAM mode on 8GB-class GPUs; generation quality and orientation depend on the input view, with a final 180 degree GLB yaw correction applied for Modly/downstream front-facing consumption.
