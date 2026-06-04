@@ -55,10 +55,11 @@ test('wheelhouse manifest is pinned, checksum-verifiable, and selects supported 
   const windowsCp311Asset = manifest.assets.find((asset) => asset.id === 'windows-x64-cp311-cuda124')
   assert.ok(windowsCp311Asset)
   assert.equal(windowsCp311Asset.filename, 'pixal3d-wheelhouse-v0.1.0-windows-x64-cp311-cuda124.zip')
-  assert.equal(windowsCp311Asset.size_bytes, 126801509)
-  assert.equal(windowsCp311Asset.sha256, 'a6a3576fdb9a3a59ba002de4b2eb8a06c26e12a167eaa4a4dd15daaf156ad04c')
+  assert.equal(windowsCp311Asset.size_bytes, 195767591)
+  assert.equal(windowsCp311Asset.sha256, '3cc1ccad54f2ffb11190418e551144c0411eb4beceb3cab40be53f30848f685c')
   assert.ok(windowsCp311Asset.packages.includes('flex-gemm-ap'))
-  assert.ok(!windowsCp311Asset.packages.includes('natten'))
+  assert.ok(windowsCp311Asset.packages.includes('natten'))
+  assert.equal(windowsCp311Asset.optional_packages, undefined)
   assert.equal(manifest.fallback.vendored_wheels, 'wheels/')
   assert.equal(manifest.fallback.require_hashes, true)
   assert.equal(manifest.fallback.wheels.length, 11)
@@ -124,7 +125,7 @@ print(json.dumps({'asset_id': asset['id'], 'cache_key': asset['cache_key'], 'has
   assert.deepEqual(selectedWindowsCp311, {
     asset_id: 'windows-x64-cp311-cuda124',
     cache_key: 'pixal3d/0.1.0/windows-x64-cp311-cuda124',
-    has_natten: false,
+    has_natten: true,
   })
 })
 
@@ -993,8 +994,74 @@ test('runtime installs Windows native aliases before importing upstream inferenc
   assert.match(runtime, /"cumesh": "cumesh_vb"/)
   assert.match(runtime, /"flex_gemm": "flex_gemm_ap"/)
   assert.match(runtime, /"o_voxel": "o_voxel_vb_ap"/)
-  assert.match(runtime, /sys\.modules\[upstream_name\] = importlib\.import_module\(windows_name\)/)
+  assert.match(runtime, /sys\.modules\[upstream_name\] = module/)
+  assert.match(runtime, /def _install_windows_o_voxel_python_compat\(o_voxel_module: Any\) -> None:/)
+  assert.match(runtime, /"postprocess": "pixal3d_extension\.o_voxel_compat\.postprocess"/)
+  assert.match(runtime, /"rasterize": "pixal3d_extension\.o_voxel_compat\.rasterize"/)
   assert.match(runtime, /_prepare_runtime_compat\(\)\n\s+_install_windows_native_module_aliases\(\)\n\s+_install_natten_fallback\(\)\n\s+from inference import run_inference/)
+})
+
+test('runtime exposes Windows o_voxel postprocess and rasterize compatibility modules', () => {
+  const result = runPython(`
+import json, sys, types
+from pixal3d_extension import runtime
+
+for name in [
+    'o_voxel',
+    'o_voxel._C',
+    'o_voxel.postprocess',
+    'o_voxel.rasterize',
+    'o_voxel_vb_ap',
+    'o_voxel_vb_ap._C',
+    'pixal3d_extension.o_voxel_compat.postprocess',
+    'pixal3d_extension.o_voxel_compat.rasterize',
+]:
+    sys.modules.pop(name, None)
+
+fake_o_voxel = types.ModuleType('o_voxel_vb_ap')
+fake_native = types.ModuleType('o_voxel_vb_ap._C')
+fake_postprocess = types.ModuleType('pixal3d_extension.o_voxel_compat.postprocess')
+fake_rasterize = types.ModuleType('pixal3d_extension.o_voxel_compat.rasterize')
+fake_postprocess.to_glb = lambda *args, **kwargs: 'glb'
+fake_rasterize.VoxelRenderer = type('VoxelRenderer', (), {})
+
+original_import_module = runtime.importlib.import_module
+def fake_import_module(name):
+    if name == 'o_voxel_vb_ap':
+        return fake_o_voxel
+    if name == 'o_voxel_vb_ap._C':
+        return fake_native
+    if name == 'pixal3d_extension.o_voxel_compat.postprocess':
+        return fake_postprocess
+    if name == 'pixal3d_extension.o_voxel_compat.rasterize':
+        return fake_rasterize
+    return original_import_module(name)
+
+original_os_name = runtime.os.name
+runtime.os.name = 'nt'
+runtime.importlib.import_module = fake_import_module
+try:
+    runtime._install_windows_native_module_aliases()
+    o_voxel = sys.modules['o_voxel']
+    print(json.dumps({
+        'postprocess_attr': o_voxel.postprocess is fake_postprocess,
+        'rasterize_attr': o_voxel.rasterize is fake_rasterize,
+        'native_attr': o_voxel._C is fake_native,
+        'postprocess_submodule': sys.modules['o_voxel.postprocess'] is fake_postprocess,
+        'rasterize_submodule': sys.modules['o_voxel.rasterize'] is fake_rasterize,
+        'native_submodule': sys.modules['o_voxel._C'] is fake_native,
+    }, sort_keys=True))
+finally:
+    runtime.importlib.import_module = original_import_module
+    runtime.os.name = original_os_name
+`)
+
+  assert.equal(result.postprocess_attr, true)
+  assert.equal(result.rasterize_attr, true)
+  assert.equal(result.native_attr, true)
+  assert.equal(result.postprocess_submodule, true)
+  assert.equal(result.rasterize_submodule, true)
+  assert.equal(result.native_submodule, true)
 })
 
 test('runtime installs NATTEN fallback without exposing legacy natten.functional API', () => {

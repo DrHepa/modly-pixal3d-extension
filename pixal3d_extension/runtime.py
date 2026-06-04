@@ -63,11 +63,50 @@ def _install_windows_native_module_aliases() -> None:
     }
     for upstream_name, windows_name in aliases.items():
         if upstream_name in sys.modules:
+            if upstream_name == "o_voxel":
+                _install_windows_o_voxel_python_compat(sys.modules[upstream_name])
             continue
         try:
-            sys.modules[upstream_name] = importlib.import_module(windows_name)
+            module = importlib.import_module(windows_name)
+            sys.modules[upstream_name] = module
+            if upstream_name == "o_voxel":
+                _install_windows_o_voxel_python_compat(module)
         except ModuleNotFoundError:
             continue
+
+
+def _install_windows_o_voxel_python_compat(o_voxel_module: Any) -> None:
+    """Expose Python modules omitted by the Windows o_voxel alias wheel.
+
+    `o_voxel_vb_ap` ships the native `_C` extension and conversion helpers but
+    omits upstream Python modules used by Pixal3D (`o_voxel.postprocess` and
+    `o_voxel.rasterize`). Install package attributes and submodule aliases so
+    upstream imports keep using `o_voxel.*` while native calls resolve to the
+    Windows wheel.
+    """
+
+    if os.name != "nt":
+        return
+
+    if "o_voxel._C" not in sys.modules:
+        try:
+            sys.modules["o_voxel._C"] = importlib.import_module("o_voxel_vb_ap._C")
+            setattr(o_voxel_module, "_C", sys.modules["o_voxel._C"])
+        except ModuleNotFoundError:
+            pass
+
+    compat_modules = {
+        "postprocess": "pixal3d_extension.o_voxel_compat.postprocess",
+        "rasterize": "pixal3d_extension.o_voxel_compat.rasterize",
+    }
+    for attr_name, compat_name in compat_modules.items():
+        full_name = f"o_voxel.{attr_name}"
+        if full_name in sys.modules:
+            setattr(o_voxel_module, attr_name, sys.modules[full_name])
+            continue
+        compat_module = importlib.import_module(compat_name)
+        sys.modules[full_name] = compat_module
+        setattr(o_voxel_module, attr_name, compat_module)
 
 
 def _import_module_with_torch_compile_disabled(module_name: str) -> Any:

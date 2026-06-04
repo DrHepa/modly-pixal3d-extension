@@ -102,14 +102,15 @@
     {
       "id": "windows-x64-cp311-cuda124",
       "filename": "pixal3d-wheelhouse-v0.1.0-windows-x64-cp311-cuda124.zip",
-      "size_bytes": 126801509,
-      "sha256": "a6a3576fdb9a3a59ba002de4b2eb8a06c26e12a167eaa4a4dd15daaf156ad04c",
+      "size_bytes": 195767591,
+      "sha256": "3cc1ccad54f2ffb11190418e551144c0411eb4beceb3cab40be53f30848f685c",
       "compression": "zip",
       "packages": [
         "utils3d",
         "pipeline",
         "moge",
         "naf",
+        "natten",
         "o-voxel-vb-ap",
         "cumesh-vb",
         "flex-gemm-ap",
@@ -118,12 +119,6 @@
         "nvdiffrast",
         "nvdiffrec-render",
         "pixal3d-core"
-      ],
-      "optional_packages": [
-        {
-          "name": "natten",
-          "reason": "strict NAF requires natten.HAS_LIBNATTEN == True; no verified torch2.6/cu124/cp311/win_amd64 libnatten wheel is available"
-        }
       ],
       "selectors": {
         "os": "windows",
