@@ -962,6 +962,12 @@ with tempfile.TemporaryDirectory() as tmp:
 })
 
 test('setup runtime CUDA probe uses Windows exact-stack import modules', () => {
+  const setupSource = readFileSync(join(repoRoot, 'setup.py'), 'utf8')
+  assert.match(setupSource, /def import_with_torch_compile_disabled\(name\):/)
+  assert.match(setupSource, /if name != 'natten':/)
+  assert.match(setupSource, /torch\.compile = identity_compile/)
+  assert.match(setupSource, /import_with_torch_compile_disabled\(name\)/)
+  assert.match(setupSource, /def import_natten_with_torch_compile_disabled\(\):/)
   const result = runPython(`
 import json, tempfile
 from pathlib import Path
