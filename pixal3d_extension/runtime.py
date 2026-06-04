@@ -70,6 +70,42 @@ def _install_windows_native_module_aliases() -> None:
             continue
 
 
+def _import_module_with_torch_compile_disabled(module_name: str) -> Any:
+    """Import a module while suppressing torch.compile import-time side effects.
+
+    NATTEN v0.21.x decorates some helpers with torch.compile at import time.
+    On the Modly Windows cp311/cu124 lane this can enter torch._inductor and a
+    Triton package whose public API does not expose AttrsDescriptor. The native
+    libnatten kernels are still useful for NAF; the compile-time decorator is not
+    required for Pixal3D generation. Keep the patch scoped to the import so the
+    rest of PyTorch keeps its normal behavior.
+    """
+
+    if os.name != "nt":
+        return importlib.import_module(module_name)
+
+    try:
+        import torch
+    except Exception:
+        return importlib.import_module(module_name)
+
+    original_compile = getattr(torch, "compile", None)
+    if original_compile is None:
+        return importlib.import_module(module_name)
+
+    def identity_compile(function: Any = None, *args: Any, **kwargs: Any) -> Any:
+        del args, kwargs
+        if function is None:
+            return lambda inner: inner
+        return function
+
+    torch.compile = identity_compile
+    try:
+        return importlib.import_module(module_name)
+    finally:
+        torch.compile = original_compile
+
+
 def _install_natten_fallback() -> None:
     """Provide a slow but correct top-level natten fallback when absent.
 
@@ -83,7 +119,7 @@ def _install_natten_fallback() -> None:
         return
 
     try:
-        importlib.import_module("natten")
+        _import_module_with_torch_compile_disabled("natten")
         return
     except ModuleNotFoundError as exc:
         if exc.name != "natten":

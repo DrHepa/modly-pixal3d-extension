@@ -1094,6 +1094,66 @@ print(json.dumps({
   assert.equal(result.has_spec, true)
 })
 
+test('runtime imports native NATTEN with torch.compile disabled on Windows', () => {
+  const result = runPython(`
+import importlib.abc, importlib.machinery, json, sys, types
+from pixal3d_extension import runtime
+
+sys.modules.pop('natten', None)
+sys.modules.pop('torch', None)
+
+class FakeTorch(types.ModuleType):
+    def __init__(self):
+        super().__init__('torch')
+
+def compile_should_not_run(function=None, *args, **kwargs):
+    raise RuntimeError('torch.compile should be disabled during native natten import')
+
+fake_torch = FakeTorch()
+fake_torch.compile = compile_should_not_run
+original_compile = compile_should_not_run
+sys.modules['torch'] = fake_torch
+
+class NattenLoader(importlib.abc.Loader):
+    def create_module(self, spec):
+        return types.ModuleType(spec.name)
+    def exec_module(self, module):
+        import torch
+        module.__version__ = '0.21.0'
+        module.HAS_LIBNATTEN = True
+        compiled = torch.compile(lambda: 'native-import-ok')
+        module.decorated_result = compiled()
+
+class NattenFinder(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == 'natten':
+            return importlib.machinery.ModuleSpec(fullname, NattenLoader())
+        return None
+
+finder = NattenFinder()
+sys.meta_path.insert(0, finder)
+original_os_name = runtime.os.name
+runtime.os.name = 'nt'
+try:
+    runtime._install_natten_fallback()
+    natten = sys.modules['natten']
+    print(json.dumps({
+        'has_libnatten': natten.HAS_LIBNATTEN,
+        'decorated_result': natten.decorated_result,
+        'compile_restored': fake_torch.compile is original_compile,
+    }, sort_keys=True))
+finally:
+    runtime.os.name = original_os_name
+    sys.meta_path.remove(finder)
+    sys.modules.pop('natten', None)
+    sys.modules.pop('torch', None)
+`)
+
+  assert.equal(result.has_libnatten, true)
+  assert.equal(result.decorated_result, 'native-import-ok')
+  assert.equal(result.compile_restored, true)
+})
+
 test('runtime NATTEN fallback is local neighborhood attention, not dense global SDPA', () => {
   const runtimeSource = readFileSync(join(repoRoot, 'pixal3d_extension', 'runtime.py'), 'utf8')
   const fallbackBlock = runtimeSource.match(/def _install_natten_fallback\(\) -> None:[\s\S]*?(?=^def _silence_flex_gemm_autotuners\(\) -> None:)/m)
