@@ -17,8 +17,8 @@ SUPPORTED_RUNTIME_LANE = "linux-aarch64-cp312-cuda124"
 SETUP_REQUIRED_PATHS = [
     "venv",
     "models/pixal3d/generate",
-    "models/pixal3d/aux/dinov3",
-    "models/pixal3d/aux/rmbg",
+    "models/pixal3d/auxiliary/dinov3",
+    "models/pixal3d/auxiliary/rmbg",
     "models/pixal3d/readiness.json",
 ]
 

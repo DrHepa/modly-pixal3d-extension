@@ -212,7 +212,7 @@ class FakeEnvBuilder:
 with tempfile.TemporaryDirectory() as tmp:
     ext_dir = Path(tmp) / 'Modly' / 'data' / 'extensions' / 'pixal3d'
     ext_dir.mkdir(parents=True)
-    conflict = Path(tmp) / 'Modly' / 'data' / 'models' / 'pixal3d' / 'aux'
+    conflict = Path(tmp) / 'Modly' / 'data' / 'models' / 'pixal3d' / 'auxiliary'
     conflict.parent.mkdir(parents=True)
     conflict.write_text('not a directory', encoding='utf-8')
     setup.stdlib_venv.EnvBuilder = FakeEnvBuilder
@@ -229,10 +229,41 @@ with tempfile.TemporaryDirectory() as tmp:
 
   assert.equal(result.status, 'failed')
   assert.equal(result.failure_code, 'setup_path_conflict')
-  assert.equal(result.conflict_logical_path, 'models/pixal3d/aux/dinov3')
-  assert.match(result.conflict_path.replaceAll('\\\\', '/'), /models\/pixal3d\/aux$/)
+  assert.equal(result.conflict_logical_path, 'models/pixal3d/auxiliary/dinov3')
+  assert.match(result.conflict_path.replaceAll('\\\\', '/'), /models\/pixal3d\/auxiliary$/)
   assert.equal(result.installs_started, false)
   assert.equal(result.downloads_started, false)
+})
+
+test('Pixal3D logical model paths avoid Windows reserved device names', () => {
+  const result = runPython(`
+import json
+from pathlib import PurePosixPath
+import setup
+from pixal3d_extension.assets import AUXILIARY_ASSETS, REQUIRED_SENTINEL_PATHS
+from pixal3d_extension.paths import require_safe_relative_path
+from pixal3d_extension.readiness import SETUP_REQUIRED_PATHS
+
+paths = [*setup.RUNTIME_DIRS, *SETUP_REQUIRED_PATHS, *REQUIRED_SENTINEL_PATHS, *(manifest.local_root for manifest in AUXILIARY_ASSETS.values())]
+reserved_errors = []
+for value in ['models/pixal3d/aux/dinov3', 'models/pixal3d/CON/file.txt', 'models/pixal3d/nul.txt']:
+    try:
+        require_safe_relative_path(value)
+    except ValueError:
+        reserved_errors.append(value)
+
+print(json.dumps({
+    'paths': paths,
+    'reserved_errors': reserved_errors,
+    'reserved_segments': sorted({part for path in paths for part in PurePosixPath(path).parts if part.upper() in {'AUX', 'CON', 'PRN', 'NUL'}}),
+    'has_auxiliary': any('models/pixal3d/auxiliary/' in path for path in paths),
+}, sort_keys=True))
+`)
+
+  assert.deepEqual(result.reserved_segments, [])
+  assert.equal(result.has_auxiliary, true)
+  assert.deepEqual(result.reserved_errors, ['models/pixal3d/aux/dinov3', 'models/pixal3d/CON/file.txt', 'models/pixal3d/nul.txt'])
+  assert.ok(result.paths.every((value) => !value.includes('models/pixal3d/aux/')))
 })
 
 test('setup.py can be loaded through runpy from a different current directory', () => {

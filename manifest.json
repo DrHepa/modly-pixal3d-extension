@@ -81,14 +81,14 @@
       "models/pixal3d/generate/ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors",
       "models/pixal3d/generate/ckpts/tex_dec_next_dc_f16c32_fp16.safetensors",
       "models/pixal3d/generate/ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors",
-      "models/pixal3d/aux/dinov3/config.json",
-      "models/pixal3d/aux/dinov3/preprocessor_config.json",
-      "models/pixal3d/aux/dinov3/model.safetensors",
-      "models/pixal3d/aux/rmbg/config.json",
-      "models/pixal3d/aux/rmbg/preprocessor_config.json",
-      "models/pixal3d/aux/rmbg/BiRefNet_config.py",
-      "models/pixal3d/aux/rmbg/birefnet.py",
-      "models/pixal3d/aux/rmbg/model.safetensors",
+      "models/pixal3d/auxiliary/dinov3/config.json",
+      "models/pixal3d/auxiliary/dinov3/preprocessor_config.json",
+      "models/pixal3d/auxiliary/dinov3/model.safetensors",
+      "models/pixal3d/auxiliary/rmbg/config.json",
+      "models/pixal3d/auxiliary/rmbg/preprocessor_config.json",
+      "models/pixal3d/auxiliary/rmbg/BiRefNet_config.py",
+      "models/pixal3d/auxiliary/rmbg/birefnet.py",
+      "models/pixal3d/auxiliary/rmbg/model.safetensors",
       "models/pixal3d/readiness.json"
     ],
     "pipeline_substitutions": {
@@ -109,8 +109,8 @@
     "extension_root": "extensions/pixal3d",
     "model_roots": [
       "models/pixal3d/generate",
-      "models/pixal3d/aux/dinov3",
-      "models/pixal3d/aux/rmbg"
+      "models/pixal3d/auxiliary/dinov3",
+      "models/pixal3d/auxiliary/rmbg"
     ]
   },
   "entrypoints": {

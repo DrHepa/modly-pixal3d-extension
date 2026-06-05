@@ -152,7 +152,7 @@ def patch_pipeline(workspace_root: str | Path) -> dict[str, Any]:
         "backup_path": str(BACKUP_PATH),
         "original_refs": {"dino": DINO_SOURCE, "rmbg": RMBG_SOURCE},
         "replacement_refs": {"dino": DINO_REPLACEMENT, "rmbg": RMBG_REPLACEMENT},
-        "local_auxiliary_roots": {"dino": "models/pixal3d/aux/dinov3", "rmbg": "models/pixal3d/aux/rmbg"},
+        "local_auxiliary_roots": {"dino": "models/pixal3d/auxiliary/dinov3", "rmbg": "models/pixal3d/auxiliary/rmbg"},
         "hashes": {"before": _hash_text(original_text), "after": _hash_text(patched_text)},
         "validation": "expected_substitutions_applied",
     }

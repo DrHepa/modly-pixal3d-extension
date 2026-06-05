@@ -75,6 +75,8 @@ The extension preserves Pixal3D's input-dependent tilt/pitch behavior, but it no
 
 After setup succeeds, use Modly UI to download Pixal3D/DINO/RMBG/NAF/MoGe model assets. Real generation should be validated only after those assets are present.
 
+Auxiliary model assets are stored below `models/pixal3d/auxiliary/`. Do not shorten this folder to `aux`: `AUX` is a reserved Windows device name and can break setup on normal Windows filesystems.
+
 ## Publication status
 
 - Repository visibility: public.

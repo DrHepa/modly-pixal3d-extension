@@ -71,8 +71,8 @@ PIP_BOOTSTRAP_PACKAGE = "https://files.pythonhosted.org/packages/44/3c/d71702488
 
 RUNTIME_DIRS = [
     "models/pixal3d/generate",
-    "models/pixal3d/aux/dinov3",
-    "models/pixal3d/aux/rmbg",
+    "models/pixal3d/auxiliary/dinov3",
+    "models/pixal3d/auxiliary/rmbg",
 ]
 READINESS_METADATA = "models/pixal3d/readiness.json"
 

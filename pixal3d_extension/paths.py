@@ -4,6 +4,14 @@ from pathlib import Path, PurePosixPath
 
 EXTENSION_ID = "pixal3d"
 MODELS_PREFIX = "models"
+WINDOWS_RESERVED_SEGMENTS = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
 
 
 @dataclass(frozen=True)
@@ -27,7 +35,12 @@ def is_safe_relative_path(value: str) -> bool:
     if ":" in value:
         return False
     parts = PurePosixPath(value).parts
-    return all(part not in {"", ".", ".."} and not part.startswith(".") for part in parts)
+    return all(
+        part not in {"", ".", ".."}
+        and not part.startswith(".")
+        and part.split(".", 1)[0].upper() not in WINDOWS_RESERVED_SEGMENTS
+        for part in parts
+    )
 
 
 def normalize_logical_path(value: str) -> str:

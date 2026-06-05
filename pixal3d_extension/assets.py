@@ -38,13 +38,13 @@ AUXILIARY_ASSETS = {
     "dino": AssetManifest(
         key="dino",
         repo_id="camenduru/dinov3-vitl16-pretrain-lvd1689m",
-        local_root="models/pixal3d/aux/dinov3",
+        local_root="models/pixal3d/auxiliary/dinov3",
         sentinels=("config.json", "preprocessor_config.json", "model.safetensors"),
     ),
     "rmbg": AssetManifest(
         key="rmbg",
         repo_id="camenduru/RMBG-2.0",
-        local_root="models/pixal3d/aux/rmbg",
+        local_root="models/pixal3d/auxiliary/rmbg",
         sentinels=("config.json", "preprocessor_config.json", "BiRefNet_config.py", "birefnet.py", "model.safetensors"),
     ),
 }
