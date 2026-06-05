@@ -330,7 +330,7 @@ test('runtime suppresses upstream FlexGEMM autotuner verbose without disabling c
   assert.match(runtime, /FLEX_GEMM_AUTOTUNER_VERBOSE"\] = "0"/)
   assert.match(runtime, /value\.verbose = False/)
   assert.match(runtime, /flex_gemm\.utils\.load_autotune_cache\(\)/)
-  assert.match(runtime, /from inference import run_inference\n\s+_silence_flex_gemm_autotuners\(\)/)
+  assert.match(runtime, /from inference import run_inference[\s\S]*?_silence_flex_gemm_autotuners\(\)/)
 })
 
 test('low_vram schema is UI-compatible select and runtime parses values explicitly', () => {
@@ -1074,7 +1074,7 @@ test('runtime installs Windows native aliases before importing upstream inferenc
   assert.match(runtime, /def _install_windows_o_voxel_python_compat\(o_voxel_module: Any\) -> None:/)
   assert.match(runtime, /"postprocess": "pixal3d_extension\.o_voxel_compat\.postprocess"/)
   assert.match(runtime, /"rasterize": "pixal3d_extension\.o_voxel_compat\.rasterize"/)
-  assert.match(runtime, /_prepare_runtime_compat\(\)\n\s+_install_windows_native_module_aliases\(\)\n\s+_install_natten_fallback\(\)\n\s+from inference import run_inference/)
+  assert.match(runtime, /_prepare_runtime_compat\(\)[\s\S]*?_install_windows_native_module_aliases\(\)[\s\S]*?_install_natten_fallback\(\)[\s\S]*?from inference import run_inference/)
 })
 
 test('runtime exposes Windows o_voxel postprocess and rasterize compatibility modules', () => {
@@ -1719,4 +1719,47 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.bytes, 'rotated-final-glb')
   assert.equal(result.rotations, 1)
   assert.deepEqual(result.axis, [0, 1, 0])
+})
+
+test('runtime emits crash diagnostic checkpoints to stderr during generation', () => {
+  const result = spawnSync(python, ['-c', `
+import json, tempfile, sys, types
+from pathlib import Path
+
+class FakeScene:
+    def apply_transform(self, matrix):
+        pass
+    def export(self, file_type):
+        return b'rotated'
+
+fake_trimesh = types.ModuleType('trimesh')
+fake_trimesh.load = lambda path, file_type, force, process: FakeScene()
+fake_trimesh.transformations = types.SimpleNamespace(rotation_matrix=lambda angle, axis: None)
+sys.modules['trimesh'] = fake_trimesh
+
+from pixal3d_extension.runtime import run_job
+
+def fake_pipeline(_source):
+    def pipeline(**kwargs):
+        glb_path = Path(kwargs['output_dir']) / 'diagnostic.glb'
+        glb_path.write_bytes(b'raw')
+        return {'glb_path': str(glb_path)}
+    return pipeline
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    image = root / 'input.png'
+    image.write_bytes(b'image')
+    output = root / 'out'
+    output.mkdir()
+    result = run_job({'input_image': str(image), 'output_dir': str(output), 'readiness': {'generation_allowed': True}, 'params': {}}, pipeline_factory=fake_pipeline)
+    print(json.dumps({'status': result['status']}))
+`], { cwd: repoRoot, encoding: 'utf8' })
+
+  assert.equal(result.status, 0, `STDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}`)
+  assert.deepEqual(JSON.parse(result.stdout), { status: 'completed' })
+  assert.match(result.stderr, /\[Pixal3D Diagnostic\] run_job:start/)
+  assert.match(result.stderr, /\[Pixal3D Diagnostic\] pipeline_factory:create:start/)
+  assert.match(result.stderr, /\[Pixal3D Diagnostic\] pipeline_factory:call:done/)
+  assert.match(result.stderr, /\[Pixal3D Diagnostic\] final_glb_yaw_rotation:done/)
 })

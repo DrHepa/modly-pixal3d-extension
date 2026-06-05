@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.machinery
+import faulthandler
 import math
 import os
 import random
@@ -22,6 +23,17 @@ SUPPORTED_RUNTIME_LANES = {
     "windows-x64-cp312-cuda124",
 }
 SUPPORTED_RUNTIME_LANE = "linux-aarch64-cp312-cuda124"
+
+
+def _enable_crash_diagnostics() -> None:
+    try:
+        faulthandler.enable(file=sys.stderr, all_threads=True)
+    except Exception:
+        return
+
+
+def _diagnostic_checkpoint(label: str) -> None:
+    print(f"[Pixal3D Diagnostic] {label}", file=sys.stderr, flush=True)
 
 
 def _default_pipeline_factory(source: str) -> Any:
@@ -384,6 +396,8 @@ def _preflight_runtime(job: dict) -> dict | None:
 
 
 def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) -> dict:
+    _enable_crash_diagnostics()
+    _diagnostic_checkpoint("run_job:start")
     resolved_paths = _resolve_job_paths(job)
     if isinstance(resolved_paths, dict):
         return resolved_paths
@@ -397,10 +411,14 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
         return preflight_error
 
     try:
+        _diagnostic_checkpoint("run_job:preflight:ok")
         params = job.get("params") or {}
         parsed_low_vram = _parse_low_vram(params.get("low_vram"), default=True)
         if pipeline_factory is not None:
+            _diagnostic_checkpoint("pipeline_factory:create:start")
             pipeline = pipeline_factory(job.get("model_source") or PIXAL3D_MODEL_SOURCE)
+            _diagnostic_checkpoint("pipeline_factory:create:done")
+            _diagnostic_checkpoint("pipeline_factory:call:start")
             result = pipeline(
                 image_path=str(image_path),
                 output_dir=str(output_dir),
@@ -409,18 +427,29 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
                 low_vram=parsed_low_vram,
                 manual_fov=params.get("manual_fov"),
             )
+            _diagnostic_checkpoint("pipeline_factory:call:done")
         else:
+            _diagnostic_checkpoint("runtime_compat:start")
             _prepare_runtime_compat()
+            _diagnostic_checkpoint("runtime_compat:done")
+            _diagnostic_checkpoint("windows_aliases:start")
             _install_windows_native_module_aliases()
+            _diagnostic_checkpoint("windows_aliases:done")
+            _diagnostic_checkpoint("natten:start")
             _install_natten_fallback()
+            _diagnostic_checkpoint("natten:done")
+            _diagnostic_checkpoint("import_inference:start")
             from inference import run_inference
+            _diagnostic_checkpoint("import_inference:done")
 
             _silence_flex_gemm_autotuners()
+            _diagnostic_checkpoint("flex_gemm_silence:done")
 
             seed = int(params.get("seed", -1))
             if seed == -1:
                 seed = random.randint(0, 2**32 - 1)
             glb_path = output_dir / f"{int(time.time())}_{uuid.uuid4().hex[:8]}_pixal3d.glb"
+            _diagnostic_checkpoint("run_inference:start")
             run_inference(
                 image_path=str(image_path),
                 output_path=str(glb_path),
@@ -430,8 +459,10 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
                 low_vram=parsed_low_vram,
                 resolution=int(params.get("resolution", 1024)),
             )
+            _diagnostic_checkpoint("run_inference:done")
             result = {"glb_path": str(glb_path), "pbr": {}}
     except Exception as exc:  # pragma: no cover - contract retained for real runtime failures.
+        _diagnostic_checkpoint(f"runtime_exception:{type(exc).__name__}")
         return _failure("runtime_failed", str(exc))
 
     glb_path = _resolve_glb(output_dir, result)
@@ -439,8 +470,11 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
         return _failure("output_missing", "Pixal3D runtime did not produce a GLB output")
 
     try:
+        _diagnostic_checkpoint("final_glb_yaw_rotation:start")
         glb_path = _apply_final_glb_yaw_rotation(glb_path)
+        _diagnostic_checkpoint("final_glb_yaw_rotation:done")
     except Exception as exc:
+        _diagnostic_checkpoint(f"final_glb_yaw_rotation:exception:{type(exc).__name__}")
         return _failure("runtime_failed", f"failed to rotate final GLB output: {exc}")
 
     pbr = result.get("pbr", {}) if isinstance(result, dict) else {}
