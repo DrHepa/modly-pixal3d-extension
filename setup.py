@@ -77,11 +77,55 @@ RUNTIME_DIRS = [
 READINESS_METADATA = "models/pixal3d/readiness.json"
 
 
+class SetupPathConflict(RuntimeError):
+    code = "setup_path_conflict"
+
+    def __init__(self, logical_path: str, path: Path, *, expected: str = "directory") -> None:
+        self.logical_path = logical_path
+        self.path = path
+        self.expected = expected
+        super().__init__(f"Setup path conflict: expected {expected} at {path}")
+
+    @property
+    def observation(self) -> dict[str, Any]:
+        return {
+            "status": "failed",
+            "failure_code": self.code,
+            "logical_path": self.logical_path,
+            "path": str(self.path),
+            "expected": self.expected,
+            "actual": "file-or-non-directory",
+            "message": f"Expected {self.expected}, but a file or non-directory already exists at {self.path}.",
+        }
+
+
 def _workspace_item(layout: ModlyLayout, relative_path: str) -> Path:
     path = Path(relative_path)
     if path.is_absolute() or ".." in path.parts:
         raise ValueError(f"Unsafe setup path: {relative_path}")
     return resolve_storage_path(layout, relative_path)
+
+
+def _first_non_directory(path: Path) -> Path | None:
+    current = path
+    while current != current.parent:
+        if current.exists() and not current.is_dir():
+            return current
+        current = current.parent
+    return None
+
+
+def _ensure_setup_directory(layout: ModlyLayout, relative_path: str, created: list[dict[str, str]], skipped: list[dict[str, str]]) -> Path:
+    path = _workspace_item(layout, relative_path)
+    conflict = _first_non_directory(path)
+    if conflict is not None:
+        raise SetupPathConflict(relative_path, conflict)
+    if path.exists():
+        skipped.append({"path": relative_path, "reason": "already-exists"})
+    else:
+        path.mkdir(parents=True, exist_ok=True)
+        created.append({"path": relative_path, "kind": "directory"})
+    return path
 
 
 def _readiness_payload() -> dict[str, Any]:
@@ -98,6 +142,8 @@ def _create_prepare_paths(layout: ModlyLayout) -> tuple[list[dict[str, str]], li
     skipped: list[dict[str, str]] = []
 
     venv_path = _workspace_item(layout, VENV_DIR)
+    if venv_path.exists() and not venv_path.is_dir():
+        raise SetupPathConflict(VENV_DIR, venv_path)
     if (venv_path / "pyvenv.cfg").exists():
         skipped.append({"path": VENV_DIR, "reason": "already-exists"})
     else:
@@ -106,15 +152,15 @@ def _create_prepare_paths(layout: ModlyLayout) -> tuple[list[dict[str, str]], li
     (venv_path / VENV_MARKER).write_text(f"{EXTENSION_ID}\n", encoding="utf-8")
 
     for relative_path in RUNTIME_DIRS:
-        path = _workspace_item(layout, relative_path)
-        if path.exists():
-            skipped.append({"path": relative_path, "reason": "already-exists"})
-        else:
-            path.mkdir(parents=True, exist_ok=True)
-            created.append({"path": relative_path, "kind": "directory"})
+        _ensure_setup_directory(layout, relative_path, created, skipped)
 
     readiness_path = _workspace_item(layout, READINESS_METADATA)
+    conflict = _first_non_directory(readiness_path.parent)
+    if conflict is not None:
+        raise SetupPathConflict(READINESS_METADATA, conflict)
     if readiness_path.exists():
+        if not readiness_path.is_file():
+            raise SetupPathConflict(READINESS_METADATA, readiness_path, expected="file")
         skipped.append({"path": READINESS_METADATA, "reason": "already-exists"})
     else:
         readiness_path.parent.mkdir(parents=True, exist_ok=True)
@@ -456,7 +502,24 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
     }
 
     if prepare_requested:
-        created, skipped = _create_prepare_paths(layout)
+        try:
+            created, skipped = _create_prepare_paths(layout)
+        except SetupPathConflict as exc:
+            return {
+                **result,
+                "status": "failed",
+                "failure_code": exc.code,
+                "path_conflict": exc.observation,
+                "created": [],
+                "skipped": [],
+                "downloads_started": False,
+                "installs_started": False,
+                "setup_readiness": check_setup_readiness(workspace_root),
+                "next_steps": [
+                    "remove or rename the conflicting file/non-directory path",
+                    "rerun setup",
+                ],
+            }
         wheelhouse_prepare = None
         dependency_install = None
         if not args.skip_install:

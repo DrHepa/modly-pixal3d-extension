@@ -196,6 +196,45 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.deepEqual(result.errors, ['..\\escape', 'C:\\tmp\\x', '.hidden\\x'])
 })
 
+test('setup reports model path conflicts as JSON failures before installing dependencies', () => {
+  const result = runPython(`
+import json, tempfile
+from pathlib import Path
+import setup
+
+class FakeEnvBuilder:
+    def __init__(self, *args, **kwargs):
+        pass
+    def create(self, path):
+        path.mkdir(parents=True, exist_ok=True)
+        (path / 'pyvenv.cfg').write_text('', encoding='utf-8')
+
+with tempfile.TemporaryDirectory() as tmp:
+    ext_dir = Path(tmp) / 'Modly' / 'data' / 'extensions' / 'pixal3d'
+    ext_dir.mkdir(parents=True)
+    conflict = Path(tmp) / 'Modly' / 'data' / 'models' / 'pixal3d' / 'aux'
+    conflict.parent.mkdir(parents=True)
+    conflict.write_text('not a directory', encoding='utf-8')
+    setup.stdlib_venv.EnvBuilder = FakeEnvBuilder
+    result = setup.run_setup(['--prepare', '--skip-install', '--workspace-root', str(ext_dir)])
+    print(json.dumps({
+        'status': result['status'],
+        'failure_code': result.get('failure_code'),
+        'conflict_logical_path': result.get('path_conflict', {}).get('logical_path'),
+        'conflict_path': result.get('path_conflict', {}).get('path'),
+        'installs_started': result.get('installs_started'),
+        'downloads_started': result.get('downloads_started'),
+    }, sort_keys=True))
+`)
+
+  assert.equal(result.status, 'failed')
+  assert.equal(result.failure_code, 'setup_path_conflict')
+  assert.equal(result.conflict_logical_path, 'models/pixal3d/aux/dinov3')
+  assert.match(result.conflict_path.replaceAll('\\\\', '/'), /models\/pixal3d\/aux$/)
+  assert.equal(result.installs_started, false)
+  assert.equal(result.downloads_started, false)
+})
+
 test('setup.py can be loaded through runpy from a different current directory', () => {
   const result = spawnSync(python, ['-c', `
 import os, runpy, tempfile
