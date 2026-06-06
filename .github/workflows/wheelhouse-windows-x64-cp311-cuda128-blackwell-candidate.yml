@@ -88,7 +88,7 @@ jobs:
             Where-Object { $_.FullName -notmatch '\\.git\\' }
           $patchedFlagFiles = @()
           foreach ($file in $patchableFiles) {
-            $text = Get-Content -Raw -Path $file.FullName
+            $text = [string](Get-Content -Raw -Path $file.FullName)
             $newText = $text
             foreach ($pattern in $flagPatterns) {
               $newText = $newText.Replace($pattern, '')
