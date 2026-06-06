@@ -70,7 +70,7 @@ Second-run evidence from GitHub Actions run `27070868300` progressed past long p
 
 Third-run evidence from GitHub Actions run `27071874204` progressed further into NATTEN `v0.21.0` Blackwell backward kernels before failing around `PipelineReduceTmaStore::PipelineState` parsing in `sm100_fmha_bwd_kernel_tma_warpspecialized.hpp`. Upstream NATTEN has several later Blackwell fixes, so the candidate now tests `v0.21.6` before adding local kernel patches.
 
-Fourth-run evidence from GitHub Actions run `27075519968` failed before compiling NATTEN because the recursive patch step called `.Replace()` on `$null` from an empty patchable file in `v0.21.6`. The workflow now casts `Get-Content -Raw` results to `[string]` before replacement.
+Fourth-run evidence from GitHub Actions run `27075519968` failed before compiling NATTEN because the recursive patch step called `.Replace()` on `$null` from an empty patchable file in `v0.21.6`. Run `27075833950` showed an inline `[string](...)` cast was not sufficient under the workflow script execution path, so the workflow now explicitly checks `$null`, logs skipped empty files, assigns an empty string, and calls `.ToString()` before replacement.
 
 ## Publish criteria for a future Blackwell lane
 
