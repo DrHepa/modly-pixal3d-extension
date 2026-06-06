@@ -65,6 +65,8 @@ This candidate can still fail in CI because NATTEN/CUTLASS/MSVC/CUDA 12.8 compat
 
 First-run evidence from GitHub Actions run `27070460013` confirmed CUDA 12.8 generated `compute_120` / `sm_120` for NATTEN (`120-real`), but failed before producing a wheel because upstream NATTEN/CMake passed GCC-only flags such as `-Wconversion`, `-fno-strict-aliasing`, and `-Wall` through `nvcc -Xcompiler` to MSVC. The workflow therefore enables Git long paths for CUTLASS checkout and removes those GCC-only flags recursively before building.
 
+Second-run evidence from GitHub Actions run `27070868300` progressed past long paths and GCC-only flag removal, then failed in `cutlass/exmy_base.h` because `CUTLASS_CXX17_OR_LATER` is enabled through `_MSVC_LANG` while `cutlass/platform/platform.h` exposed `is_unsigned_v` only under `#if (201703L <=__cplusplus)`. The workflow now patches that exact guard to also accept `_MSVC_LANG >= 201703L`.
+
 ## Publish criteria for a future Blackwell lane
 
 A future Blackwell lane requires all of the following before it can be declared supported:

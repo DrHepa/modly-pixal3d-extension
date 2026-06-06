@@ -106,6 +106,7 @@ jobs:
           $cutlassPlatform = Join-Path $sourceDir 'third_party\cutlass\include\cutlass\platform\platform.h'
           $cutlassText = Get-Content -Raw -Path $cutlassPlatform
           $cutlassText = $cutlassText.Replace('#if (__cplusplus >= 201703L)', '#if (__cplusplus >= 201703L) || (defined(_MSVC_LANG) && _MSVC_LANG >= 201703L)')
+          $cutlassText = $cutlassText.Replace('#if (201703L <=__cplusplus)', '#if (201703L <= __cplusplus) || (defined(_MSVC_LANG) && _MSVC_LANG >= 201703L)')
           Set-Content -Path $cutlassPlatform -Value $cutlassText -Encoding UTF8
 
           Write-Host 'Patch NATTEN MSVC CUDA alternative-token checks.'
