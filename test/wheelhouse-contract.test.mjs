@@ -644,6 +644,52 @@ test('Blackwell sm120 investigation remains probe-only and outside published whe
   assert.ok(!manifest.includes('sm120'))
 })
 
+test('Blackwell Windows wheelhouse candidate is exact-stack and artifact-only', () => {
+  const workflowPath = join(repoRoot, '.github', 'workflows', 'wheelhouse-windows-x64-cp311-cuda128-blackwell-candidate.yml')
+  const scriptPath = join(repoRoot, 'tools', 'wheelhouse', 'build-windows-x64-cp311-cuda128-blackwell.ps1')
+  const workflow = readFileSync(workflowPath, 'utf8')
+  const script = readFileSync(scriptPath, 'utf8')
+  const docs = readFileSync(join(repoRoot, 'tools', 'wheelhouse', 'BLACKWELL-SM120.md'), 'utf8')
+  const recipe = readFileSync(join(repoRoot, 'tools', 'wheelhouse', 'README.md'), 'utf8')
+  const manifest = readFileSync(join(repoRoot, 'wheelhouse.manifest.json'), 'utf8')
+
+  assert.equal(existsSync(workflowPath), true)
+  assert.equal(existsSync(scriptPath), true)
+  assert.match(workflow, /workflow_dispatch:/)
+  assert.match(workflow, /windows-x64-cp311-cuda128-blackwell/)
+  assert.match(workflow, /default: '12\.0'/)
+  assert.match(workflow, /default: '12\.8\.1'/)
+  assert.match(workflow, /TORCH_VERSION: 2\.7\.1\+cu128/)
+  assert.match(workflow, /TORCHVISION_VERSION: 0\.22\.1\+cu128/)
+  assert.match(workflow, /PYTORCH_CUDA_INDEX: https:\/\/download\.pytorch\.org\/whl\/cu128/)
+  assert.match(workflow, /git clone --branch \$env:NATTEN_VERSION --depth 1 --recurse-submodules https:\/\/github\.com\/SHI-Labs\/NATTEN\.git/)
+  assert.match(workflow, /\$env:TORCH_CUDA_ARCH_LIST = \$env:CUDA_ARCH_LIST/)
+  assert.match(workflow, /\$env:NATTEN_CUDA_ARCH = \$env:CUDA_ARCH_LIST/)
+  assert.match(workflow, /build-windows-x64-cp311-cuda128-blackwell\.ps1 -NattenWheelPath/)
+  assert.match(workflow, /actions\/upload-artifact@v4/)
+  assert.doesNotMatch(workflow, /upload-release-asset/i)
+
+  assert.match(script, /windows-x64-cp311-cuda128-blackwell/)
+  assert.match(script, /cu128torch2\.7-cp311-cp311-win_amd64/)
+  assert.match(script, /NattenWheelPath/)
+  assert.match(script, /missing NATTEN wheel path/)
+  assert.match(script, /WINDOWS-BLACKWELL-CANDIDATE\.json/)
+  assert.match(script, /candidate_complete_unvalidated/)
+  for (const wheel of ['flex_gemm_ap', 'cumesh_vb', 'o_voxel_vb_ap', 'drtk', 'flash_attn', 'nvdiffrast', 'nvdiffrec_render']) {
+    assert.match(script, new RegExp(`${wheel}-[\\s\\S]*cu128torch2\\.7-cp311-cp311-win_amd64`))
+  }
+  assert.match(script, /natten==0\.21\.0/)
+  assert.match(script, /Do not add to wheelhouse\.manifest\.json|Candidate-only/)
+
+  assert.match(docs, /Candidate wheelhouse workflow/)
+  assert.match(docs, /torch==2\.7\.1\+cu128/)
+  assert.match(docs, /TORCH_CUDA_ARCH_LIST=12\.0/)
+  assert.match(docs, /must not update `wheelhouse\.manifest\.json`/)
+  assert.match(recipe, /wheelhouse-windows-x64-cp311-cuda128-blackwell-candidate\.yml/)
+  assert.match(recipe, /candidate-only/)
+  assert.ok(!manifest.includes('windows-x64-cp311-cuda128-blackwell'))
+})
+
 test('linux x64 native source refs are immutable and confidence-documented', () => {
   const env = readFileSync(new URL('../tools/wheelhouse/native-sources.linux-x64-cp312-cuda124.env.example', import.meta.url), 'utf8')
 

@@ -44,6 +44,25 @@ CUDA error: no kernel image is available for execution on the device
 
 The probe uploads `BLACKWELL-SM120-PROBE.json` as a GitHub Actions artifact. It must not update `wheelhouse.manifest.json` and must not publish a release asset.
 
+## Candidate wheelhouse workflow
+
+`.github/workflows/wheelhouse-windows-x64-cp311-cuda128-blackwell-candidate.yml` is the first full Windows Blackwell candidate attempt. It targets:
+
+```text
+windows-x64-cp311-cuda128-blackwell
+Python cp311
+torch==2.7.1+cu128
+torchvision==0.22.1+cu128
+CUDA toolkit 12.8.1
+TORCH_CUDA_ARCH_LIST=12.0
+```
+
+The workflow builds a NATTEN `v0.21.0` Windows wheel with Blackwell `sm_120` coverage, then assembles a candidate wheelhouse using exact-stack `cu128torch2.7-cp311-cp311-win_amd64` wheels for the other Windows native packages.
+
+The candidate archive includes `WINDOWS-BLACKWELL-CANDIDATE.json` with downloaded wheel checksums and validation requirements. This workflow uploads a GitHub Actions artifact only. It must not update `wheelhouse.manifest.json`, upload release assets, or mark RTX 5090 as supported.
+
+This candidate can still fail in CI because NATTEN/CUTLASS/MSVC/CUDA 12.8 compatibility is unproven for this exact stack. A successful CI build is also not enough for publication: it must be installed and generation-tested on real RTX 50-series hardware.
+
 ## Publish criteria for a future Blackwell lane
 
 A future Blackwell lane requires all of the following before it can be declared supported:

@@ -51,6 +51,8 @@ Windows wheelhouses must follow the exact-stack policy used by Pixal3D-ComfyUI r
 
 RTX 50-series / Blackwell support is tracked separately in `BLACKWELL-SM120.md`. The published CUDA 12.4 Windows wheelhouses are not Blackwell lanes; do not mark RTX 5090 supported until an exact-stack Blackwell wheelhouse is rebuilt, checksum-pinned, and validated on real RTX 50-series hardware.
 
+The experimental Blackwell candidate workflow is `.github/workflows/wheelhouse-windows-x64-cp311-cuda128-blackwell-candidate.yml`. It targets `windows-x64-cp311-cuda128-blackwell`, builds NATTEN against `torch==2.7.1+cu128` with `TORCH_CUDA_ARCH_LIST=12.0`, and packages exact-stack `cu128torch2.7` Windows native wheels. It is candidate-only and must remain outside `wheelhouse.manifest.json` until real RTX 50-series validation succeeds.
+
 ## Windows NATTEN candidate workflow
 
 `.github/workflows/natten-windows-x64-cp311-cuda124-candidate.yml` is a manual GitHub Actions probe for building a native Windows `win_amd64` NATTEN wheel from `SHI-Labs/NATTEN` tag `v0.21.0` against Python `3.11`, torch `2.6.0+cu124`, torchvision `0.21.0+cu124`, and CUDA `12.4.1`. This candidate is the closest Windows port to upstream `requirements_th26_cu124.txt`.

@@ -1,0 +1,129 @@
+name: Wheelhouse Windows x64 cp311 cuda128 Blackwell candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      cuda_arch_list:
+        description: Blackwell CUDA arch list for native NATTEN build
+        required: true
+        default: '12.0'
+      cuda_version:
+        description: CUDA toolkit version for sm_120 candidate build
+        required: true
+        default: '12.8.1'
+      natten_version:
+        description: NATTEN git tag to build
+        required: true
+        default: 'v0.21.0'
+
+jobs:
+  build-wheelhouse:
+    name: Build windows-x64-cp311-cuda128-blackwell candidate
+    runs-on: windows-latest
+    env:
+      WHEELHOUSE_LANE: windows-x64-cp311-cuda128-blackwell
+      PYTHON_VERSION: '3.11'
+      TORCH_VERSION: 2.7.1+cu128
+      TORCHVISION_VERSION: 0.22.1+cu128
+      PYTORCH_CUDA_INDEX: https://download.pytorch.org/whl/cu128
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install CUDA toolkit candidate
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: ${{ github.event.inputs.cuda_version }}
+          method: network
+
+      - name: Set up MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build NATTEN Blackwell candidate wheel
+        shell: pwsh
+        env:
+          NATTEN_VERSION: ${{ github.event.inputs.natten_version }}
+          CUDA_ARCH_LIST: ${{ github.event.inputs.cuda_arch_list }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repoRoot = Get-Location
+          $buildRoot = Join-Path $repoRoot 'build\blackwell-natten'
+          $sourceDir = Join-Path $buildRoot 'NATTEN'
+          $wheelDir = Join-Path $buildRoot 'dist'
+          New-Item -ItemType Directory -Force -Path $buildRoot, $wheelDir | Out-Null
+
+          if (-not $env:CUDA_PATH) {
+            $env:CUDA_PATH = Join-Path $env:ProgramFiles "NVIDIA GPU Computing Toolkit\CUDA\v${{ github.event.inputs.cuda_version }}"
+          }
+          $env:Path = "$($env:CUDA_PATH)\bin;$env:Path"
+          cl
+          nvcc --version
+          nvcc --list-gpu-arch
+          nvcc --list-gpu-code
+
+          python -m pip install --upgrade pip setuptools wheel ninja packaging
+          python -m pip install --index-url $env:PYTORCH_CUDA_INDEX torch==$env:TORCH_VERSION torchvision==$env:TORCHVISION_VERSION
+
+          git clone --branch $env:NATTEN_VERSION --depth 1 --recurse-submodules https://github.com/SHI-Labs/NATTEN.git $sourceDir
+
+          Write-Host 'Patch NATTEN MSVC-incompatible warning flags.'
+          $setupPath = Join-Path $sourceDir 'setup.py'
+          $setupText = Get-Content -Raw -Path $setupPath
+          $setupText = $setupText.Replace('"-Xcompiler=-Wconversion",', '')
+          $setupText = $setupText.Replace('"-Xcompiler=-fno-strict-aliasing",', '')
+          $setupText = $setupText.Replace('"-Xcompiler=-Wall",', '')
+          Set-Content -Path $setupPath -Value $setupText -Encoding UTF8
+
+          Write-Host 'Patch vendored CUTLASS C++17 detection for MSVC.'
+          $cutlassPlatform = Join-Path $sourceDir 'third_party\cutlass\include\cutlass\platform\platform.h'
+          $cutlassText = Get-Content -Raw -Path $cutlassPlatform
+          $cutlassText = $cutlassText.Replace('#if (__cplusplus >= 201703L)', '#if (__cplusplus >= 201703L) || (defined(_MSVC_LANG) && _MSVC_LANG >= 201703L)')
+          Set-Content -Path $cutlassPlatform -Value $cutlassText -Encoding UTF8
+
+          Write-Host 'Patch NATTEN MSVC CUDA alternative-token checks.'
+          $helpersPath = Join-Path $sourceDir 'csrc\include\natten\helpers.h'
+          $helpersText = Get-Content -Raw -Path $helpersPath
+          $helpersText = $helpersText.Replace('not x.is_sparse()', '!x.is_sparse()')
+          Set-Content -Path $helpersPath -Value $helpersText -Encoding UTF8
+
+          $env:TORCH_CUDA_ARCH_LIST = $env:CUDA_ARCH_LIST
+          $env:NATTEN_CUDA_ARCH = $env:CUDA_ARCH_LIST
+          $env:NATTEN_WITH_CUDA = '1'
+          $env:FORCE_CUDA = '1'
+          $env:USE_NINJA = '1'
+
+          Push-Location $sourceDir
+          try {
+            python -m pip wheel . --no-build-isolation --no-deps --wheel-dir $wheelDir
+          } finally {
+            Pop-Location
+          }
+
+          $wheelPath = @(Get-ChildItem -Path $wheelDir -Filter 'natten-0.21.0-*-win_amd64.whl' -File)
+          if ($wheelPath.Count -ne 1) {
+            throw "Expected exactly one NATTEN Blackwell wheel, found $($wheelPath.Count)."
+          }
+          $wheelPath[0].FullName | Set-Content -Path (Join-Path $buildRoot 'natten-wheel-path.txt') -Encoding UTF8
+
+      - name: Build Blackwell wheelhouse candidate archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $nattenWheel = Get-Content -Raw -Path build\blackwell-natten\natten-wheel-path.txt
+          $nattenWheel = $nattenWheel.Trim()
+          Write-Host "Building windows-x64-cp311-cuda128-blackwell candidate with NATTEN wheel: $nattenWheel"
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools/wheelhouse/build-windows-x64-cp311-cuda128-blackwell.ps1 -NattenWheelPath $nattenWheel
+
+      - name: Upload Blackwell candidate artifact only
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixal3d-wheelhouse-${{ env.WHEELHOUSE_LANE }}-candidate
+          path: build/wheelhouse/${{ env.WHEELHOUSE_LANE }}/dist/wheelhouse/*
+          if-no-files-found: error
