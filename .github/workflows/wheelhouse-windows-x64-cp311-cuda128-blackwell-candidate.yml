@@ -14,7 +14,7 @@ on:
       natten_version:
         description: NATTEN git tag to build
         required: true
-        default: 'v0.21.0'
+        default: 'v0.21.6'
 
 jobs:
   build-wheelhouse:
@@ -26,6 +26,7 @@ jobs:
       TORCH_VERSION: 2.7.1+cu128
       TORCHVISION_VERSION: 0.22.1+cu128
       PYTORCH_CUDA_INDEX: https://download.pytorch.org/whl/cu128
+      NATTEN_PACKAGE_VERSION: '0.21.6'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -128,9 +129,9 @@ jobs:
             Pop-Location
           }
 
-          $wheelPath = @(Get-ChildItem -Path $wheelDir -Filter 'natten-0.21.0-*-win_amd64.whl' -File)
+          $wheelPath = @(Get-ChildItem -Path $wheelDir -Filter "natten-$env:NATTEN_PACKAGE_VERSION-*-win_amd64.whl" -File)
           if ($wheelPath.Count -ne 1) {
-            throw "Expected exactly one NATTEN Blackwell wheel, found $($wheelPath.Count)."
+            throw "Expected exactly one NATTEN $env:NATTEN_PACKAGE_VERSION Blackwell wheel, found $($wheelPath.Count)."
           }
           $wheelPath[0].FullName | Set-Content -Path (Join-Path $buildRoot 'natten-wheel-path.txt') -Encoding UTF8
 
@@ -141,7 +142,7 @@ jobs:
           $nattenWheel = Get-Content -Raw -Path build\blackwell-natten\natten-wheel-path.txt
           $nattenWheel = $nattenWheel.Trim()
           Write-Host "Building windows-x64-cp311-cuda128-blackwell candidate with NATTEN wheel: $nattenWheel"
-          powershell -NoProfile -ExecutionPolicy Bypass -File tools/wheelhouse/build-windows-x64-cp311-cuda128-blackwell.ps1 -NattenWheelPath $nattenWheel
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools/wheelhouse/build-windows-x64-cp311-cuda128-blackwell.ps1 -NattenWheelPath $nattenWheel -NattenVersion $env:NATTEN_PACKAGE_VERSION
 
       - name: Upload Blackwell candidate artifact only
         uses: actions/upload-artifact@v4

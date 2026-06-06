@@ -55,9 +55,10 @@ torch==2.7.1+cu128
 torchvision==0.22.1+cu128
 CUDA toolkit 12.8.1
 TORCH_CUDA_ARCH_LIST=12.0
+NATTEN v0.21.6
 ```
 
-The workflow builds a NATTEN `v0.21.0` Windows wheel with Blackwell `sm_120` coverage, then assembles a candidate wheelhouse using exact-stack `cu128torch2.7-cp311-cp311-win_amd64` wheels for the other Windows native packages.
+The workflow builds a NATTEN `v0.21.6` Windows wheel with Blackwell `sm_120` coverage, then assembles a candidate wheelhouse using exact-stack `cu128torch2.7-cp311-cp311-win_amd64` wheels for the other Windows native packages. NATTEN `v0.21.6` is used because upstream includes multiple post-`v0.21.0` Blackwell fixes, including Blackwell FMHA backward fixes, CUTLASS 4.4, and broader Blackwell FMHA/FNA improvements.
 
 The candidate archive includes `WINDOWS-BLACKWELL-CANDIDATE.json` with downloaded wheel checksums and validation requirements. This workflow uploads a GitHub Actions artifact only. It must not update `wheelhouse.manifest.json`, upload release assets, or mark RTX 5090 as supported.
 
@@ -66,6 +67,8 @@ This candidate can still fail in CI because NATTEN/CUTLASS/MSVC/CUDA 12.8 compat
 First-run evidence from GitHub Actions run `27070460013` confirmed CUDA 12.8 generated `compute_120` / `sm_120` for NATTEN (`120-real`), but failed before producing a wheel because upstream NATTEN/CMake passed GCC-only flags such as `-Wconversion`, `-fno-strict-aliasing`, and `-Wall` through `nvcc -Xcompiler` to MSVC. The workflow therefore enables Git long paths for CUTLASS checkout and removes those GCC-only flags recursively before building.
 
 Second-run evidence from GitHub Actions run `27070868300` progressed past long paths and GCC-only flag removal, then failed in `cutlass/exmy_base.h` because `CUTLASS_CXX17_OR_LATER` is enabled through `_MSVC_LANG` while `cutlass/platform/platform.h` exposed `is_unsigned_v` only under `#if (201703L <=__cplusplus)`. The workflow now patches that exact guard to also accept `_MSVC_LANG >= 201703L`.
+
+Third-run evidence from GitHub Actions run `27071874204` progressed further into NATTEN `v0.21.0` Blackwell backward kernels before failing around `PipelineReduceTmaStore::PipelineState` parsing in `sm100_fmha_bwd_kernel_tma_warpspecialized.hpp`. Upstream NATTEN has several later Blackwell fixes, so the candidate now tests `v0.21.6` before adding local kernel patches.
 
 ## Publish criteria for a future Blackwell lane
 

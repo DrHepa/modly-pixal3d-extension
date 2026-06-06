@@ -7,6 +7,7 @@ param(
     [string]$Lane = "windows-x64-cp311-cuda128-blackwell",
     [string]$WheelhouseVersion = "0.1.0",
     [string]$BuildRoot = "",
+    [string]$NattenVersion = "0.21.6",
     [string]$NattenWheelPath = "",
     [switch]$AllowIncomplete
 )
@@ -124,18 +125,18 @@ wheelhouse = Path(sys.argv[1])
 patch_wheel_metadata(
     wheel_by_prefix(wheelhouse, "pixal3d_core"),
     {
-        "natten": ["Requires-Dist: natten==0.21.0"],
+        "natten": [f"Requires-Dist: natten=={sys.argv[2]}"],
         "o-voxel": ["Requires-Dist: o-voxel-vb-ap==0.0.1"],
         "cumesh": ["Requires-Dist: cumesh-vb==1.0"],
         "flex-gemm": ["Requires-Dist: flex-gemm-ap==1.0.0"],
         "nvdiffrec-render": ["Requires-Dist: nvdiffrec-render==0.0.1"],
     },
 )
-patch_wheel_metadata(wheel_by_prefix(wheelhouse, "naf"), {"natten": ["Requires-Dist: natten==0.21.0"]})
+patch_wheel_metadata(wheel_by_prefix(wheelhouse, "naf"), {"natten": [f"Requires-Dist: natten=={sys.argv[2]}"]})
 '@
 
 Write-Host "Repairing Windows Blackwell pure-wheel dependency metadata."
-$repairScript | python - $wheelhouseDir
+$repairScript | python - $wheelhouseDir $NattenVersion
 if ($LASTEXITCODE -ne 0) { throw "Windows Blackwell metadata repair failed with exit code $LASTEXITCODE." }
 
 $downloaded = @()
@@ -150,11 +151,12 @@ foreach ($wheel in $externalWheels) {
 $includedNatten = $null
 $unresolvedRequired = @()
 if ([string]::IsNullOrWhiteSpace($NattenWheelPath)) {
-    $unresolvedRequired += "missing NATTEN wheel path; Blackwell runtime candidate requires natten==0.21.0 with HAS_LIBNATTEN=True for cp311/cu128/sm120"
+    $unresolvedRequired += "missing NATTEN wheel path; Blackwell runtime candidate requires natten==$NattenVersion with HAS_LIBNATTEN=True for cp311/cu128/sm120"
 } else {
     $resolvedNatten = Resolve-Path $NattenWheelPath
     $nattenName = Split-Path $resolvedNatten -Leaf
-    if ($nattenName -notmatch "^natten-0\.21\.0-.*-win_amd64\.whl$") { throw "Unexpected Blackwell NATTEN wheel filename: $nattenName" }
+    $escapedNattenVersion = [regex]::Escape($NattenVersion)
+    if ($nattenName -notmatch "^natten-$escapedNattenVersion-.*-win_amd64\.whl$") { throw "Unexpected Blackwell NATTEN wheel filename for natten $NattenVersion: $nattenName" }
     Copy-Item $resolvedNatten -Destination (Join-Path $wheelhouseDir $nattenName)
     $includedNatten = [ordered]@{ name = "natten"; filename = $nattenName; sha256 = (Get-FileHash -Algorithm SHA256 (Join-Path $wheelhouseDir $nattenName)).Hash.ToLowerInvariant(); size_bytes = (Get-Item (Join-Path $wheelhouseDir $nattenName)).Length; required_verification = "HAS_LIBNATTEN == True on real RTX 50-series hardware" }
 }
