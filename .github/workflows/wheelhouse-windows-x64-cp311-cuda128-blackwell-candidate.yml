@@ -71,15 +71,36 @@ jobs:
           python -m pip install --upgrade pip setuptools wheel ninja packaging
           python -m pip install --index-url $env:PYTORCH_CUDA_INDEX torch==$env:TORCH_VERSION torchvision==$env:TORCHVISION_VERSION
 
+          git config --global core.longpaths true
           git clone --branch $env:NATTEN_VERSION --depth 1 --recurse-submodules https://github.com/SHI-Labs/NATTEN.git $sourceDir
 
-          Write-Host 'Patch NATTEN MSVC-incompatible warning flags.'
-          $setupPath = Join-Path $sourceDir 'setup.py'
-          $setupText = Get-Content -Raw -Path $setupPath
-          $setupText = $setupText.Replace('"-Xcompiler=-Wconversion",', '')
-          $setupText = $setupText.Replace('"-Xcompiler=-fno-strict-aliasing",', '')
-          $setupText = $setupText.Replace('"-Xcompiler=-Wall",', '')
-          Set-Content -Path $setupPath -Value $setupText -Encoding UTF8
+          Write-Host 'Patch NATTEN MSVC-incompatible GCC warning flags recursively.'
+          $flagPatterns = @(
+            '-Xcompiler=-Wconversion',
+            '-Xcompiler=-fno-strict-aliasing',
+            '-Xcompiler=-Wall',
+            '-Xcompiler -Wconversion',
+            '-Xcompiler -fno-strict-aliasing',
+            '-Xcompiler -Wall'
+          )
+          $patchableFiles = Get-ChildItem -Path $sourceDir -Recurse -File -Include '*.py','*.cmake','CMakeLists.txt','*.txt' |
+            Where-Object { $_.FullName -notmatch '\\.git\\' }
+          $patchedFlagFiles = @()
+          foreach ($file in $patchableFiles) {
+            $text = Get-Content -Raw -Path $file.FullName
+            $newText = $text
+            foreach ($pattern in $flagPatterns) {
+              $newText = $newText.Replace($pattern, '')
+            }
+            if ($newText -ne $text) {
+              Set-Content -Path $file.FullName -Value $newText -Encoding UTF8
+              $patchedFlagFiles += $file.FullName
+            }
+          }
+          if ($patchedFlagFiles.Count -eq 0) {
+            throw 'Expected to patch at least one NATTEN file containing MSVC-incompatible GCC compiler flags.'
+          }
+          $patchedFlagFiles | ForEach-Object { Write-Host "Patched GCC-only flags in $_" }
 
           Write-Host 'Patch vendored CUTLASS C++17 detection for MSVC.'
           $cutlassPlatform = Join-Path $sourceDir 'third_party\cutlass\include\cutlass\platform\platform.h'
