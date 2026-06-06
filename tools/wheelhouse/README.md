@@ -49,6 +49,8 @@ The Linux x64 base wheelhouse deliberately does **not** block on NATTEN/libnatte
 
 Windows wheelhouses must follow the exact-stack policy used by Pixal3D-ComfyUI references: Python ABI, PyTorch minor, CUDA minor, platform tag, and GPU architecture/SM coverage must all match. Modly's packaged app currently embeds python-build-standalone `3.11.9`, so `windows-x64-cp311-cuda124` is the primary GitHub-install lane; `windows-x64-cp312-cuda124` remains available for development environments running Python 3.12. The base lanes use exact-stack Pozzetti wheels for `flex_gemm_ap`, `cumesh_vb`, `o_voxel_vb_ap`, `drtk`, `flash_attn`, `nvdiffrast`, and `nvdiffrec_render`. Do not publish or auto-install generic Windows NATTEN wheels; use curated exact-stack artifacts only, and keep fallback NAF first-class when `HAS_LIBNATTEN` is unavailable.
 
+RTX 50-series / Blackwell support is tracked separately in `BLACKWELL-SM120.md`. The published CUDA 12.4 Windows wheelhouses are not Blackwell lanes; do not mark RTX 5090 supported until an exact-stack Blackwell wheelhouse is rebuilt, checksum-pinned, and validated on real RTX 50-series hardware.
+
 ## Windows NATTEN candidate workflow
 
 `.github/workflows/natten-windows-x64-cp311-cuda124-candidate.yml` is a manual GitHub Actions probe for building a native Windows `win_amd64` NATTEN wheel from `SHI-Labs/NATTEN` tag `v0.21.0` against Python `3.11`, torch `2.6.0+cu124`, torchvision `0.21.0+cu124`, and CUDA `12.4.1`. This candidate is the closest Windows port to upstream `requirements_th26_cu124.txt`.

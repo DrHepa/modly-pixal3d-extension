@@ -604,6 +604,46 @@ test('windows cp311 cuda124 NATTEN candidate workflow is manual, exact-stack, an
   assert.ok(!manifest.includes('v0.21.0'))
 })
 
+test('Blackwell sm120 investigation remains probe-only and outside published wheelhouse lanes', () => {
+  const workflowPath = join(repoRoot, '.github', 'workflows', 'blackwell-windows-x64-cp311-cuda128-probe.yml')
+  const workflow = readFileSync(workflowPath, 'utf8')
+  const docs = readFileSync(join(repoRoot, 'tools', 'wheelhouse', 'BLACKWELL-SM120.md'), 'utf8')
+  const recipe = readFileSync(join(repoRoot, 'tools', 'wheelhouse', 'README.md'), 'utf8')
+  const manifest = readFileSync(join(repoRoot, 'wheelhouse.manifest.json'), 'utf8')
+
+  assert.equal(existsSync(workflowPath), true)
+  assert.match(workflow, /workflow_dispatch:/)
+  assert.match(workflow, /Blackwell Windows x64 cp311 cuda128 probe/)
+  assert.match(workflow, /Probe Blackwell sm_120 prerequisites only/)
+  assert.match(workflow, /default: '12\.8\.1'/)
+  assert.match(workflow, /default: '2\.7\.1\+cu128'/)
+  assert.match(workflow, /PYTORCH_CUDA_INDEX: https:\/\/download\.pytorch\.org\/whl\/cu128/)
+  assert.match(workflow, /--list-gpu-arch/)
+  assert.match(workflow, /--list-gpu-code/)
+  assert.match(workflow, /compute_120/)
+  assert.match(workflow, /sm_120/)
+  assert.match(workflow, /BLACKWELL-SM120-PROBE\.json/)
+  assert.match(workflow, /probe_only = \$true/)
+  assert.match(workflow, /Do not add to wheelhouse\.manifest\.json/)
+  assert.match(workflow, /actions\/upload-artifact@v4/)
+  assert.doesNotMatch(workflow, /upload-release-asset/i)
+
+  assert.match(docs, /RTX 5090 as compute capability `12\.0`/)
+  assert.match(docs, /not\*\* a supported Pixal3D wheelhouse lane/i)
+  assert.match(docs, /CUDA 12\.4\.1 `nvcc` documentation lists.*`compute_90` \/ `sm_90`/s)
+  assert.match(docs, /does not list `compute_120` \/ `sm_120`/)
+  assert.match(docs, /rebuilding only NATTEN for `sm_120` would not prove/)
+  for (const wheel of ['flex_gemm_ap', 'cumesh_vb', 'o_voxel_vb_ap', 'drtk', 'flash_attn', 'nvdiffrast', 'nvdiffrec_render']) {
+    assert.match(docs, new RegExp(wheel))
+  }
+  assert.match(docs, /Until those conditions are met, RTX 5090 \/ Blackwell remains experimental and unsupported/)
+  assert.match(recipe, /BLACKWELL-SM120\.md/)
+  assert.match(recipe, /do not mark RTX 5090 supported/i)
+  assert.ok(!manifest.includes('cuda128'))
+  assert.ok(!manifest.includes('blackwell'))
+  assert.ok(!manifest.includes('sm120'))
+})
+
 test('linux x64 native source refs are immutable and confidence-documented', () => {
   const env = readFileSync(new URL('../tools/wheelhouse/native-sources.linux-x64-cp312-cuda124.env.example', import.meta.url), 'utf8')
 
