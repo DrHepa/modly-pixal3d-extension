@@ -156,7 +156,7 @@ if ([string]::IsNullOrWhiteSpace($NattenWheelPath)) {
     $resolvedNatten = Resolve-Path $NattenWheelPath
     $nattenName = Split-Path $resolvedNatten -Leaf
     $escapedNattenVersion = [regex]::Escape($NattenVersion)
-    if ($nattenName -notmatch "^natten-$escapedNattenVersion-.*-win_amd64\.whl$") { throw "Unexpected Blackwell NATTEN wheel filename for natten $NattenVersion: $nattenName" }
+    if ($nattenName -notmatch "^natten-$escapedNattenVersion-.*-win_amd64\.whl$") { throw "Unexpected Blackwell NATTEN wheel filename for natten ${NattenVersion}: $nattenName" }
     Copy-Item $resolvedNatten -Destination (Join-Path $wheelhouseDir $nattenName)
     $includedNatten = [ordered]@{ name = "natten"; filename = $nattenName; sha256 = (Get-FileHash -Algorithm SHA256 (Join-Path $wheelhouseDir $nattenName)).Hash.ToLowerInvariant(); size_bytes = (Get-Item (Join-Path $wheelhouseDir $nattenName)).Length; required_verification = "HAS_LIBNATTEN == True on real RTX 50-series hardware" }
 }

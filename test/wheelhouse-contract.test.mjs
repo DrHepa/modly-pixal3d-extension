@@ -689,7 +689,7 @@ test('Blackwell Windows wheelhouse candidate is exact-stack and artifact-only', 
   assert.match(script, /\[string\]\$NattenVersion = "0\.21\.6"/)
   assert.match(script, /NattenWheelPath/)
   assert.match(script, /missing NATTEN wheel path; Blackwell runtime candidate requires natten==\$NattenVersion/)
-  assert.match(script, /Unexpected Blackwell NATTEN wheel filename for natten \$NattenVersion/)
+  assert.match(script, /Unexpected Blackwell NATTEN wheel filename for natten \$\{NattenVersion\}:/)
   assert.match(script, /WINDOWS-BLACKWELL-CANDIDATE\.json/)
   assert.match(script, /candidate_complete_unvalidated/)
   for (const wheel of ['flex_gemm_ap', 'cumesh_vb', 'o_voxel_vb_ap', 'drtk', 'flash_attn', 'nvdiffrast', 'nvdiffrec_render']) {
@@ -712,6 +712,8 @@ test('Blackwell Windows wheelhouse candidate is exact-stack and artifact-only', 
   assert.match(docs, /run `27075519968` failed before compiling NATTEN/)
   assert.match(docs, /inline `\[string\]\(\.\.\.\)` cast was not sufficient/)
   assert.match(docs, /explicitly checks `\$null`/)
+  assert.match(docs, /run `27076133932` successfully built `natten-0\.21\.6-cp311-cp311-win_amd64\.whl`/)
+  assert.match(docs, /uses `\$\{NattenVersion\}:`/)
   assert.match(docs, /must not update `wheelhouse\.manifest\.json`/)
   assert.match(recipe, /wheelhouse-windows-x64-cp311-cuda128-blackwell-candidate\.yml/)
   assert.match(recipe, /candidate-only/)

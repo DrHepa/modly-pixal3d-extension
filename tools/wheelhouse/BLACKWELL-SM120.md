@@ -72,6 +72,8 @@ Third-run evidence from GitHub Actions run `27071874204` progressed further into
 
 Fourth-run evidence from GitHub Actions run `27075519968` failed before compiling NATTEN because the recursive patch step called `.Replace()` on `$null` from an empty patchable file in `v0.21.6`. Run `27075833950` showed an inline `[string](...)` cast was not sufficient under the workflow script execution path, so the workflow now explicitly checks `$null`, logs skipped empty files, assigns an empty string, and calls `.ToString()` before replacement.
 
+Fifth-run evidence from GitHub Actions run `27076133932` successfully built `natten-0.21.6-cp311-cp311-win_amd64.whl`, then failed in the candidate assembly script because a PowerShell error message interpolated `$NattenVersion:` with a trailing colon, which PowerShell parsed as an invalid drive-qualified variable reference. The script now uses `${NattenVersion}:` in that message.
+
 ## Publish criteria for a future Blackwell lane
 
 A future Blackwell lane requires all of the following before it can be declared supported:
