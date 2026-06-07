@@ -686,6 +686,8 @@ test('Blackwell Windows wheelhouse candidate is exact-stack and artifact-only', 
 
   assert.match(script, /windows-x64-cp311-cuda128-blackwell/)
   assert.match(script, /cu128torch2\.7-cp311-cp311-win_amd64/)
+  assert.match(script, /\$exactStackPattern = "\$\{CudaTag\}torch\$\{TorchMinor\}-\$\{PythonTag\}-\$\{PythonTag\}-win_amd64"/)
+  assert.doesNotMatch(script, /\$CudaTag`torch\$TorchMinor/)
   assert.match(script, /\[string\]\$NattenVersion = "0\.21\.6"/)
   assert.match(script, /NattenWheelPath/)
   assert.match(script, /missing NATTEN wheel path; Blackwell runtime candidate requires natten==\$NattenVersion/)
@@ -714,6 +716,9 @@ test('Blackwell Windows wheelhouse candidate is exact-stack and artifact-only', 
   assert.match(docs, /explicitly checks `\$null`/)
   assert.match(docs, /run `27076133932` successfully built `natten-0\.21\.6-cp311-cp311-win_amd64\.whl`/)
   assert.match(docs, /uses `\$\{NattenVersion\}:`/)
+  assert.match(docs, /run `27086897007` reached candidate assembly/)
+  assert.match(docs, /interpreted PowerShell backtick-`t` as a tab/)
+  assert.match(docs, /`\$\{CudaTag\}torch\$\{TorchMinor\}-\.\.\.`/)
   assert.match(docs, /must not update `wheelhouse\.manifest\.json`/)
   assert.match(recipe, /wheelhouse-windows-x64-cp311-cuda128-blackwell-candidate\.yml/)
   assert.match(recipe, /candidate-only/)

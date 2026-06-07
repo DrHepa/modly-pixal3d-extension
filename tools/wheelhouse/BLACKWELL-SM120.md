@@ -74,6 +74,8 @@ Fourth-run evidence from GitHub Actions run `27075519968` failed before compilin
 
 Fifth-run evidence from GitHub Actions run `27076133932` successfully built `natten-0.21.6-cp311-cp311-win_amd64.whl`, then failed in the candidate assembly script because a PowerShell error message interpolated `$NattenVersion:` with a trailing colon, which PowerShell parsed as an invalid drive-qualified variable reference. The script now uses `${NattenVersion}:` in that message.
 
+Sixth-run evidence from GitHub Actions run `27086897007` reached candidate assembly and failed because `$exactStackPattern = "$CudaTag`torch..."` interpreted PowerShell backtick-`t` as a tab, producing `cu128\torch2.7` instead of `cu128torch2.7`. The script now builds the pattern with braced interpolation: `${CudaTag}torch${TorchMinor}-...`.
+
 ## Publish criteria for a future Blackwell lane
 
 A future Blackwell lane requires all of the following before it can be declared supported:

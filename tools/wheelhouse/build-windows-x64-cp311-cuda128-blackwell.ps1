@@ -21,7 +21,7 @@ if ($Lane -ne "windows-x64-cp311-cuda128-blackwell") {
 $PythonTag = "cp311"
 $TorchMinor = "2.7"
 $CudaTag = "cu128"
-$exactStackPattern = "$CudaTag`torch$TorchMinor-$PythonTag-$PythonTag-win_amd64"
+$exactStackPattern = "${CudaTag}torch${TorchMinor}-${PythonTag}-${PythonTag}-win_amd64"
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 if ([string]::IsNullOrWhiteSpace($BuildRoot)) {
