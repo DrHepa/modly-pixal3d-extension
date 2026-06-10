@@ -148,6 +148,68 @@ foreach ($wheel in $externalWheels) {
     $downloaded += [ordered]@{ name = $wheel.Name; filename = $wheel.Filename; url = $wheel.Url; sha256 = (Get-FileHash -Algorithm SHA256 $destination).Hash.ToLowerInvariant(); size_bytes = (Get-Item $destination).Length }
 }
 
+$externalRepairScript = @'
+import tempfile
+import zipfile
+from pathlib import Path
+import csv
+import io
+import sys
+
+def wheel_by_prefix(wheelhouse: Path, prefix: str) -> Path:
+    matches = sorted(wheelhouse.glob(f"{prefix}-*.whl"))
+    if len(matches) != 1:
+        raise SystemExit(f"Expected exactly one wheel matching {prefix}-*.whl, found {len(matches)}")
+    return matches[0]
+
+def rename_dist_info_prefix(wheel_path: Path, old_prefix: str, new_prefix: str) -> None:
+    with zipfile.ZipFile(wheel_path, "r") as src:
+        names = src.namelist()
+        old_dirs = sorted({name.split("/", 1)[0] for name in names if name.startswith(old_prefix) and ".dist-info/" in name})
+        if not old_dirs:
+            if any(name.startswith(new_prefix) and ".dist-info/" in name for name in names):
+                return
+            raise SystemExit(f"No {old_prefix}*.dist-info directory found in {wheel_path.name}")
+        if len(old_dirs) != 1:
+            raise SystemExit(f"Expected one {old_prefix}*.dist-info directory in {wheel_path.name}, found {old_dirs}")
+        old_dir = old_dirs[0]
+        new_dir = old_dir.replace(old_prefix, new_prefix, 1)
+        old_record = f"{old_dir}/RECORD"
+        new_record = f"{new_dir}/RECORD"
+        record_text = src.read(old_record).decode("utf-8")
+        output = io.StringIO()
+        writer = csv.writer(output, lineterminator="\n")
+        for row in csv.reader(io.StringIO(record_text)):
+            if not row:
+                continue
+            row[0] = row[0].replace(f"{old_dir}/", f"{new_dir}/", 1)
+            if row[0] == new_record:
+                row = [row[0], "", ""]
+            writer.writerow(row)
+        record_bytes = output.getvalue().encode("utf-8")
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".whl", dir=wheel_path.parent) as tmp:
+            tmp_path = Path(tmp.name)
+        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as dst:
+            for item in src.infolist():
+                data = record_bytes if item.filename == old_record else src.read(item.filename)
+                filename = item.filename.replace(f"{old_dir}/", f"{new_dir}/", 1)
+                dst.writestr(filename, data)
+    tmp_path.replace(wheel_path)
+
+wheelhouse = Path(sys.argv[1])
+rename_dist_info_prefix(wheel_by_prefix(wheelhouse, "nvdiffrec_render"), "nvdiffrec-render-", "nvdiffrec_render-")
+'@
+
+Write-Host "Repairing Windows Blackwell external wheel dist-info directory names."
+$externalRepairScript | python - $wheelhouseDir
+if ($LASTEXITCODE -ne 0) { throw "Windows Blackwell external wheel dist-info repair failed with exit code $LASTEXITCODE." }
+
+$downloaded = @()
+foreach ($wheel in $externalWheels) {
+    $destination = Join-Path $wheelhouseDir $wheel.Filename
+    $downloaded += [ordered]@{ name = $wheel.Name; filename = $wheel.Filename; url = $wheel.Url; sha256 = (Get-FileHash -Algorithm SHA256 $destination).Hash.ToLowerInvariant(); size_bytes = (Get-Item $destination).Length }
+}
+
 $includedNatten = $null
 $unresolvedRequired = @()
 if ([string]::IsNullOrWhiteSpace($NattenWheelPath)) {
