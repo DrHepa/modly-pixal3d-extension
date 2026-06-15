@@ -266,6 +266,760 @@ print(json.dumps({
   assert.ok(result.paths.every((value) => !value.includes('models/pixal3d/aux/')))
 })
 
+test('setup prepare bootstraps auxiliary model directories under auxiliary, not stale aux', () => {
+  const result = runPython(`
+import json, tempfile
+from pathlib import Path
+import setup
+
+class FakeEnvBuilder:
+    def __init__(self, *args, **kwargs):
+        pass
+    def create(self, path):
+        path.mkdir(parents=True, exist_ok=True)
+        (path / 'pyvenv.cfg').write_text('', encoding='utf-8')
+
+with tempfile.TemporaryDirectory() as tmp:
+    ext_dir = Path(tmp) / 'Modly' / 'data' / 'extensions' / 'pixal3d'
+    ext_dir.mkdir(parents=True)
+    setup.stdlib_venv.EnvBuilder = FakeEnvBuilder
+    result = setup.run_setup(['--prepare', '--skip-install', '--workspace-root', str(ext_dir), '--json'])
+    models_root = Path(tmp) / 'Modly' / 'data' / 'models' / 'pixal3d'
+    print(json.dumps({
+        'status': result['status'],
+        'downloads_started': result['downloads_started'],
+        'installs_started': result['installs_started'],
+        'dinov3_dir': (models_root / 'auxiliary' / 'dinov3').is_dir(),
+        'rmbg_dir': (models_root / 'auxiliary' / 'rmbg').is_dir(),
+        'legacy_aux_dir': (models_root / 'aux').exists(),
+        'auxiliary_roots': result['auxiliary_assets']['logical_roots'],
+        'created_paths': [entry['path'] for entry in result['created']],
+    }, sort_keys=True))
+`)
+
+  assert.equal(result.status, 'prepared')
+  assert.equal(result.downloads_started, false)
+  assert.equal(result.installs_started, false)
+  assert.equal(result.dinov3_dir, true)
+  assert.equal(result.rmbg_dir, true)
+  assert.equal(result.legacy_aux_dir, false)
+  assert.deepEqual(result.auxiliary_roots, {
+    dino: 'models/pixal3d/auxiliary/dinov3',
+    rmbg: 'models/pixal3d/auxiliary/rmbg',
+  })
+  assert.ok(result.created_paths.includes('models/pixal3d/auxiliary/dinov3'))
+  assert.ok(result.created_paths.includes('models/pixal3d/auxiliary/rmbg'))
+})
+
+test('normal setup prepare does not perform hidden auxiliary downloads', () => {
+  const result = runPython(`
+import json, tempfile
+from pathlib import Path
+import setup
+
+class FakeEnvBuilder:
+    def __init__(self, *args, **kwargs):
+        pass
+    def create(self, path):
+        path.mkdir(parents=True, exist_ok=True)
+        (path / 'pyvenv.cfg').write_text('', encoding='utf-8')
+
+with tempfile.TemporaryDirectory() as tmp:
+    ext_dir = Path(tmp) / 'Modly' / 'data' / 'extensions' / 'pixal3d'
+    ext_dir.mkdir(parents=True)
+    calls = []
+    def forbidden_bootstrap(*_args, **_kwargs):
+        calls.append('bootstrap')
+        raise AssertionError('normal setup must not bootstrap auxiliary weights')
+    setup.stdlib_venv.EnvBuilder = FakeEnvBuilder
+    setup.bootstrap_auxiliary_assets = forbidden_bootstrap
+    prepared = setup.run_setup(['--prepare', '--skip-install', '--workspace-root', str(ext_dir), '--json'])
+    print(json.dumps({
+        'status': prepared['status'],
+        'downloads_started': prepared['downloads_started'],
+        'installs_started': prepared['installs_started'],
+        'bootstrap_calls': calls,
+    }, sort_keys=True))
+`)
+
+  assert.equal(result.status, 'prepared')
+  assert.equal(result.downloads_started, false)
+  assert.equal(result.installs_started, false)
+  assert.deepEqual(result.bootstrap_calls, [])
+})
+
+test('setup explicit auxiliary bootstrap flag triggers mocked bootstrap and download plan documents intent', () => {
+  const result = runPython(`
+import json, tempfile
+from pathlib import Path
+import setup
+
+with tempfile.TemporaryDirectory() as tmp:
+    ext_dir = Path(tmp) / 'Modly' / 'data' / 'extensions' / 'pixal3d'
+    ext_dir.mkdir(parents=True)
+    calls = []
+    def fake_bootstrap(workspace_root, downloader=None, force=False, **_kwargs):
+        calls.append({'workspace_root': str(workspace_root), 'downloader_is_none': downloader is None, 'force': force})
+        return {
+            'status': 'ready',
+            'code': 'auxiliary_assets_bootstrapped',
+            'downloads_started': True,
+            'installs_started': False,
+            'missing': [],
+            'generation_allowed': True,
+        }
+    setup.bootstrap_auxiliary_assets = fake_bootstrap
+    bootstrapped = setup.run_setup(['--bootstrap-auxiliary-assets', '--force-auxiliary-assets', '--workspace-root', str(ext_dir), '--json'])
+    plan = setup.run_setup(['--download-plan', '--workspace-root', str(ext_dir), '--json'])
+    print(json.dumps({
+        'status': bootstrapped['status'],
+        'code': bootstrapped['code'],
+        'downloads_started': bootstrapped['downloads_started'],
+        'installs_started': bootstrapped['installs_started'],
+        'calls': calls,
+        'plan_status': plan['status'],
+        'bootstrap_command': plan['auxiliary']['bootstrap_command'],
+        'bootstrap_intent': plan['auxiliary']['bootstrap_intent'],
+        'plan_note': plan['note'],
+    }, sort_keys=True))
+`)
+
+  assert.equal(result.status, 'bootstrap_auxiliary_assets')
+  assert.equal(result.code, 'auxiliary_assets_bootstrapped')
+  assert.equal(result.downloads_started, true)
+  assert.equal(result.installs_started, false)
+  assert.equal(result.calls.length, 1)
+  assert.equal(result.calls[0].force, true)
+  assert.match(result.bootstrap_command, /--bootstrap-auxiliary-assets/)
+  assert.match(result.bootstrap_intent, /allowlisted DINO\/RMBG/)
+  assert.match(result.plan_note, /--bootstrap-auxiliary-assets/)
+  assert.equal(result.plan_status, 'download_plan')
+})
+
+test('asset validator reports missing and complete auxiliary sentinels', () => {
+  const result = runPython(`
+import json, tempfile
+from pathlib import Path
+from pixal3d_extension.assets import AUXILIARY_ASSETS, check_auxiliary_sentinels
+from pixal3d_extension.paths import resolve_modly_layout, resolve_storage_path
+
+with tempfile.TemporaryDirectory() as tmp:
+    ext_dir = Path(tmp) / 'Modly' / 'data' / 'extensions' / 'pixal3d'
+    ext_dir.mkdir(parents=True)
+    layout = resolve_modly_layout(ext_dir)
+    missing = check_auxiliary_sentinels(ext_dir)
+    for manifest in AUXILIARY_ASSETS.values():
+        for sentinel in manifest.sentinel_paths:
+            path = resolve_storage_path(layout, sentinel)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('sentinel', encoding='utf-8')
+    complete = check_auxiliary_sentinels(ext_dir)
+    print(json.dumps({
+        'missing_code': missing['code'],
+        'missing_count': len(missing['missing']),
+        'missing_sample': missing['missing'][:2],
+        'complete_code': complete['code'],
+        'complete_missing': complete['missing'],
+        'assets_complete': {key: value['complete'] for key, value in complete['assets'].items()},
+    }, sort_keys=True))
+`)
+
+  assert.equal(result.missing_code, 'missing_auxiliary_assets')
+  assert.equal(result.missing_count, 8)
+  assert.ok(result.missing_sample.some((value) => value.includes('models/pixal3d/auxiliary/dinov3/')))
+  assert.equal(result.complete_code, 'auxiliary_assets_ready')
+  assert.deepEqual(result.complete_missing, [])
+  assert.deepEqual(result.assets_complete, { dino: true, rmbg: true })
+})
+
+test('auxiliary bootstrap downloads only the exact DINO/RMBG allowlist with a mocked downloader', () => {
+  const result = runPython(`
+import json, tempfile
+from pathlib import Path
+from pixal3d_extension.assets import bootstrap_auxiliary_assets, check_auxiliary_sentinels
+
+with tempfile.TemporaryDirectory() as tmp:
+    ext_dir = Path(tmp) / 'Modly' / 'data' / 'extensions' / 'pixal3d'
+    ext_dir.mkdir(parents=True)
+    calls = []
+    def downloader(*, repo_id, filename, destination, **_kwargs):
+        calls.append({'repo_id': repo_id, 'filename': filename})
+        Path(destination).write_text(f'{repo_id}/{filename}', encoding='utf-8')
+        return str(destination)
+    bootstrap = bootstrap_auxiliary_assets(ext_dir, downloader=downloader)
+    auxiliary_root = Path(tmp) / 'Modly' / 'data' / 'models' / 'pixal3d' / 'auxiliary'
+    files = sorted(str(path.relative_to(auxiliary_root)).replace('\\\\', '/') for path in auxiliary_root.rglob('*') if path.is_file())
+    sentinels = check_auxiliary_sentinels(ext_dir)
+    print(json.dumps({
+        'status': bootstrap['status'],
+        'code': bootstrap['code'],
+        'downloads_started': bootstrap['downloads_started'],
+        'calls': calls,
+        'files': files,
+        'sentinel_code': sentinels['code'],
+        'missing': sentinels['missing'],
+    }, sort_keys=True))
+`)
+
+  const expectedCalls = [
+    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'config.json' },
+    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'preprocessor_config.json' },
+    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'model.safetensors' },
+    { repo_id: 'camenduru/RMBG-2.0', filename: 'config.json' },
+    { repo_id: 'camenduru/RMBG-2.0', filename: 'preprocessor_config.json' },
+    { repo_id: 'camenduru/RMBG-2.0', filename: 'BiRefNet_config.py' },
+    { repo_id: 'camenduru/RMBG-2.0', filename: 'birefnet.py' },
+    { repo_id: 'camenduru/RMBG-2.0', filename: 'model.safetensors' },
+  ]
+  assert.equal(result.status, 'ready')
+  assert.equal(result.code, 'auxiliary_assets_bootstrapped')
+  assert.equal(result.downloads_started, true)
+  assert.deepEqual(result.calls, expectedCalls)
+  assert.deepEqual(result.files, [
+    'dinov3/config.json',
+    'dinov3/model.safetensors',
+    'dinov3/preprocessor_config.json',
+    'rmbg/BiRefNet_config.py',
+    'rmbg/birefnet.py',
+    'rmbg/config.json',
+    'rmbg/model.safetensors',
+    'rmbg/preprocessor_config.json',
+  ])
+  assert.equal(result.sentinel_code, 'auxiliary_assets_ready')
+  assert.deepEqual(result.missing, [])
+})
+
+test('auxiliary bootstrap validates sentinels and does not promote staged partial files on failure', () => {
+  const result = runPython(`
+import json, tempfile
+from pathlib import Path
+from pixal3d_extension.assets import bootstrap_auxiliary_assets, check_auxiliary_sentinels
+
+with tempfile.TemporaryDirectory() as tmp:
+    ext_dir = Path(tmp) / 'Modly' / 'data' / 'extensions' / 'pixal3d'
+    ext_dir.mkdir(parents=True)
+    calls = []
+    def downloader(*, repo_id, filename, destination, **_kwargs):
+        calls.append({'repo_id': repo_id, 'filename': filename})
+        Path(destination).write_text('partial', encoding='utf-8')
+        if repo_id == 'camenduru/RMBG-2.0' and filename == 'model.safetensors':
+            raise RuntimeError('simulated transfer failure')
+        return str(destination)
+    bootstrap = bootstrap_auxiliary_assets(ext_dir, downloader=downloader)
+    auxiliary_root = Path(tmp) / 'Modly' / 'data' / 'models' / 'pixal3d' / 'auxiliary'
+    final_files = sorted(str(path.relative_to(auxiliary_root)).replace('\\\\', '/') for path in auxiliary_root.rglob('*') if path.is_file()) if auxiliary_root.exists() else []
+    staging_left = any(path.name.startswith('.bootstrap-') for path in auxiliary_root.rglob('*')) if auxiliary_root.exists() else False
+    sentinels = check_auxiliary_sentinels(ext_dir)
+    print(json.dumps({
+        'bootstrap_status': bootstrap['status'],
+        'bootstrap_code': bootstrap['code'],
+        'downloads_started': bootstrap['downloads_started'],
+        'call_count': len(calls),
+        'final_files': final_files,
+        'staging_left': staging_left,
+        'sentinel_code': sentinels['code'],
+        'missing_count': len(sentinels['missing']),
+    }, sort_keys=True))
+`)
+
+  assert.equal(result.bootstrap_status, 'failed')
+  assert.equal(result.bootstrap_code, 'auxiliary_bootstrap_failed')
+  assert.equal(result.downloads_started, true)
+  assert.equal(result.call_count, 8)
+  assert.deepEqual(result.final_files, [])
+  assert.equal(result.staging_left, false)
+  assert.equal(result.sentinel_code, 'missing_auxiliary_assets')
+  assert.equal(result.missing_count, 8)
+})
+
+test('pipeline patch writes local DINO/RMBG paths and non-absolute metadata when auxiliary sentinels are complete', () => {
+  const result = runPython(`
+import json, tempfile
+from pathlib import Path
+from pixal3d_extension.assets import AUXILIARY_ASSETS
+from pixal3d_extension.paths import resolve_modly_layout, resolve_storage_path
+from pixal3d_extension.pipeline_patch import patch_pipeline
+
+PIPELINE = {
+    'args': {
+        'image_cond_model': {'args': {'model_name': 'facebook/dinov3-vitl16-pretrain-lvd1689m'}},
+        'rembg_model': {'args': {'model_name': 'briaai/RMBG-2.0'}},
+    }
+}
+
+with tempfile.TemporaryDirectory() as tmp:
+    ext_dir = Path(tmp) / 'Modly' / 'data' / 'extensions' / 'pixal3d'
+    ext_dir.mkdir(parents=True)
+    layout = resolve_modly_layout(ext_dir)
+    pipeline_path = resolve_storage_path(layout, 'models/pixal3d/generate/pipeline.json')
+    pipeline_path.parent.mkdir(parents=True)
+    pipeline_path.write_text(json.dumps(PIPELINE), encoding='utf-8')
+    for manifest in AUXILIARY_ASSETS.values():
+        for sentinel in manifest.sentinel_paths:
+            path = resolve_storage_path(layout, sentinel)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('sentinel', encoding='utf-8')
+
+    patched = patch_pipeline(ext_dir, auxiliary_mode='local', network_available=False)
+    data = json.loads(pipeline_path.read_text(encoding='utf-8'))
+    metadata_path = resolve_storage_path(layout, 'models/pixal3d/readiness.json')
+    metadata_text = metadata_path.read_text(encoding='utf-8')
+    metadata = json.loads(metadata_text)['pipeline_patch']
+    dino = data['args']['image_cond_model']['args']['model_name']
+    rmbg = data['args']['rembg_model']['args']['model_name']
+    print(json.dumps({
+        'patch_code': patched['code'],
+        'dino_is_absolute': Path(dino).is_absolute(),
+        'rmbg_is_absolute': Path(rmbg).is_absolute(),
+        'dino_suffix': dino.replace('\\\\', '/').split('/Modly/data/')[-1],
+        'rmbg_suffix': rmbg.replace('\\\\', '/').split('/Modly/data/')[-1],
+        'replacement_kinds': metadata['replacement_kinds'],
+        'replacement_refs': metadata['replacement_refs'],
+        'metadata_contains_tmp': str(Path(tmp)) in metadata_text,
+        'unlocalized_keys': [entry['key'] for entry in metadata['unlocalized_runtime_dependencies']],
+    }, sort_keys=True))
+`)
+
+  assert.equal(result.patch_code, 'pipeline_patch_applied')
+  assert.equal(result.dino_is_absolute, true)
+  assert.equal(result.rmbg_is_absolute, true)
+  assert.equal(result.dino_suffix, 'models/pixal3d/auxiliary/dinov3')
+  assert.equal(result.rmbg_suffix, 'models/pixal3d/auxiliary/rmbg')
+  assert.deepEqual(result.replacement_kinds, { dino: 'local', rmbg: 'local' })
+  assert.deepEqual(result.replacement_refs, {
+    dino: 'local:models/pixal3d/auxiliary/dinov3',
+    rmbg: 'local:models/pixal3d/auxiliary/rmbg',
+  })
+  assert.equal(result.metadata_contains_tmp, false)
+  assert.deepEqual(result.unlocalized_keys, ['moge', 'naf'])
+})
+
+test('default pipeline patch preserves camenduru remote fallback when local auxiliary assets are missing', () => {
+  const result = runPython(`
+import json, tempfile
+from pathlib import Path
+from pixal3d_extension.assets import PRIMARY_ASSET
+from pixal3d_extension.paths import resolve_modly_layout, resolve_storage_path
+from pixal3d_extension.pipeline_patch import patch_pipeline
+from pixal3d_extension.readiness import check_readiness
+
+PIPELINE = {
+    'args': {
+        'image_cond_model': {'args': {'model_name': 'facebook/dinov3-vitl16-pretrain-lvd1689m'}},
+        'rembg_model': {'args': {'model_name': 'briaai/RMBG-2.0'}},
+    }
+}
+
+with tempfile.TemporaryDirectory() as tmp:
+    ext_dir = Path(tmp) / 'Modly' / 'data' / 'extensions' / 'pixal3d'
+    ext_dir.mkdir(parents=True)
+    layout = resolve_modly_layout(ext_dir)
+    for sentinel in PRIMARY_ASSET.sentinel_paths:
+        path = resolve_storage_path(layout, sentinel)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if sentinel.endswith('pipeline.json'):
+            path.write_text(json.dumps(PIPELINE), encoding='utf-8')
+        else:
+            path.write_text('primary', encoding='utf-8')
+
+    patched = patch_pipeline(ext_dir, auxiliary_mode='default', network_available=True)
+    pipeline = json.loads(resolve_storage_path(layout, 'models/pixal3d/generate/pipeline.json').read_text(encoding='utf-8'))
+    readiness = check_readiness(ext_dir, auxiliary_mode='default', network_available=True, runtime_validated=True)
+    print(json.dumps({
+        'patch_code': patched['code'],
+        'patch_aux_code': patched['auxiliary_source']['code'],
+        'replacement_kinds': patched['auxiliary_source']['sources'],
+        'dino': pipeline['args']['image_cond_model']['args']['model_name'],
+        'rmbg': pipeline['args']['rembg_model']['args']['model_name'],
+        'readiness_code': readiness['code'],
+        'readiness_generation_allowed': readiness['generation_allowed'],
+        'readiness_aux_code': readiness['auxiliary_source']['code'],
+        'local_aux_exists': resolve_storage_path(layout, 'models/pixal3d/auxiliary/dinov3').exists(),
+    }, sort_keys=True))
+`)
+
+  assert.equal(result.patch_code, 'pipeline_patch_applied')
+  assert.equal(result.patch_aux_code, 'remote_auxiliary_fallback')
+  assert.equal(result.dino, 'camenduru/dinov3-vitl16-pretrain-lvd1689m')
+  assert.equal(result.rmbg, 'camenduru/RMBG-2.0')
+  assert.equal(result.readiness_code, 'ready')
+  assert.equal(result.readiness_generation_allowed, true)
+  assert.equal(result.readiness_aux_code, 'remote_auxiliary_fallback')
+  assert.equal(result.local_aux_exists, false)
+})
+
+test('runtime default mode attempts auxiliary bootstrap before remote fallback and uses local paths immediately', () => {
+  const result = runPython(`
+import json, sys, tempfile, types
+from pathlib import Path
+from pixal3d_extension.assets import PRIMARY_ASSET
+from pixal3d_extension.paths import resolve_modly_layout, resolve_storage_path
+from pixal3d_extension import runtime
+
+PIPELINE = {
+    'args': {
+        'image_cond_model': {'args': {'model_name': 'facebook/dinov3-vitl16-pretrain-lvd1689m'}},
+        'rembg_model': {'args': {'model_name': 'briaai/RMBG-2.0'}},
+    }
+}
+
+class FakeScene:
+    def apply_transform(self, matrix):
+        pass
+    def export(self, file_type):
+        return b'rotated'
+
+fake_trimesh = types.ModuleType('trimesh')
+fake_trimesh.load = lambda path, file_type, force, process: FakeScene()
+fake_trimesh.transformations = types.SimpleNamespace(rotation_matrix=lambda angle, axis: None)
+sys.modules['trimesh'] = fake_trimesh
+
+with tempfile.TemporaryDirectory() as tmp:
+    ext_dir = Path(tmp) / 'Modly' / 'data' / 'extensions' / 'pixal3d'
+    ext_dir.mkdir(parents=True)
+    layout = resolve_modly_layout(ext_dir)
+    for sentinel in PRIMARY_ASSET.sentinel_paths:
+        path = resolve_storage_path(layout, sentinel)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(PIPELINE) if sentinel.endswith('pipeline.json') else 'primary', encoding='utf-8')
+    image = ext_dir / 'input.png'
+    image.write_bytes(b'image')
+    (ext_dir / 'outputs').mkdir()
+    calls = []
+    def downloader(*, repo_id, filename, destination, **_kwargs):
+        calls.append({'repo_id': repo_id, 'filename': filename})
+        Path(destination).write_text(f'{repo_id}/{filename}', encoding='utf-8')
+        return str(destination)
+    def fake_pipeline(_source):
+        def pipeline(**kwargs):
+            glb = Path(kwargs['output_dir']) / 'bootstrap-local.glb'
+            glb.write_bytes(b'raw')
+            return {'glb_path': str(glb)}
+        return pipeline
+    result = runtime.run_job({
+        'workspace_root': str(ext_dir),
+        'input_image': 'input.png',
+        'output_dir': 'outputs',
+        'readiness': {'generation_allowed': True, 'code': 'ready'},
+        'auxiliary_mode': 'default',
+        'network_available': True,
+        'auxiliary_bootstrap_downloader': downloader,
+        'params': {},
+    }, pipeline_factory=fake_pipeline)
+    pipeline = json.loads(resolve_storage_path(layout, 'models/pixal3d/generate/pipeline.json').read_text(encoding='utf-8'))
+    dino = pipeline['args']['image_cond_model']['args']['model_name']
+    rmbg = pipeline['args']['rembg_model']['args']['model_name']
+    print(json.dumps({
+        'status': result['status'],
+        'calls': calls,
+        'dino_suffix': dino.replace('\\\\', '/').split('/Modly/data/')[-1],
+        'rmbg_suffix': rmbg.replace('\\\\', '/').split('/Modly/data/')[-1],
+        'source_code': result['auxiliary_source']['code'],
+        'source_kinds': {key: value['kind'] for key, value in result['auxiliary_source']['sources'].items()},
+        'bootstrap_code': result['auxiliary_source']['auxiliary_bootstrap']['code'],
+        'glb_exists': Path(result['output']['glb_path']).is_file(),
+    }, sort_keys=True))
+`)
+
+  assert.equal(result.status, 'completed')
+  assert.deepEqual(result.calls, [
+    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'config.json' },
+    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'preprocessor_config.json' },
+    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'model.safetensors' },
+    { repo_id: 'camenduru/RMBG-2.0', filename: 'config.json' },
+    { repo_id: 'camenduru/RMBG-2.0', filename: 'preprocessor_config.json' },
+    { repo_id: 'camenduru/RMBG-2.0', filename: 'BiRefNet_config.py' },
+    { repo_id: 'camenduru/RMBG-2.0', filename: 'birefnet.py' },
+    { repo_id: 'camenduru/RMBG-2.0', filename: 'model.safetensors' },
+  ])
+  assert.equal(result.dino_suffix, 'models/pixal3d/auxiliary/dinov3')
+  assert.equal(result.rmbg_suffix, 'models/pixal3d/auxiliary/rmbg')
+  assert.equal(result.source_code, 'local_auxiliary_assets_ready')
+  assert.deepEqual(result.source_kinds, { dino: 'local', rmbg: 'local' })
+  assert.equal(result.bootstrap_code, 'auxiliary_assets_bootstrapped')
+  assert.equal(result.glb_exists, true)
+})
+
+test('runtime default mode preserves camenduru remote fallback when auxiliary bootstrap fails', () => {
+  const result = runPython(`
+import json, sys, tempfile, types
+from pathlib import Path
+from pixal3d_extension.assets import PRIMARY_ASSET
+from pixal3d_extension.paths import resolve_modly_layout, resolve_storage_path
+from pixal3d_extension import runtime
+
+PIPELINE = {
+    'args': {
+        'image_cond_model': {'args': {'model_name': 'facebook/dinov3-vitl16-pretrain-lvd1689m'}},
+        'rembg_model': {'args': {'model_name': 'briaai/RMBG-2.0'}},
+    }
+}
+
+class FakeScene:
+    def apply_transform(self, matrix):
+        pass
+    def export(self, file_type):
+        return b'rotated'
+
+fake_trimesh = types.ModuleType('trimesh')
+fake_trimesh.load = lambda path, file_type, force, process: FakeScene()
+fake_trimesh.transformations = types.SimpleNamespace(rotation_matrix=lambda angle, axis: None)
+sys.modules['trimesh'] = fake_trimesh
+
+with tempfile.TemporaryDirectory() as tmp:
+    ext_dir = Path(tmp) / 'Modly' / 'data' / 'extensions' / 'pixal3d'
+    ext_dir.mkdir(parents=True)
+    layout = resolve_modly_layout(ext_dir)
+    for sentinel in PRIMARY_ASSET.sentinel_paths:
+        path = resolve_storage_path(layout, sentinel)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(PIPELINE) if sentinel.endswith('pipeline.json') else 'primary', encoding='utf-8')
+    image = ext_dir / 'input.png'
+    image.write_bytes(b'image')
+    (ext_dir / 'outputs').mkdir()
+    calls = []
+    def failing_downloader(*, repo_id, filename, destination, **_kwargs):
+        calls.append({'repo_id': repo_id, 'filename': filename})
+        Path(destination).write_text('partial', encoding='utf-8')
+        raise RuntimeError('simulated network failure')
+    def fake_pipeline(_source):
+        def pipeline(**kwargs):
+            glb = Path(kwargs['output_dir']) / 'bootstrap-remote.glb'
+            glb.write_bytes(b'raw')
+            return {'glb_path': str(glb)}
+        return pipeline
+    result = runtime.run_job({
+        'workspace_root': str(ext_dir),
+        'input_image': 'input.png',
+        'output_dir': 'outputs',
+        'readiness': {'generation_allowed': True, 'code': 'ready'},
+        'auxiliary_mode': 'default',
+        'network_available': True,
+        'auxiliary_bootstrap_downloader': failing_downloader,
+        'params': {},
+    }, pipeline_factory=fake_pipeline)
+    pipeline = json.loads(resolve_storage_path(layout, 'models/pixal3d/generate/pipeline.json').read_text(encoding='utf-8'))
+    print(json.dumps({
+        'status': result['status'],
+        'call_count': len(calls),
+        'first_call': calls[0],
+        'dino': pipeline['args']['image_cond_model']['args']['model_name'],
+        'rmbg': pipeline['args']['rembg_model']['args']['model_name'],
+        'source_code': result['auxiliary_source']['code'],
+        'source_kinds': {key: value['kind'] for key, value in result['auxiliary_source']['sources'].items()},
+        'bootstrap_status': result['auxiliary_source']['auxiliary_bootstrap']['status'],
+        'warning_codes': [warning['code'] for warning in result['auxiliary_source'].get('warnings', [])],
+        'glb_exists': Path(result['output']['glb_path']).is_file(),
+    }, sort_keys=True))
+`)
+
+  assert.equal(result.status, 'completed')
+  assert.equal(result.call_count, 1)
+  assert.deepEqual(result.first_call, { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'config.json' })
+  assert.equal(result.dino, 'camenduru/dinov3-vitl16-pretrain-lvd1689m')
+  assert.equal(result.rmbg, 'camenduru/RMBG-2.0')
+  assert.equal(result.source_code, 'remote_auxiliary_fallback')
+  assert.deepEqual(result.source_kinds, { dino: 'remote', rmbg: 'remote' })
+  assert.equal(result.bootstrap_status, 'failed')
+  assert.deepEqual(result.warning_codes, ['auxiliary_bootstrap_failed_remote_fallback_preserved'])
+  assert.equal(result.glb_exists, true)
+})
+
+test('strict local/offline readiness and runtime fail early on missing auxiliary assets without importing inference', () => {
+  const result = runPython(`
+import importlib, json, tempfile
+from pathlib import Path
+from pixal3d_extension.assets import PRIMARY_ASSET
+from pixal3d_extension.paths import resolve_modly_layout, resolve_storage_path
+from pixal3d_extension.readiness import check_readiness
+from pixal3d_extension import runtime
+
+PIPELINE = {
+    'args': {
+        'image_cond_model': {'args': {'model_name': 'facebook/dinov3-vitl16-pretrain-lvd1689m'}},
+        'rembg_model': {'args': {'model_name': 'briaai/RMBG-2.0'}},
+    }
+}
+
+with tempfile.TemporaryDirectory() as tmp:
+    ext_dir = Path(tmp) / 'Modly' / 'data' / 'extensions' / 'pixal3d'
+    ext_dir.mkdir(parents=True)
+    layout = resolve_modly_layout(ext_dir)
+    for sentinel in PRIMARY_ASSET.sentinel_paths:
+        path = resolve_storage_path(layout, sentinel)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(PIPELINE) if sentinel.endswith('pipeline.json') else 'primary', encoding='utf-8')
+
+    image = ext_dir / 'input.png'
+    image.write_bytes(b'image')
+    (ext_dir / 'outputs').mkdir()
+    imports = []
+    downloader_calls = []
+    def forbidden_downloader(*_args, **_kwargs):
+        downloader_calls.append('network')
+        raise AssertionError('local/offline/strict must not bootstrap auxiliary assets')
+    original_import_module = runtime.importlib.import_module
+    def forbidden_import(name):
+        imports.append(name)
+        if name == 'inference':
+            raise AssertionError('inference must not be imported before missing_auxiliary_assets failure')
+        return original_import_module(name)
+    runtime.importlib.import_module = forbidden_import
+    try:
+        runtime_results = {}
+        for mode in ['local', 'offline', 'strict']:
+            runtime_results[mode] = runtime.run_job({
+                'workspace_root': str(ext_dir),
+                'input_image': 'input.png',
+                'output_dir': 'outputs',
+                'readiness': {'generation_allowed': True, 'code': 'ready'},
+                'auxiliary_mode': mode,
+                'network_available': False,
+                'auxiliary_bootstrap_downloader': forbidden_downloader,
+                'params': {},
+            })
+    finally:
+        runtime.importlib.import_module = original_import_module
+
+    readiness_codes = {
+        mode: check_readiness(ext_dir, auxiliary_mode=mode, network_available=False, runtime_validated=True)['code']
+        for mode in ['local', 'offline', 'strict']
+    }
+    print(json.dumps({
+        'readiness_codes': readiness_codes,
+        'runtime_statuses': {mode: result['status'] for mode, result in runtime_results.items()},
+        'runtime_codes': {mode: result['code'] for mode, result in runtime_results.items()},
+        'runtime_missing_counts': {mode: len(result.get('missing', [])) for mode, result in runtime_results.items()},
+        'inference_imported': 'inference' in imports,
+        'downloader_calls': downloader_calls,
+    }, sort_keys=True))
+`)
+
+  assert.deepEqual(result.readiness_codes, {
+    local: 'missing_auxiliary_assets',
+    offline: 'missing_auxiliary_assets',
+    strict: 'missing_auxiliary_assets',
+  })
+  assert.deepEqual(result.runtime_statuses, { local: 'failed', offline: 'failed', strict: 'failed' })
+  assert.deepEqual(result.runtime_codes, { local: 'missing_auxiliary_assets', offline: 'missing_auxiliary_assets', strict: 'missing_auxiliary_assets' })
+  assert.deepEqual(result.runtime_missing_counts, { local: 8, offline: 8, strict: 8 })
+  assert.equal(result.inference_imported, false)
+  assert.deepEqual(result.downloader_calls, [])
+})
+
+test('runtime local mode patches inference IMAGE_COND_CONFIGS to the resolved local DINO path before generation', () => {
+  const result = runPython(`
+import json, sys, tempfile, types
+from pathlib import Path
+from pixal3d_extension.assets import AUXILIARY_ASSETS, PRIMARY_ASSET
+from pixal3d_extension.paths import resolve_modly_layout, resolve_storage_path
+from pixal3d_extension.pipeline_patch import patch_pipeline
+from pixal3d_extension import runtime
+
+PIPELINE = {
+    'args': {
+        'image_cond_model': {'args': {'model_name': 'facebook/dinov3-vitl16-pretrain-lvd1689m'}},
+        'rembg_model': {'args': {'model_name': 'briaai/RMBG-2.0'}},
+    }
+}
+
+class FakeScene:
+    def apply_transform(self, matrix):
+        pass
+    def export(self, file_type):
+        return b'rotated'
+
+fake_trimesh = types.ModuleType('trimesh')
+fake_trimesh.load = lambda path, file_type, force, process: FakeScene()
+fake_trimesh.transformations = types.SimpleNamespace(rotation_matrix=lambda angle, axis: None)
+sys.modules['trimesh'] = fake_trimesh
+
+with tempfile.TemporaryDirectory() as tmp:
+    ext_dir = Path(tmp) / 'Modly' / 'data' / 'extensions' / 'pixal3d'
+    ext_dir.mkdir(parents=True)
+    layout = resolve_modly_layout(ext_dir)
+    for sentinel in PRIMARY_ASSET.sentinel_paths:
+        path = resolve_storage_path(layout, sentinel)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(PIPELINE) if sentinel.endswith('pipeline.json') else 'primary', encoding='utf-8')
+    for manifest in AUXILIARY_ASSETS.values():
+        for sentinel in manifest.sentinel_paths:
+            path = resolve_storage_path(layout, sentinel)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('aux', encoding='utf-8')
+
+    patch_pipeline(ext_dir, auxiliary_mode='local', network_available=False)
+    local_dino = str(resolve_storage_path(layout, 'models/pixal3d/auxiliary/dinov3'))
+    image = ext_dir / 'input.png'
+    image.write_bytes(b'image')
+    (ext_dir / 'outputs').mkdir()
+
+    fake_inference = types.ModuleType('inference')
+    fake_config_object = types.SimpleNamespace(model_name='facebook/dinov3-vitl16-pretrain-lvd1689m')
+    fake_inference.IMAGE_COND_CONFIGS = {
+        'ss': {'model_name': 'camenduru/dinov3-vitl16-pretrain-lvd1689m'},
+        'shape_512': fake_config_object,
+    }
+    captured = {}
+    def run_inference(*, image_path, output_path, seed, model_path, manual_fov, low_vram, resolution):
+        del image_path, seed, model_path, manual_fov, low_vram, resolution
+        captured['configs'] = {
+            'ss': fake_inference.IMAGE_COND_CONFIGS['ss']['model_name'],
+            'shape_512': fake_inference.IMAGE_COND_CONFIGS['shape_512'].model_name,
+        }
+        Path(output_path).write_bytes(b'raw')
+    fake_inference.run_inference = run_inference
+    sys.modules['inference'] = fake_inference
+
+    runtime._prepare_runtime_compat = lambda: None
+    runtime._install_windows_native_module_aliases = lambda: None
+    runtime._install_natten_fallback = lambda: None
+    runtime._silence_flex_gemm_autotuners = lambda: None
+
+    result = runtime.run_job({
+        'workspace_root': str(ext_dir),
+        'input_image': 'input.png',
+        'output_dir': 'outputs',
+        'readiness': {'generation_allowed': True, 'code': 'ready'},
+        'auxiliary_mode': 'local',
+        'network_available': False,
+        'model_source': str(resolve_storage_path(layout, 'models/pixal3d/generate')),
+        'params': {'seed': 1},
+    })
+    print(json.dumps({
+        'status': result['status'],
+        'local_dino': local_dino,
+        'configs': captured['configs'],
+        'glb_exists': Path(result['output']['glb_path']).is_file(),
+    }, sort_keys=True))
+`)
+
+  assert.equal(result.status, 'completed')
+  assert.equal(result.configs.ss, result.local_dino)
+  assert.equal(result.configs.shape_512, result.local_dino)
+  assert.equal(result.glb_exists, true)
+})
+
+test('MoGe and NAF offline behavior is represented as remote/cache fallback, not full offline support', () => {
+  const readme = readFileSync(join(repoRoot, 'README.md'), 'utf8')
+  assert.match(readme, /not\*\* a full offline-generation guarantee|not\*\* a full offline/i)
+  assert.match(readme, /Ruicheng\/moge-2-vitl/)
+  assert.match(readme, /MoGeModel\.from_pretrained\(\)/)
+  assert.match(readme, /torch\.hub\.load_state_dict_from_url/)
+  assert.match(readme, /naf_release\.pth/)
+
+  const result = runPython(`
+import json
+from pixal3d_extension.assets import UNLOCALIZED_RUNTIME_DEPENDENCIES
+print(json.dumps({entry['key']: entry['offline_status'] for entry in UNLOCALIZED_RUNTIME_DEPENDENCIES}, sort_keys=True))
+`)
+
+  assert.deepEqual(result, {
+    moge: 'remote_or_hf_cache_fallback',
+    naf: 'torch_cache_or_network_fallback',
+  })
+})
+
 test('setup.py can be loaded through runpy from a different current directory', () => {
   const result = spawnSync(python, ['-c', `
 import os, runpy, tempfile
@@ -330,7 +1084,7 @@ test('runtime suppresses upstream FlexGEMM autotuner verbose without disabling c
   assert.match(runtime, /FLEX_GEMM_AUTOTUNER_VERBOSE"\] = "0"/)
   assert.match(runtime, /value\.verbose = False/)
   assert.match(runtime, /flex_gemm\.utils\.load_autotune_cache\(\)/)
-  assert.match(runtime, /from inference import run_inference[\s\S]*?_silence_flex_gemm_autotuners\(\)/)
+  assert.match(runtime, /inference_module = importlib\.import_module\("inference"\)[\s\S]*?run_inference = inference_module\.run_inference[\s\S]*?_silence_flex_gemm_autotuners\(\)/)
 })
 
 test('low_vram schema is UI-compatible select and runtime parses values explicitly', () => {
@@ -1201,7 +1955,7 @@ test('runtime installs Windows native aliases before importing upstream inferenc
   assert.match(runtime, /def _install_windows_o_voxel_python_compat\(o_voxel_module: Any\) -> None:/)
   assert.match(runtime, /"postprocess": "pixal3d_extension\.o_voxel_compat\.postprocess"/)
   assert.match(runtime, /"rasterize": "pixal3d_extension\.o_voxel_compat\.rasterize"/)
-  assert.match(runtime, /_prepare_runtime_compat\(\)[\s\S]*?_install_windows_native_module_aliases\(\)[\s\S]*?_install_natten_fallback\(\)[\s\S]*?from inference import run_inference/)
+  assert.match(runtime, /_prepare_runtime_compat\(\)[\s\S]*?_install_windows_native_module_aliases\(\)[\s\S]*?_install_natten_fallback\(\)[\s\S]*?inference_module = importlib\.import_module\("inference"\)/)
 })
 
 test('runtime exposes Windows o_voxel postprocess and rasterize compatibility modules', () => {

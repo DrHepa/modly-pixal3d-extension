@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pixal3d_extension.assets import AUXILIARY_ASSETS, PRIMARY_ASSET, check_asset_sentinels
+from pixal3d_extension.assets import (
+    AUXILIARY_ASSETS,
+    PRIMARY_ASSET,
+    UNLOCALIZED_RUNTIME_DEPENDENCIES,
+    check_asset_sentinels,
+    normalize_auxiliary_source_mode,
+    resolve_auxiliary_sources,
+)
 from pixal3d_extension.paths import resolve_modly_layout, resolve_storage_path
 from pixal3d_extension.pipeline_patch import validate_pipeline_patch
 
@@ -26,6 +33,7 @@ AUXILIARY_MODELS = [
     {"id": manifest.repo_id, "logical_root": manifest.local_root, "status": "required"}
     for manifest in AUXILIARY_ASSETS.values()
 ]
+RUNTIME_DEPENDENCY_STATUS = list(UNLOCALIZED_RUNTIME_DEPENDENCIES)
 
 
 def _legacy_code(result: dict) -> dict:
@@ -74,22 +82,63 @@ def check_readiness(
     workspace_root: str | Path,
     *,
     require_aux: bool = True,
+    auxiliary_mode: str | None = "default",
+    network_available: bool | None = True,
     runtime_lane: str | None = SUPPORTED_RUNTIME_LANE,
     runtime_validated: bool = False,
     import_validation: dict | None = None,
+    allow_remote_runtime_dependencies: bool = False,
 ) -> dict:
-    asset_result = check_asset_sentinels(workspace_root, require_aux=require_aux)
+    asset_result = check_asset_sentinels(workspace_root, require_aux=False)
     if asset_result["status"] != "ready":
         result = _legacy_code(asset_result)
         result["unknown_auxiliaries"] = AUXILIARY_MODELS
+        result["runtime_dependencies"] = RUNTIME_DEPENDENCY_STATUS
         return result
 
     if not require_aux:
-        return {"status": "ready", "code": "ready", "missing": [], "generation_allowed": True}
+        return {
+            "status": "ready",
+            "code": "ready",
+            "missing": [],
+            "generation_allowed": True,
+            "runtime_dependencies": RUNTIME_DEPENDENCY_STATUS,
+        }
 
-    patch_result = validate_pipeline_patch(workspace_root)
+    try:
+        normalized_auxiliary_mode = normalize_auxiliary_source_mode(auxiliary_mode)
+    except ValueError as exc:
+        return {"status": "blocked", "code": "invalid_auxiliary_mode", "message": str(exc), "generation_allowed": False}
+
+    auxiliary_source = resolve_auxiliary_sources(
+        workspace_root,
+        mode=normalized_auxiliary_mode,
+        network_available=network_available,
+    )
+    if auxiliary_source["status"] == "blocked":
+        return {
+            "status": "blocked",
+            "code": "missing_auxiliary_assets",
+            "missing": auxiliary_source.get("missing", []),
+            "auxiliary_source": auxiliary_source,
+            "runtime_dependencies": RUNTIME_DEPENDENCY_STATUS,
+            "generation_allowed": False,
+        }
+
+    patch_result = validate_pipeline_patch(
+        workspace_root,
+        auxiliary_mode=normalized_auxiliary_mode,
+        network_available=network_available,
+    )
     if patch_result["status"] != "ready":
-        return {"status": "blocked", "code": patch_result["code"], "pipeline_patch": patch_result, "generation_allowed": False}
+        return {
+            "status": "blocked",
+            "code": patch_result["code"],
+            "pipeline_patch": patch_result,
+            "auxiliary_source": auxiliary_source,
+            "runtime_dependencies": RUNTIME_DEPENDENCY_STATUS,
+            "generation_allowed": False,
+        }
 
     if runtime_lane not in SUPPORTED_RUNTIME_LANES:
         return {
@@ -97,11 +146,30 @@ def check_readiness(
             "code": "unsupported_lane",
             "runtime_lane": runtime_lane,
             "supported_runtime_lanes": sorted(SUPPORTED_RUNTIME_LANES),
+            "auxiliary_source": auxiliary_source,
+            "runtime_dependencies": RUNTIME_DEPENDENCY_STATUS,
+            "generation_allowed": False,
+        }
+
+    if normalized_auxiliary_mode == "offline" and not allow_remote_runtime_dependencies:
+        return {
+            "status": "blocked",
+            "code": "offline_runtime_dependencies_unresolved",
+            "message": "DINO/RMBG can be local, but MoGe and NAF are still remote/cache fallback dependencies.",
+            "auxiliary_source": auxiliary_source,
+            "runtime_dependencies": RUNTIME_DEPENDENCY_STATUS,
             "generation_allowed": False,
         }
 
     if not runtime_validated:
-        return {"status": "blocked", "code": "runtime_not_validated", "runtime_lane": runtime_lane, "generation_allowed": False}
+        return {
+            "status": "blocked",
+            "code": "runtime_not_validated",
+            "runtime_lane": runtime_lane,
+            "auxiliary_source": auxiliary_source,
+            "runtime_dependencies": RUNTIME_DEPENDENCY_STATUS,
+            "generation_allowed": False,
+        }
 
     return {
         "status": "ready",
@@ -109,6 +177,8 @@ def check_readiness(
         "missing": [],
         "generation_allowed": True,
         "pipeline_patch": patch_result,
+        "auxiliary_source": auxiliary_source,
         "runtime_lane": runtime_lane,
+        "runtime_dependencies": RUNTIME_DEPENDENCY_STATUS,
         "import_validation": import_validation or {},
     }

@@ -12,6 +12,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
+from pixal3d_extension.assets import AUXILIARY_ASSETS, PRIMARY_ASSET, UNLOCALIZED_RUNTIME_DEPENDENCIES, bootstrap_auxiliary_assets
 from pixal3d_extension.pipeline_patch import patch_pipeline, restore_pipeline
 from pixal3d_extension.paths import ModlyLayout, resolve_modly_layout, resolve_storage_path
 from pixal3d_extension.readiness import check_readiness, check_setup_readiness
@@ -134,6 +135,35 @@ def _readiness_payload() -> dict[str, Any]:
         "weights_downloaded": False,
         "generation_ready": False,
         "next_step": "Download model assets from Modly UI.",
+        "auxiliary_assets": _auxiliary_asset_bootstrap_plan(),
+        "unlocalized_runtime_dependencies": list(UNLOCALIZED_RUNTIME_DEPENDENCIES),
+    }
+
+
+def _auxiliary_asset_bootstrap_plan() -> dict[str, Any]:
+    return {
+        "logical_roots": {key: manifest.local_root for key, manifest in AUXILIARY_ASSETS.items()},
+        "sentinels": {key: list(manifest.sentinel_paths) for key, manifest in AUXILIARY_ASSETS.items()},
+        "download_sources": {key: manifest.repo_id for key, manifest in AUXILIARY_ASSETS.items()},
+        "bootstrap_command": "python3 setup.py --bootstrap-auxiliary-assets --workspace-root <extension-dir> --json",
+        "bootstrap_intent": "explicitly downloads only the allowlisted DINO/RMBG files into models/pixal3d/auxiliary; normal setup does not do this hidden download",
+        "fallback_policy": "default mode may use camenduru remote IDs only when local sentinels are missing and network fallback is available; local/offline/strict modes require these files first.",
+    }
+
+
+def _model_download_plan() -> dict[str, Any]:
+    return {
+        "status": "planned",
+        "downloads_started": False,
+        "installs_started": False,
+        "primary": {
+            "repo_id": PRIMARY_ASSET.repo_id,
+            "logical_root": PRIMARY_ASSET.local_root,
+            "sentinels": list(PRIMARY_ASSET.sentinel_paths),
+        },
+        "auxiliary": _auxiliary_asset_bootstrap_plan(),
+        "runtime_dependencies": list(UNLOCALIZED_RUNTIME_DEPENDENCIES),
+        "note": "Normal setup emits the asset plan only; use --bootstrap-auxiliary-assets for the explicit DINO/RMBG auxiliary bootstrap, and use Modly-owned model download/repair for Pixal3D primary weights.",
     }
 
 
@@ -480,6 +510,12 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
     parser.add_argument("--readiness", action="store_true")
     parser.add_argument("--patch-pipeline", action="store_true")
     parser.add_argument("--restore-pipeline", action="store_true")
+    parser.add_argument("--download-plan", action="store_true")
+    parser.add_argument("--download-models", action="store_true")
+    parser.add_argument("--bootstrap-auxiliary-assets", action="store_true", help="Explicitly download the allowlisted local DINO/RMBG auxiliary assets.")
+    parser.add_argument("--force-auxiliary-assets", action="store_true", help="Redownload allowlisted DINO/RMBG auxiliary files during explicit bootstrap.")
+    parser.add_argument("--auxiliary-mode", choices=["default", "auto", "remote", "local", "offline", "strict"], default="default")
+    parser.add_argument("--offline", action="store_true", help="Disable remote auxiliary fallback for readiness/patch planning.")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--payload-json")
     parser.add_argument("positional_payload_json", nargs="?", help="Modly install payload JSON. Modly may pass this as a positional argument.")
@@ -499,6 +535,10 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
         "downloads_started": False,
         "installs_started": False,
         "wheelhouse_manifest": _wheelhouse_manifest_observation(workspace_root),
+        "auxiliary_mode": "offline" if args.offline else args.auxiliary_mode,
+        "network_available": not args.offline,
+        "auxiliary_assets": _auxiliary_asset_bootstrap_plan(),
+        "runtime_dependencies": list(UNLOCALIZED_RUNTIME_DEPENDENCIES),
     }
 
     if prepare_requested:
@@ -562,14 +602,63 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
                 else ["download model assets from Modly UI", "rerun readiness", "run generation"],
             }
         )
+        if args.bootstrap_auxiliary_assets and not install_failed:
+            auxiliary_bootstrap = bootstrap_auxiliary_assets(workspace_root, force=args.force_auxiliary_assets)
+            bootstrap_success = auxiliary_bootstrap.get("status") == "ready"
+            result.update(
+                {
+                    "status": "prepared" if bootstrap_success else "failed",
+                    "code": auxiliary_bootstrap.get("code"),
+                    "downloads_started": bool(result.get("downloads_started") or auxiliary_bootstrap.get("downloads_started")),
+                    "auxiliary_bootstrap": auxiliary_bootstrap,
+                    "setup_readiness": check_setup_readiness(workspace_root),
+                    "next_steps": ["rerun readiness", "patch pipeline", "run generation"]
+                    if bootstrap_success
+                    else ["check network/auth for Hugging Face auxiliary assets", "rerun explicit auxiliary bootstrap"],
+                }
+            )
         return result
 
+    auxiliary_mode = "offline" if args.offline else args.auxiliary_mode
+    network_available = not args.offline
+
+    if args.download_plan:
+        return {**result, **_model_download_plan(), "status": "download_plan"}
+    if args.download_models:
+        return {
+            **result,
+            "status": "blocked",
+            "code": "model_download_managed_by_modly",
+            "downloads_started": False,
+            "installs_started": False,
+            "download_plan": _model_download_plan(),
+            "message": "Use the Modly model download/repair flow to transfer Pixal3D primary and auxiliary weights; setup.py does not perform hidden downloads.",
+        }
+    if args.bootstrap_auxiliary_assets:
+        auxiliary_bootstrap = bootstrap_auxiliary_assets(workspace_root, force=args.force_auxiliary_assets)
+        success = auxiliary_bootstrap.get("status") == "ready"
+        return {
+            **result,
+            "status": "bootstrap_auxiliary_assets" if success else "failed",
+            "code": auxiliary_bootstrap.get("code"),
+            "downloads_started": bool(auxiliary_bootstrap.get("downloads_started")),
+            "installs_started": False,
+            "auxiliary_bootstrap": auxiliary_bootstrap,
+            "setup_readiness": check_setup_readiness(workspace_root),
+            "next_steps": ["rerun readiness", "patch pipeline", "run generation"]
+            if success
+            else ["check network/auth for Hugging Face auxiliary assets", "rerun explicit auxiliary bootstrap"],
+        }
     if args.patch_pipeline:
-        return {**result, **patch_pipeline(workspace_root)}
+        return {**result, **patch_pipeline(workspace_root, auxiliary_mode=auxiliary_mode, network_available=network_available)}
     if args.restore_pipeline:
         return {**result, **restore_pipeline(workspace_root)}
     if args.readiness:
-        return {**result, "status": "readiness", "readiness": check_readiness(workspace_root)}
+        return {
+            **result,
+            "status": "readiness",
+            "readiness": check_readiness(workspace_root, auxiliary_mode=auxiliary_mode, network_available=network_available),
+        }
 
     return {
         **result,
@@ -578,6 +667,7 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
         "wheelhouse": WHEELHOUSE_DIR,
         "wheelhouse_manifest_path": WHEELHOUSE_MANIFEST,
         "local_wheel_packages": LOCAL_WHEEL_PACKAGES,
+        "download_plan": _model_download_plan(),
     }
 
 

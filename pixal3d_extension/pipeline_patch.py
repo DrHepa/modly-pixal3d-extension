@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from pixal3d_extension.assets import AUXILIARY_ASSETS, resolve_auxiliary_sources
 from pixal3d_extension.paths import resolve_modly_layout, resolve_storage_path
 
 
@@ -18,11 +19,19 @@ RMBG_REPLACEMENT = "camenduru/RMBG-2.0"
 PIPELINE_PATH = Path("models/pixal3d/generate/pipeline.json")
 BACKUP_PATH = Path("models/pixal3d/generate/pipeline.json.modly-original")
 READINESS_METADATA_PATH = Path("models/pixal3d/readiness.json")
-PATCHER_VERSION = "2026-05-26"
+PATCHER_VERSION = "2026-06-13"
 
 _TARGETS = {
-    "dino": (DINO_SOURCE, DINO_REPLACEMENT, ("args", "image_cond_model", "args", "model_name")),
-    "rmbg": (RMBG_SOURCE, RMBG_REPLACEMENT, ("args", "rembg_model", "args", "model_name")),
+    "dino": {
+        "source": DINO_SOURCE,
+        "remote": DINO_REPLACEMENT,
+        "path": ("args", "image_cond_model", "args", "model_name"),
+    },
+    "rmbg": {
+        "source": RMBG_SOURCE,
+        "remote": RMBG_REPLACEMENT,
+        "path": ("args", "rembg_model", "args", "model_name"),
+    },
 }
 
 
@@ -82,33 +91,151 @@ def _write_metadata(root: Path, metadata: dict[str, Any]) -> None:
     path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _diagnose_refs(data: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
-    diagnostics = []
-    already_patched = True
-    for key, (source, replacement, path) in _TARGETS.items():
+def _actual_replacement_refs(auxiliary_resolution: dict[str, Any]) -> dict[str, str]:
+    return {key: str(source["value"]) for key, source in auxiliary_resolution.get("sources", {}).items()}
+
+
+def _metadata_replacement_refs(auxiliary_resolution: dict[str, Any]) -> dict[str, str]:
+    refs: dict[str, str] = {}
+    for key, source in auxiliary_resolution.get("sources", {}).items():
+        if source.get("kind") == "local":
+            refs[key] = f"local:{source['logical_root']}"
+        else:
+            refs[key] = str(source["repo_id"])
+    return refs
+
+
+def _replacement_kinds(auxiliary_resolution: dict[str, Any]) -> dict[str, str]:
+    return {key: str(source["kind"]) for key, source in auxiliary_resolution.get("sources", {}).items()}
+
+
+def _local_auxiliary_roots() -> dict[str, str]:
+    return {key: manifest.local_root for key, manifest in AUXILIARY_ASSETS.items()}
+
+
+def _is_previous_local_patch(metadata: dict[str, Any], key: str) -> bool:
+    patch = metadata.get("pipeline_patch", {})
+    if not isinstance(patch, dict):
+        return False
+    return patch.get("replacement_kinds", {}).get(key) == "local"
+
+
+def _inspect_refs(
+    data: dict[str, Any],
+    expected_refs: dict[str, str],
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], bool]:
+    diagnostics: list[dict[str, Any]] = []
+    update_needed = False
+    metadata = metadata or {}
+
+    for key, target in _TARGETS.items():
+        expected = expected_refs[key]
         try:
-            value = _get_nested(data, path)
+            value = _get_nested(data, target["path"])
         except KeyError:
-            diagnostics.append({"key": key, "code": "missing_key", "expected": source, "actual": None})
-            already_patched = False
+            diagnostics.append({"key": key, "code": "missing_key", "expected": expected, "actual": None})
             continue
-        if value == source:
-            already_patched = False
+
+        if value == expected:
             continue
-        if value == replacement:
+
+        upgradeable_values = {target["source"], target["remote"]}
+        if value in upgradeable_values or _is_previous_local_patch(metadata, key):
+            update_needed = True
             continue
-        diagnostics.append({"key": key, "code": "unexpected_ref", "expected": source, "replacement": replacement, "actual": value})
-        already_patched = False
-    return diagnostics, already_patched and not diagnostics
+
+        diagnostics.append(
+            {
+                "key": key,
+                "code": "unexpected_ref",
+                "expected": expected,
+                "source": target["source"],
+                "remote_fallback": target["remote"],
+                "actual": value,
+            }
+        )
+
+    return diagnostics, update_needed
 
 
-def _metadata_matches(root: Path) -> bool:
+def _metadata_matches(root: Path, auxiliary_resolution: dict[str, Any], data: dict[str, Any]) -> bool:
     metadata = _read_metadata(root).get("pipeline_patch", {})
-    return metadata.get("status") == "patched" and metadata.get("replacement_refs") == {"dino": DINO_REPLACEMENT, "rmbg": RMBG_REPLACEMENT}
+    if not isinstance(metadata, dict):
+        return False
+    if metadata.get("status") != "patched":
+        return False
+    if metadata.get("replacement_refs") != _metadata_replacement_refs(auxiliary_resolution):
+        return False
+    if metadata.get("replacement_kinds") != _replacement_kinds(auxiliary_resolution):
+        return False
+    if metadata.get("local_auxiliary_roots") != _local_auxiliary_roots():
+        return False
+    diagnostics, update_needed = _inspect_refs(data, _actual_replacement_refs(auxiliary_resolution), metadata={"pipeline_patch": metadata})
+    return not diagnostics and not update_needed
 
 
-def patch_pipeline(workspace_root: str | Path) -> dict[str, Any]:
+def _write_patch_metadata(
+    root: Path,
+    *,
+    original_text: str,
+    patched_text: str,
+    auxiliary_resolution: dict[str, Any],
+) -> None:
+    metadata = _read_metadata(root)
+    metadata["pipeline_patch"] = {
+        "status": "patched",
+        "patcher_version": PATCHER_VERSION,
+        "patched_at": datetime.now(timezone.utc).isoformat(),
+        "pipeline_path": str(PIPELINE_PATH),
+        "backup_path": str(BACKUP_PATH),
+        "auxiliary_mode": auxiliary_resolution.get("mode", "default"),
+        "auxiliary_resolution_code": auxiliary_resolution.get("code"),
+        "replacement_kinds": _replacement_kinds(auxiliary_resolution),
+        "original_refs": {"dino": DINO_SOURCE, "rmbg": RMBG_SOURCE},
+        "remote_fallback_refs": {"dino": DINO_REPLACEMENT, "rmbg": RMBG_REPLACEMENT},
+        "replacement_refs": _metadata_replacement_refs(auxiliary_resolution),
+        "local_auxiliary_roots": _local_auxiliary_roots(),
+        "unlocalized_runtime_dependencies": auxiliary_resolution.get("unlocalized_runtime_dependencies", []),
+        "hashes": {"before": _hash_text(original_text), "after": _hash_text(patched_text)},
+        "validation": "expected_substitutions_applied",
+    }
+    metadata["generation_allowed"] = False
+    _write_metadata(root, metadata)
+
+
+def _resolve_or_fail(
+    root: Path,
+    *,
+    auxiliary_mode: str | None,
+    network_available: bool | None,
+) -> dict[str, Any]:
+    try:
+        auxiliary_resolution = resolve_auxiliary_sources(root, mode=auxiliary_mode, network_available=network_available)
+    except ValueError as exc:
+        return _failure("invalid_auxiliary_mode", str(exc))
+    if auxiliary_resolution["status"] == "blocked":
+        return _failure(
+            "missing_auxiliary_assets",
+            "local DINO/RMBG auxiliary assets are required for this mode",
+            auxiliary_source=auxiliary_resolution,
+            missing=auxiliary_resolution.get("missing", []),
+        )
+    return auxiliary_resolution
+
+
+def patch_pipeline(
+    workspace_root: str | Path,
+    *,
+    auxiliary_mode: str | None = "default",
+    network_available: bool | None = True,
+) -> dict[str, Any]:
     root = Path(workspace_root)
+    auxiliary_resolution = _resolve_or_fail(root, auxiliary_mode=auxiliary_mode, network_available=network_available)
+    if auxiliary_resolution.get("status") == "blocked":
+        return auxiliary_resolution
+
     layout = resolve_modly_layout(root)
     pipeline_path = resolve_storage_path(layout, str(PIPELINE_PATH))
     data, error, original_text = _load_json(pipeline_path)
@@ -116,19 +243,21 @@ def patch_pipeline(workspace_root: str | Path) -> dict[str, Any]:
         return error
     assert data is not None
 
-    diagnostics, already_patched = _diagnose_refs(data)
+    expected_refs = _actual_replacement_refs(auxiliary_resolution)
+    metadata = _read_metadata(root)
+    diagnostics, update_needed = _inspect_refs(data, expected_refs, metadata=metadata)
     if diagnostics:
-        return _failure("pipeline_patch_mismatch", "pipeline.json does not match expected upstream refs", diagnostics=diagnostics)
+        return _failure("pipeline_patch_mismatch", "pipeline.json does not match expected upstream, fallback, or local refs", diagnostics=diagnostics)
 
-    if already_patched:
-        if not _metadata_matches(root):
-            return _failure("pipeline_patch_mismatch", "pipeline.json is patched but metadata is missing or mismatched")
+    if not update_needed and _metadata_matches(root, auxiliary_resolution, data):
         return {
             "status": "patched",
             "code": "pipeline_patch_current",
             "idempotent": True,
             "metadata_path": str(READINESS_METADATA_PATH),
             "backup_path": str(BACKUP_PATH),
+            "auxiliary_source": auxiliary_resolution,
+            "replacement_refs": expected_refs,
             "generation_allowed": False,
         }
 
@@ -138,48 +267,57 @@ def patch_pipeline(workspace_root: str | Path) -> dict[str, Any]:
         backup_path.write_text(original_text, encoding="utf-8")
 
     patched = copy.deepcopy(data)
-    for _key, (_source, replacement, path) in _TARGETS.items():
-        _set_nested(patched, path, replacement)
+    for key, replacement in expected_refs.items():
+        _set_nested(patched, _TARGETS[key]["path"], replacement)
     patched_text = json.dumps(patched, indent=2, sort_keys=True) + "\n"
-    pipeline_path.write_text(patched_text, encoding="utf-8")
+    if patched_text != original_text:
+        pipeline_path.write_text(patched_text, encoding="utf-8")
 
-    metadata = _read_metadata(root)
-    metadata["pipeline_patch"] = {
-        "status": "patched",
-        "patcher_version": PATCHER_VERSION,
-        "patched_at": datetime.now(timezone.utc).isoformat(),
-        "pipeline_path": str(PIPELINE_PATH),
-        "backup_path": str(BACKUP_PATH),
-        "original_refs": {"dino": DINO_SOURCE, "rmbg": RMBG_SOURCE},
-        "replacement_refs": {"dino": DINO_REPLACEMENT, "rmbg": RMBG_REPLACEMENT},
-        "local_auxiliary_roots": {"dino": "models/pixal3d/auxiliary/dinov3", "rmbg": "models/pixal3d/auxiliary/rmbg"},
-        "hashes": {"before": _hash_text(original_text), "after": _hash_text(patched_text)},
-        "validation": "expected_substitutions_applied",
-    }
-    metadata["generation_allowed"] = False
-    _write_metadata(root, metadata)
+    _write_patch_metadata(root, original_text=original_text, patched_text=patched_text, auxiliary_resolution=auxiliary_resolution)
 
     return {
         "status": "patched",
-        "code": "pipeline_patch_applied",
+        "code": "pipeline_patch_applied" if update_needed else "pipeline_patch_metadata_repaired",
         "idempotent": False,
         "metadata_path": str(READINESS_METADATA_PATH),
         "backup_path": str(BACKUP_PATH),
+        "auxiliary_source": auxiliary_resolution,
+        "replacement_refs": expected_refs,
         "generation_allowed": False,
     }
 
 
-def validate_pipeline_patch(workspace_root: str | Path) -> dict[str, Any]:
+def validate_pipeline_patch(
+    workspace_root: str | Path,
+    *,
+    auxiliary_mode: str | None = "default",
+    network_available: bool | None = True,
+) -> dict[str, Any]:
     root = Path(workspace_root)
+    auxiliary_resolution = _resolve_or_fail(root, auxiliary_mode=auxiliary_mode, network_available=network_available)
+    if auxiliary_resolution.get("status") == "blocked":
+        return auxiliary_resolution
+
     layout = resolve_modly_layout(root)
     data, error, _text = _load_json(resolve_storage_path(layout, str(PIPELINE_PATH)))
     if error is not None:
         return error
     assert data is not None
-    diagnostics, already_patched = _diagnose_refs(data)
-    if diagnostics or not already_patched or not _metadata_matches(root):
-        return _failure("pipeline_substitution_required", "pipeline substitutions and patch metadata are required")
-    return {"status": "ready", "code": "pipeline_patch_ready", "generation_allowed": True, "metadata_path": str(READINESS_METADATA_PATH)}
+    diagnostics, update_needed = _inspect_refs(data, _actual_replacement_refs(auxiliary_resolution), metadata=_read_metadata(root))
+    if diagnostics or update_needed or not _metadata_matches(root, auxiliary_resolution, data):
+        return _failure(
+            "pipeline_substitution_required",
+            "pipeline substitutions and patch metadata are required for the resolved auxiliary source mode",
+            auxiliary_source=auxiliary_resolution,
+            diagnostics=diagnostics,
+        )
+    return {
+        "status": "ready",
+        "code": "pipeline_patch_ready",
+        "generation_allowed": True,
+        "metadata_path": str(READINESS_METADATA_PATH),
+        "auxiliary_source": auxiliary_resolution,
+    }
 
 
 def restore_pipeline(workspace_root: str | Path) -> dict[str, Any]:

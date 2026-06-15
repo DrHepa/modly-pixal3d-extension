@@ -13,7 +13,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
+from pixal3d_extension.assets import bootstrap_auxiliary_assets, normalize_auxiliary_source_mode, resolve_auxiliary_sources, requires_local_auxiliary
 from pixal3d_extension.paths import is_contained_path, require_contained_path
+from pixal3d_extension.pipeline_patch import patch_pipeline, validate_pipeline_patch
 
 PIXAL3D_MODEL_SOURCE = "TencentARC/Pixal3D"
 SUPPORTED_RUNTIME_LANES = {
@@ -306,8 +308,8 @@ def _silence_flex_gemm_autotuners() -> None:
         return
 
 
-def _failure(code: str, message: str) -> dict:
-    return {"status": "failed", "code": code, "message": message, "generation_allowed": False}
+def _failure(code: str, message: str, **extra: Any) -> dict:
+    return {"status": "failed", "code": code, "message": message, "generation_allowed": False, **extra}
 
 
 def _parse_low_vram(value: Any, default: bool = True) -> bool:
@@ -369,10 +371,178 @@ def _resolve_job_paths(job: dict) -> tuple[Path, Path] | dict:
     return image_path, output_dir
 
 
-def _preflight_runtime(job: dict) -> dict | None:
+def _job_auxiliary_mode(job: dict) -> str:
+    params = job.get("params") or {}
+    if job.get("offline") is True or params.get("offline") is True:
+        return "offline"
+    return str(job.get("auxiliary_mode") or params.get("auxiliary_mode") or "default")
+
+
+def _job_network_available(job: dict, auxiliary_mode: str) -> bool:
+    params = job.get("params") or {}
+    if "network_available" in job:
+        return bool(job["network_available"])
+    if "network_available" in params:
+        return bool(params["network_available"])
+    return auxiliary_mode not in {"offline"}
+
+
+def _job_auxiliary_bootstrap_downloader(job: dict) -> Any:
+    params = job.get("params") or {}
+    return job.get("auxiliary_bootstrap_downloader") or params.get("auxiliary_bootstrap_downloader")
+
+
+def _with_auxiliary_bootstrap_metadata(auxiliary_source: dict, bootstrap_result: dict | None) -> dict:
+    if bootstrap_result is None:
+        return auxiliary_source
+    warnings = list(auxiliary_source.get("warnings", []))
+    if bootstrap_result.get("status") != "ready":
+        warnings.append(
+            {
+                "code": "auxiliary_bootstrap_failed_remote_fallback_preserved",
+                "message": "explicit first-run auxiliary bootstrap failed; preserving camenduru remote fallback",
+            }
+        )
+    enriched = {**auxiliary_source, "auxiliary_bootstrap": bootstrap_result}
+    if warnings:
+        enriched["warnings"] = warnings
+    return enriched
+
+
+def _patch_pipeline_for_runtime(
+    workspace_root: str | Path,
+    *,
+    auxiliary_mode: str,
+    network_available: bool,
+    auxiliary_source: dict,
+    bootstrap_result: dict | None,
+) -> tuple[dict | None, dict | None]:
+    patch_result = patch_pipeline(
+        workspace_root,
+        auxiliary_mode=auxiliary_mode,
+        network_available=network_available,
+    )
+    patched_auxiliary_source = _with_auxiliary_bootstrap_metadata(
+        patch_result.get("auxiliary_source", auxiliary_source),
+        bootstrap_result,
+    )
+    if patch_result.get("status") != "patched":
+        return (
+            _failure(
+                patch_result.get("code", "pipeline_substitution_required"),
+                patch_result.get("message", "Pixal3D pipeline substitutions are required before generation"),
+                auxiliary_mode=auxiliary_mode,
+                pipeline_patch=patch_result,
+                auxiliary_source=patched_auxiliary_source,
+            ),
+            None,
+        )
+    return None, patched_auxiliary_source
+
+
+def _preflight_auxiliary_sources(job: dict) -> tuple[dict | None, dict | None]:
+    auxiliary_mode = _job_auxiliary_mode(job)
+    try:
+        normalized_auxiliary_mode = normalize_auxiliary_source_mode(auxiliary_mode)
+        local_required = requires_local_auxiliary(normalized_auxiliary_mode)
+    except ValueError as exc:
+        return _failure("invalid_auxiliary_mode", str(exc), auxiliary_mode=auxiliary_mode), None
+    network_available = _job_network_available(job, normalized_auxiliary_mode)
+    workspace_root = job.get("workspace_root")
+
+    if not workspace_root:
+        if local_required:
+            return (
+                _failure(
+                    "missing_auxiliary_assets",
+                    "workspace_root is required to validate local Pixal3D DINO/RMBG auxiliary assets",
+                    auxiliary_mode=normalized_auxiliary_mode,
+                    missing=[],
+                ),
+                None,
+            )
+        return None, None
+
+    try:
+        auxiliary_source = resolve_auxiliary_sources(
+            workspace_root,
+            mode=normalized_auxiliary_mode,
+            network_available=network_available,
+        )
+    except ValueError as exc:
+        return _failure("invalid_auxiliary_mode", str(exc), auxiliary_mode=normalized_auxiliary_mode), None
+
+    if auxiliary_source["status"] == "blocked":
+        return (
+            _failure(
+                "missing_auxiliary_assets",
+                "local Pixal3D DINO/RMBG auxiliary assets are missing for the requested mode",
+                auxiliary_mode=normalized_auxiliary_mode,
+                missing=auxiliary_source.get("missing", []),
+                auxiliary_source=auxiliary_source,
+            ),
+            None,
+        )
+
+    bootstrap_result = None
+    if normalized_auxiliary_mode == "default" and network_available and auxiliary_source.get("status") == "fallback":
+        bootstrap_result = bootstrap_auxiliary_assets(
+            workspace_root,
+            downloader=_job_auxiliary_bootstrap_downloader(job),
+        )
+        if bootstrap_result.get("status") == "ready":
+            auxiliary_source = resolve_auxiliary_sources(
+                workspace_root,
+                mode=normalized_auxiliary_mode,
+                network_available=network_available,
+            )
+        patch_error, patched_auxiliary_source = _patch_pipeline_for_runtime(
+            workspace_root,
+            auxiliary_mode=normalized_auxiliary_mode,
+            network_available=network_available,
+            auxiliary_source=auxiliary_source,
+            bootstrap_result=bootstrap_result,
+        )
+        if patch_error is not None:
+            return patch_error, None
+        return None, patched_auxiliary_source
+
+    patch_result = validate_pipeline_patch(
+        workspace_root,
+        auxiliary_mode=normalized_auxiliary_mode,
+        network_available=network_available,
+    )
+    if patch_result["status"] != "ready":
+        return (
+            _failure(
+                patch_result.get("code", "pipeline_substitution_required"),
+                patch_result.get("message", "Pixal3D pipeline substitutions are required before generation"),
+                auxiliary_mode=normalized_auxiliary_mode,
+                pipeline_patch=patch_result,
+                auxiliary_source=auxiliary_source,
+            ),
+            None,
+        )
+
+    if normalized_auxiliary_mode == "offline" and not bool(job.get("allow_remote_runtime_dependencies", False)):
+        return (
+            _failure(
+                "offline_runtime_dependencies_unresolved",
+                "DINO/RMBG are local, but MoGe and NAF still rely on remote/cache fallback behavior.",
+                auxiliary_mode=normalized_auxiliary_mode,
+                auxiliary_source=auxiliary_source,
+                runtime_dependencies=auxiliary_source.get("unlocalized_runtime_dependencies", []),
+            ),
+            None,
+        )
+
+    return None, auxiliary_source
+
+
+def _preflight_runtime(job: dict) -> tuple[dict | None, dict | None]:
     readiness = job.get("readiness")
     if readiness is None:
-        return _failure("readiness_required", "Pixal3D readiness must pass before generation")
+        return _failure("readiness_required", "Pixal3D readiness must pass before generation"), None
     if readiness.get("generation_allowed") is not True:
         result = _failure(
             readiness.get("code", "readiness_required"),
@@ -380,19 +550,46 @@ def _preflight_runtime(job: dict) -> dict | None:
         )
         if "dependency_diagnostics" in readiness:
             result["dependency_diagnostics"] = readiness["dependency_diagnostics"]
-        return result
+        return result, None
+
+    auxiliary_error, auxiliary_source = _preflight_auxiliary_sources(job)
+    if auxiliary_error is not None:
+        return auxiliary_error, None
 
     runtime_lane = job.get("runtime_lane")
     if runtime_lane and runtime_lane not in SUPPORTED_RUNTIME_LANES:
-        return _failure("unsupported_lane", f"runtime lane {runtime_lane!r} is not production-supported")
+        return _failure("unsupported_lane", f"runtime lane {runtime_lane!r} is not production-supported"), auxiliary_source
 
     asset_readiness = job.get("asset_readiness") or {}
     if asset_readiness.get("code") == "missing_assets" or job.get("assets_ready") is False:
         result = _failure("missing_assets", "required Pixal3D assets are missing")
         result["missing"] = asset_readiness.get("missing", [])
-        return result
+        return result, auxiliary_source
 
-    return None
+    return None, auxiliary_source
+
+
+def _patch_inference_auxiliary_sources(inference_module: Any, auxiliary_source: dict | None) -> None:
+    if not auxiliary_source:
+        return
+    dino_source = auxiliary_source.get("sources", {}).get("dino", {})
+    if dino_source.get("kind") != "local":
+        return
+
+    local_dino_path = str(dino_source["value"])
+    configs = getattr(inference_module, "IMAGE_COND_CONFIGS", None)
+    if isinstance(configs, dict):
+        iterable = configs.values()
+    elif isinstance(configs, (list, tuple)):
+        iterable = configs
+    else:
+        return
+
+    for config in iterable:
+        if isinstance(config, dict) and "model_name" in config:
+            config["model_name"] = local_dino_path
+        elif hasattr(config, "model_name"):
+            setattr(config, "model_name", local_dino_path)
 
 
 def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) -> dict:
@@ -406,7 +603,7 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
     if not image_path.is_file():
         return _failure("invalid_image", "input_image must reference an existing local image file")
 
-    preflight_error = _preflight_runtime(job)
+    preflight_error, auxiliary_source = _preflight_runtime(job)
     if preflight_error is not None:
         return preflight_error
 
@@ -439,7 +636,9 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
             _install_natten_fallback()
             _diagnostic_checkpoint("natten:done")
             _diagnostic_checkpoint("import_inference:start")
-            from inference import run_inference
+            inference_module = importlib.import_module("inference")
+            _patch_inference_auxiliary_sources(inference_module, auxiliary_source)
+            run_inference = inference_module.run_inference
             _diagnostic_checkpoint("import_inference:done")
 
             _silence_flex_gemm_autotuners()
@@ -481,6 +680,7 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
     return {
         "status": "completed",
         "model_source": PIXAL3D_MODEL_SOURCE,
+        "auxiliary_source": auxiliary_source,
         "output": {"glb_path": str(glb_path), "pbr": pbr},
         "params": {
             "seed": params.get("seed"),

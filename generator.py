@@ -98,7 +98,12 @@ class Pixal3DGenerator:
         return (Path(model_dir) / "pipeline.json").is_file()
 
     def load(self) -> "Pixal3DGenerator":
-        _patch_pipeline_json(self.model_dir)
+        if self.workspace_dir is not None:
+            from pixal3d_extension.pipeline_patch import patch_pipeline
+
+            patch_pipeline(self.workspace_dir, auxiliary_mode="default", network_available=True)
+        else:
+            _patch_pipeline_json(self.model_dir)
         self._loaded = True
         return self
 
