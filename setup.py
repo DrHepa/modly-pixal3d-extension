@@ -12,7 +12,13 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from pixal3d_extension.assets import AUXILIARY_ASSETS, PRIMARY_ASSET, UNLOCALIZED_RUNTIME_DEPENDENCIES, bootstrap_auxiliary_assets
+from pixal3d_extension.assets import (
+    AUXILIARY_ASSETS,
+    LOCALIZABLE_RUNTIME_DEPENDENCIES,
+    PRIMARY_ASSET,
+    UNLOCALIZED_RUNTIME_DEPENDENCIES,
+    bootstrap_auxiliary_assets,
+)
 from pixal3d_extension.pipeline_patch import patch_pipeline, restore_pipeline
 from pixal3d_extension.paths import ModlyLayout, resolve_modly_layout, resolve_storage_path
 from pixal3d_extension.readiness import check_readiness, check_setup_readiness
@@ -74,6 +80,7 @@ RUNTIME_DIRS = [
     "models/pixal3d/generate",
     "models/pixal3d/auxiliary/dinov3",
     "models/pixal3d/auxiliary/rmbg",
+    "models/pixal3d/auxiliary/moge",
 ]
 READINESS_METADATA = "models/pixal3d/readiness.json"
 
@@ -136,6 +143,7 @@ def _readiness_payload() -> dict[str, Any]:
         "generation_ready": False,
         "next_step": "Download model assets from Modly UI.",
         "auxiliary_assets": _auxiliary_asset_bootstrap_plan(),
+        "localizable_runtime_dependencies": list(LOCALIZABLE_RUNTIME_DEPENDENCIES),
         "unlocalized_runtime_dependencies": list(UNLOCALIZED_RUNTIME_DEPENDENCIES),
     }
 
@@ -146,8 +154,8 @@ def _auxiliary_asset_bootstrap_plan() -> dict[str, Any]:
         "sentinels": {key: list(manifest.sentinel_paths) for key, manifest in AUXILIARY_ASSETS.items()},
         "download_sources": {key: manifest.repo_id for key, manifest in AUXILIARY_ASSETS.items()},
         "bootstrap_command": "python3 setup.py --bootstrap-auxiliary-assets --workspace-root <extension-dir> --json",
-        "bootstrap_intent": "explicitly downloads only the allowlisted DINO/RMBG files into models/pixal3d/auxiliary; normal setup does not do this hidden download",
-        "fallback_policy": "default mode may use camenduru remote IDs only when local sentinels are missing and network fallback is available; local/offline/strict modes require these files first.",
+        "bootstrap_intent": "explicitly downloads only the allowlisted DINO/RMBG/MoGe files into models/pixal3d/auxiliary; normal setup does not do this hidden download",
+        "fallback_policy": "default mode may use remote/HF-cache fallback only when local sentinels are missing and network fallback is available; local/offline/strict modes require these files first. NAF remains torch-cache-or-network fallback.",
     }
 
 
@@ -162,8 +170,9 @@ def _model_download_plan() -> dict[str, Any]:
             "sentinels": list(PRIMARY_ASSET.sentinel_paths),
         },
         "auxiliary": _auxiliary_asset_bootstrap_plan(),
+        "localizable_runtime_dependencies": list(LOCALIZABLE_RUNTIME_DEPENDENCIES),
         "runtime_dependencies": list(UNLOCALIZED_RUNTIME_DEPENDENCIES),
-        "note": "Normal setup emits the asset plan only; use --bootstrap-auxiliary-assets for the explicit DINO/RMBG auxiliary bootstrap, and use Modly-owned model download/repair for Pixal3D primary weights.",
+        "note": "Normal setup emits the asset plan only; use --bootstrap-auxiliary-assets for the explicit DINO/RMBG/MoGe auxiliary bootstrap, and use Modly-owned model download/repair for Pixal3D primary weights. NAF is not localized yet.",
     }
 
 
@@ -512,8 +521,8 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
     parser.add_argument("--restore-pipeline", action="store_true")
     parser.add_argument("--download-plan", action="store_true")
     parser.add_argument("--download-models", action="store_true")
-    parser.add_argument("--bootstrap-auxiliary-assets", action="store_true", help="Explicitly download the allowlisted local DINO/RMBG auxiliary assets.")
-    parser.add_argument("--force-auxiliary-assets", action="store_true", help="Redownload allowlisted DINO/RMBG auxiliary files during explicit bootstrap.")
+    parser.add_argument("--bootstrap-auxiliary-assets", action="store_true", help="Explicitly download the allowlisted local DINO/RMBG/MoGe auxiliary assets.")
+    parser.add_argument("--force-auxiliary-assets", action="store_true", help="Redownload allowlisted DINO/RMBG/MoGe auxiliary files during explicit bootstrap.")
     parser.add_argument("--auxiliary-mode", choices=["default", "auto", "remote", "local", "offline", "strict"], default="default")
     parser.add_argument("--offline", action="store_true", help="Disable remote auxiliary fallback for readiness/patch planning.")
     parser.add_argument("--json", action="store_true")
@@ -538,6 +547,7 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
         "auxiliary_mode": "offline" if args.offline else args.auxiliary_mode,
         "network_available": not args.offline,
         "auxiliary_assets": _auxiliary_asset_bootstrap_plan(),
+        "localizable_runtime_dependencies": list(LOCALIZABLE_RUNTIME_DEPENDENCIES),
         "runtime_dependencies": list(UNLOCALIZED_RUNTIME_DEPENDENCIES),
     }
 

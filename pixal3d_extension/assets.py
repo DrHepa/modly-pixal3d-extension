@@ -16,10 +16,21 @@ class AssetManifest:
     repo_id: str
     local_root: str
     sentinels: tuple[str, ...]
+    local_reference: str = "root"
 
     @property
     def sentinel_paths(self) -> tuple[str, ...]:
         return tuple(str(PurePosixPath(self.local_root) / sentinel) for sentinel in self.sentinels)
+
+    @property
+    def local_reference_path(self) -> str:
+        if self.local_reference == "root":
+            return self.local_root
+        if self.local_reference == "sentinel":
+            if len(self.sentinels) != 1:
+                raise ValueError(f"asset {self.key!r} must have exactly one sentinel for sentinel local references")
+            return self.sentinel_paths[0]
+        raise ValueError(f"unsupported local reference kind for asset {self.key!r}: {self.local_reference!r}")
 
 
 PRIMARY_ASSET = AssetManifest(
@@ -51,6 +62,13 @@ AUXILIARY_ASSETS = {
         local_root="models/pixal3d/auxiliary/rmbg",
         sentinels=("config.json", "preprocessor_config.json", "BiRefNet_config.py", "birefnet.py", "model.safetensors"),
     ),
+    "moge": AssetManifest(
+        key="moge",
+        repo_id="Ruicheng/moge-2-vitl",
+        local_root="models/pixal3d/auxiliary/moge",
+        sentinels=("model.pt",),
+        local_reference="sentinel",
+    ),
 }
 
 AUXILIARY_BOOTSTRAP_ALLOWLIST = {
@@ -66,14 +84,19 @@ AUXILIARY_SOURCE_MODES = {"default", "auto", "remote", "local", "offline", "stri
 LOCAL_REQUIRED_AUXILIARY_SOURCE_MODES = {"local", "offline", "strict"}
 AuxiliaryDownloader = Callable[..., Any]
 
-UNLOCALIZED_RUNTIME_DEPENDENCIES = (
+LOCALIZABLE_RUNTIME_DEPENDENCIES = (
     {
         "key": "moge",
         "source": "Ruicheng/moge-2-vitl",
-        "current_behavior": "MoGeModel.from_pretrained() uses Hugging Face unless a local checkpoint file path is explicitly wired by the caller.",
-        "offline_status": "remote_or_hf_cache_fallback",
-        "localization_status": "not_wired_in_runtime",
+        "local_root": AUXILIARY_ASSETS["moge"].local_root,
+        "local_checkpoint": AUXILIARY_ASSETS["moge"].sentinel_paths[0],
+        "runtime_hook": "inference.load_moge_model",
+        "offline_status": "local_first_with_remote_or_hf_cache_fallback",
+        "localization_status": "wired_to_local_checkpoint_when_available",
     },
+)
+
+UNLOCALIZED_RUNTIME_DEPENDENCIES = (
     {
         "key": "naf",
         "source": "https://github.com/valeoai/NAF/releases/download/model/naf_release.pth",
@@ -85,8 +108,7 @@ UNLOCALIZED_RUNTIME_DEPENDENCIES = (
 
 REQUIRED_SENTINEL_PATHS = [
     *PRIMARY_ASSET.sentinel_paths,
-    *AUXILIARY_ASSETS["dino"].sentinel_paths,
-    *AUXILIARY_ASSETS["rmbg"].sentinel_paths,
+    *(sentinel for manifest in AUXILIARY_ASSETS.values() for sentinel in manifest.sentinel_paths),
 ]
 
 
@@ -111,12 +133,17 @@ def _missing_for_manifest(workspace_root: Path, manifest: AssetManifest) -> list
 def _asset_status(workspace_root: Path, manifest: AssetManifest) -> dict[str, Any]:
     layout = resolve_modly_layout(workspace_root)
     resolved_root = resolve_storage_path(layout, manifest.local_root)
+    logical_value = manifest.local_reference_path
+    resolved_value = resolve_storage_path(layout, logical_value)
     missing = _missing_for_manifest(workspace_root, manifest)
     return {
         "key": manifest.key,
         "repo_id": manifest.repo_id,
         "logical_root": manifest.local_root,
         "resolved_path": str(resolved_root),
+        "logical_value": logical_value,
+        "resolved_value": str(resolved_value),
+        "local_reference": manifest.local_reference,
         "sentinels": list(manifest.sentinel_paths),
         "missing": missing,
         "complete": not missing,
@@ -212,7 +239,7 @@ def bootstrap_auxiliary_assets(
     token: str | None = None,
     revision: str | None = None,
 ) -> dict[str, Any]:
-    """Populate exact allowlisted DINO/RMBG auxiliary assets.
+    """Populate exact allowlisted DINO/RMBG/MoGe auxiliary assets.
 
     Files are staged under the Modly model storage tree first. Final sentinel
     files are replaced only after every allowlisted file has been staged
@@ -305,7 +332,7 @@ def bootstrap_auxiliary_assets(
         return _bootstrap_failure(
             root,
             "auxiliary_bootstrap_failed",
-            "failed to bootstrap Pixal3D DINO/RMBG auxiliary assets",
+            "failed to bootstrap Pixal3D DINO/RMBG/MoGe auxiliary assets",
             downloads_started=downloads_started,
             attempted=attempted,
             error=f"{type(exc).__name__}: {exc}",
@@ -350,13 +377,14 @@ def resolve_auxiliary_sources(
     mode: str | None = "default",
     network_available: bool | None = True,
 ) -> dict[str, Any]:
-    """Resolve DINO/RMBG sources without probing the network.
+    """Resolve auxiliary sources without probing the network.
 
     Local paths are used only when all sentinels for that individual auxiliary
     asset exist. In default mode, a missing local auxiliary keeps the current
-    camenduru Hugging Face ID fallback only when the caller says network fallback
-    is available. Strict/local/offline modes fail before any HF-facing import can
-    happen.
+    remote Hugging Face/cache fallback only when the caller says network fallback
+    is available. MoGe resolves to its local checkpoint file path, while DINO/RMBG
+    resolve to local model directories. Strict/local/offline modes fail before any
+    HF-facing import can happen.
     """
 
     normalized_mode = normalize_auxiliary_source_mode(mode)
@@ -368,24 +396,24 @@ def resolve_auxiliary_sources(
     missing: list[str] = []
     fallback_used = False
 
+    def local_source(manifest: AssetManifest, asset: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "kind": "local",
+            "value": asset["resolved_value"],
+            "repo_id": manifest.repo_id,
+            "logical_root": manifest.local_root,
+            "logical_value": asset["logical_value"],
+            "local_reference": manifest.local_reference,
+        }
+
     for key, manifest in AUXILIARY_ASSETS.items():
         asset = aux_status["assets"][key]
         if prefer_local and asset["complete"]:
-            sources[key] = {
-                "kind": "local",
-                "value": asset["resolved_path"],
-                "repo_id": manifest.repo_id,
-                "logical_root": manifest.local_root,
-            }
+            sources[key] = local_source(manifest, asset)
             continue
 
         if asset["complete"] and not network_allowed:
-            sources[key] = {
-                "kind": "local",
-                "value": asset["resolved_path"],
-                "repo_id": manifest.repo_id,
-                "logical_root": manifest.local_root,
-            }
+            sources[key] = local_source(manifest, asset)
             continue
 
         if normalized_mode in LOCAL_REQUIRED_AUXILIARY_SOURCE_MODES or not network_allowed:
@@ -411,6 +439,7 @@ def resolve_auxiliary_sources(
             "assets": aux_status["assets"],
             "sources": sources,
             "unlocalized_runtime_dependencies": list(UNLOCALIZED_RUNTIME_DEPENDENCIES),
+            "localizable_runtime_dependencies": list(LOCALIZABLE_RUNTIME_DEPENDENCIES),
             "generation_allowed": False,
         }
 
@@ -423,6 +452,7 @@ def resolve_auxiliary_sources(
         "assets": aux_status["assets"],
         "sources": sources,
         "unlocalized_runtime_dependencies": list(UNLOCALIZED_RUNTIME_DEPENDENCIES),
+        "localizable_runtime_dependencies": list(LOCALIZABLE_RUNTIME_DEPENDENCIES),
         "generation_allowed": True,
     }
 

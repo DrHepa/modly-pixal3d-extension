@@ -4,6 +4,7 @@ from pathlib import Path
 
 from pixal3d_extension.assets import (
     AUXILIARY_ASSETS,
+    LOCALIZABLE_RUNTIME_DEPENDENCIES,
     PRIMARY_ASSET,
     UNLOCALIZED_RUNTIME_DEPENDENCIES,
     check_asset_sentinels,
@@ -26,6 +27,7 @@ SETUP_REQUIRED_PATHS = [
     "models/pixal3d/generate",
     "models/pixal3d/auxiliary/dinov3",
     "models/pixal3d/auxiliary/rmbg",
+    "models/pixal3d/auxiliary/moge",
     "models/pixal3d/readiness.json",
 ]
 
@@ -33,6 +35,7 @@ AUXILIARY_MODELS = [
     {"id": manifest.repo_id, "logical_root": manifest.local_root, "status": "required"}
     for manifest in AUXILIARY_ASSETS.values()
 ]
+LOCALIZABLE_RUNTIME_DEPENDENCY_STATUS = list(LOCALIZABLE_RUNTIME_DEPENDENCIES)
 RUNTIME_DEPENDENCY_STATUS = list(UNLOCALIZED_RUNTIME_DEPENDENCIES)
 
 
@@ -93,6 +96,7 @@ def check_readiness(
     if asset_result["status"] != "ready":
         result = _legacy_code(asset_result)
         result["unknown_auxiliaries"] = AUXILIARY_MODELS
+        result["localizable_runtime_dependencies"] = LOCALIZABLE_RUNTIME_DEPENDENCY_STATUS
         result["runtime_dependencies"] = RUNTIME_DEPENDENCY_STATUS
         return result
 
@@ -102,6 +106,7 @@ def check_readiness(
             "code": "ready",
             "missing": [],
             "generation_allowed": True,
+            "localizable_runtime_dependencies": LOCALIZABLE_RUNTIME_DEPENDENCY_STATUS,
             "runtime_dependencies": RUNTIME_DEPENDENCY_STATUS,
         }
 
@@ -121,6 +126,7 @@ def check_readiness(
             "code": "missing_auxiliary_assets",
             "missing": auxiliary_source.get("missing", []),
             "auxiliary_source": auxiliary_source,
+            "localizable_runtime_dependencies": LOCALIZABLE_RUNTIME_DEPENDENCY_STATUS,
             "runtime_dependencies": RUNTIME_DEPENDENCY_STATUS,
             "generation_allowed": False,
         }
@@ -136,6 +142,7 @@ def check_readiness(
             "code": patch_result["code"],
             "pipeline_patch": patch_result,
             "auxiliary_source": auxiliary_source,
+            "localizable_runtime_dependencies": LOCALIZABLE_RUNTIME_DEPENDENCY_STATUS,
             "runtime_dependencies": RUNTIME_DEPENDENCY_STATUS,
             "generation_allowed": False,
         }
@@ -147,16 +154,18 @@ def check_readiness(
             "runtime_lane": runtime_lane,
             "supported_runtime_lanes": sorted(SUPPORTED_RUNTIME_LANES),
             "auxiliary_source": auxiliary_source,
+            "localizable_runtime_dependencies": LOCALIZABLE_RUNTIME_DEPENDENCY_STATUS,
             "runtime_dependencies": RUNTIME_DEPENDENCY_STATUS,
             "generation_allowed": False,
         }
 
-    if normalized_auxiliary_mode == "offline" and not allow_remote_runtime_dependencies:
+    if normalized_auxiliary_mode in {"offline", "strict"} and not allow_remote_runtime_dependencies:
         return {
             "status": "blocked",
             "code": "offline_runtime_dependencies_unresolved",
-            "message": "DINO/RMBG can be local, but MoGe and NAF are still remote/cache fallback dependencies.",
+            "message": "DINO/RMBG/MoGe can be local, but NAF still depends on Torch cache or network fallback.",
             "auxiliary_source": auxiliary_source,
+            "localizable_runtime_dependencies": LOCALIZABLE_RUNTIME_DEPENDENCY_STATUS,
             "runtime_dependencies": RUNTIME_DEPENDENCY_STATUS,
             "generation_allowed": False,
         }
@@ -167,6 +176,7 @@ def check_readiness(
             "code": "runtime_not_validated",
             "runtime_lane": runtime_lane,
             "auxiliary_source": auxiliary_source,
+            "localizable_runtime_dependencies": LOCALIZABLE_RUNTIME_DEPENDENCY_STATUS,
             "runtime_dependencies": RUNTIME_DEPENDENCY_STATUS,
             "generation_allowed": False,
         }
@@ -179,6 +189,7 @@ def check_readiness(
         "pipeline_patch": patch_result,
         "auxiliary_source": auxiliary_source,
         "runtime_lane": runtime_lane,
+        "localizable_runtime_dependencies": LOCALIZABLE_RUNTIME_DEPENDENCY_STATUS,
         "runtime_dependencies": RUNTIME_DEPENDENCY_STATUS,
         "import_validation": import_validation or {},
     }

@@ -77,7 +77,7 @@ After setup succeeds, use Modly UI to download Pixal3D model assets. Real genera
 
 Auxiliary model assets are stored below `models/pixal3d/auxiliary/`. Do not shorten this folder to `aux`: `AUX` is a reserved Windows device name and can break setup on normal Windows filesystems.
 
-Required DINO/RMBG sentinels:
+Required localizable auxiliary sentinels:
 
 - `models/pixal3d/auxiliary/dinov3/config.json`
 - `models/pixal3d/auxiliary/dinov3/preprocessor_config.json`
@@ -87,12 +87,13 @@ Required DINO/RMBG sentinels:
 - `models/pixal3d/auxiliary/rmbg/BiRefNet_config.py`
 - `models/pixal3d/auxiliary/rmbg/birefnet.py`
 - `models/pixal3d/auxiliary/rmbg/model.safetensors`
+- `models/pixal3d/auxiliary/moge/model.pt`
 
-Normal setup does not download these weights implicitly. To explicitly seed the local DINO/RMBG auxiliary assets, run `python3 setup.py --bootstrap-auxiliary-assets --workspace-root <extension-dir> --json`; that bootstrap is allowlist-only for the files above. Default first run may attempt the same controlled bootstrap before preserving the existing `camenduru` remote fallback. `local`, `offline`, and `strict` modes never start that network bootstrap.
+Normal setup does not download these weights implicitly. To explicitly seed the local DINO/RMBG/MoGe auxiliary assets, run `python3 setup.py --bootstrap-auxiliary-assets --workspace-root <extension-dir> --json`; that bootstrap is allowlist-only for the files above. Default first run may attempt the same controlled bootstrap before preserving the existing remote/HF-cache fallback. `local`, `offline`, and `strict` modes never start that network bootstrap.
 
-The pipeline patcher is local-first for DINO/RMBG: when those sentinels are complete, it writes local resolved paths into the user-local `pipeline.json` and records non-absolute logical metadata. If the auxiliary sentinels are missing in default mode, the existing `camenduru` Hugging Face IDs remain the fallback. In `local`, `offline`, or `strict` auxiliary mode, missing DINO/RMBG files fail early with `missing_auxiliary_assets` before importing upstream inference code.
+The pipeline patcher is local-first for DINO/RMBG: when those sentinels are complete, it writes local resolved paths into the user-local `pipeline.json` and records non-absolute logical metadata. MoGe is local-first at runtime: when `models/pixal3d/auxiliary/moge/model.pt` exists, the extension wraps `inference.load_moge_model` so `MoGeModel.from_pretrained()` receives that local checkpoint file path instead of `Ruicheng/moge-2-vitl`. If auxiliary sentinels are missing in default mode, the existing DINO/RMBG remote IDs and MoGe `Ruicheng/moge-2-vitl` HF-cache/network fallback remain available. In `local`, `offline`, or `strict` auxiliary mode, missing DINO/RMBG/MoGe files fail early with `missing_auxiliary_assets` before importing upstream inference code.
 
-This is **not** a full offline-generation guarantee yet. Upstream inference still uses MoGe `Ruicheng/moge-2-vitl`; `MoGeModel.from_pretrained()` can consume a local checkpoint file, but this extension does not yet wire a local MoGe asset path. NAF code is packaged, but its checkpoint path still comes from `torch.hub.load_state_dict_from_url("https://github.com/valeoai/NAF/releases/download/model/naf_release.pth")`, so it depends on Torch cache or future local checkpoint plumbing. Treat MoGe/NAF as remote/cache fallback until those assets are localized and tested.
+This is **not** a full offline-generation guarantee yet. DINO/RMBG/MoGe are localizable and local-first, but NAF code is packaged with its checkpoint still coming from `torch.hub.load_state_dict_from_url("https://github.com/valeoai/NAF/releases/download/model/naf_release.pth")`; it depends on Torch cache or future local checkpoint plumbing. Treat NAF as `torch_cache_or_network_fallback` until it is localized and tested.
 
 ## Publication status
 

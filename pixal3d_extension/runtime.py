@@ -400,7 +400,7 @@ def _with_auxiliary_bootstrap_metadata(auxiliary_source: dict, bootstrap_result:
         warnings.append(
             {
                 "code": "auxiliary_bootstrap_failed_remote_fallback_preserved",
-                "message": "explicit first-run auxiliary bootstrap failed; preserving camenduru remote fallback",
+                "message": "explicit first-run auxiliary bootstrap failed; preserving remote/HF-cache fallback",
             }
         )
     enriched = {**auxiliary_source, "auxiliary_bootstrap": bootstrap_result}
@@ -455,7 +455,7 @@ def _preflight_auxiliary_sources(job: dict) -> tuple[dict | None, dict | None]:
             return (
                 _failure(
                     "missing_auxiliary_assets",
-                    "workspace_root is required to validate local Pixal3D DINO/RMBG auxiliary assets",
+                    "workspace_root is required to validate local Pixal3D auxiliary assets",
                     auxiliary_mode=normalized_auxiliary_mode,
                     missing=[],
                 ),
@@ -476,7 +476,7 @@ def _preflight_auxiliary_sources(job: dict) -> tuple[dict | None, dict | None]:
         return (
             _failure(
                 "missing_auxiliary_assets",
-                "local Pixal3D DINO/RMBG auxiliary assets are missing for the requested mode",
+                "local Pixal3D auxiliary assets are missing for the requested mode",
                 auxiliary_mode=normalized_auxiliary_mode,
                 missing=auxiliary_source.get("missing", []),
                 auxiliary_source=auxiliary_source,
@@ -524,11 +524,11 @@ def _preflight_auxiliary_sources(job: dict) -> tuple[dict | None, dict | None]:
             None,
         )
 
-    if normalized_auxiliary_mode == "offline" and not bool(job.get("allow_remote_runtime_dependencies", False)):
+    if normalized_auxiliary_mode in {"offline", "strict"} and not bool(job.get("allow_remote_runtime_dependencies", False)):
         return (
             _failure(
                 "offline_runtime_dependencies_unresolved",
-                "DINO/RMBG are local, but MoGe and NAF still rely on remote/cache fallback behavior.",
+                "DINO/RMBG/MoGe are local, but NAF still relies on Torch cache or network fallback behavior.",
                 auxiliary_mode=normalized_auxiliary_mode,
                 auxiliary_source=auxiliary_source,
                 runtime_dependencies=auxiliary_source.get("unlocalized_runtime_dependencies", []),
@@ -569,9 +569,7 @@ def _preflight_runtime(job: dict) -> tuple[dict | None, dict | None]:
     return None, auxiliary_source
 
 
-def _patch_inference_auxiliary_sources(inference_module: Any, auxiliary_source: dict | None) -> None:
-    if not auxiliary_source:
-        return
+def _patch_inference_dino_source(inference_module: Any, auxiliary_source: dict) -> None:
     dino_source = auxiliary_source.get("sources", {}).get("dino", {})
     if dino_source.get("kind") != "local":
         return
@@ -590,6 +588,39 @@ def _patch_inference_auxiliary_sources(inference_module: Any, auxiliary_source: 
             config["model_name"] = local_dino_path
         elif hasattr(config, "model_name"):
             setattr(config, "model_name", local_dino_path)
+
+
+def _patch_inference_moge_loader(inference_module: Any, auxiliary_source: dict) -> None:
+    moge_source = auxiliary_source.get("sources", {}).get("moge", {})
+    if moge_source.get("kind") != "local":
+        return
+
+    local_moge_path = str(moge_source["value"])
+    load_moge_model = getattr(inference_module, "load_moge_model", None)
+    if not callable(load_moge_model):
+        return
+
+    setattr(inference_module, "MOGE_MODEL_NAME", local_moge_path)
+
+    def load_local_moge_model(*args: Any, **kwargs: Any) -> Any:
+        args_list = list(args)
+        if len(args_list) >= 2:
+            args_list[1] = local_moge_path
+            kwargs.pop("model_name", None)
+        else:
+            kwargs["model_name"] = local_moge_path
+        return load_moge_model(*args_list, **kwargs)
+
+    load_local_moge_model.__name__ = getattr(load_moge_model, "__name__", "load_moge_model")
+    load_local_moge_model.__doc__ = getattr(load_moge_model, "__doc__", None)
+    setattr(inference_module, "load_moge_model", load_local_moge_model)
+
+
+def _patch_inference_auxiliary_sources(inference_module: Any, auxiliary_source: dict | None) -> None:
+    if not auxiliary_source:
+        return
+    _patch_inference_dino_source(inference_module, auxiliary_source)
+    _patch_inference_moge_loader(inference_module, auxiliary_source)
 
 
 def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) -> dict:

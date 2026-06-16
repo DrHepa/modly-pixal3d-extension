@@ -291,6 +291,7 @@ with tempfile.TemporaryDirectory() as tmp:
         'installs_started': result['installs_started'],
         'dinov3_dir': (models_root / 'auxiliary' / 'dinov3').is_dir(),
         'rmbg_dir': (models_root / 'auxiliary' / 'rmbg').is_dir(),
+        'moge_dir': (models_root / 'auxiliary' / 'moge').is_dir(),
         'legacy_aux_dir': (models_root / 'aux').exists(),
         'auxiliary_roots': result['auxiliary_assets']['logical_roots'],
         'created_paths': [entry['path'] for entry in result['created']],
@@ -302,13 +303,16 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.installs_started, false)
   assert.equal(result.dinov3_dir, true)
   assert.equal(result.rmbg_dir, true)
+  assert.equal(result.moge_dir, true)
   assert.equal(result.legacy_aux_dir, false)
   assert.deepEqual(result.auxiliary_roots, {
     dino: 'models/pixal3d/auxiliary/dinov3',
+    moge: 'models/pixal3d/auxiliary/moge',
     rmbg: 'models/pixal3d/auxiliary/rmbg',
   })
   assert.ok(result.created_paths.includes('models/pixal3d/auxiliary/dinov3'))
   assert.ok(result.created_paths.includes('models/pixal3d/auxiliary/rmbg'))
+  assert.ok(result.created_paths.includes('models/pixal3d/auxiliary/moge'))
 })
 
 test('normal setup prepare does not perform hidden auxiliary downloads', () => {
@@ -391,7 +395,7 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.calls.length, 1)
   assert.equal(result.calls[0].force, true)
   assert.match(result.bootstrap_command, /--bootstrap-auxiliary-assets/)
-  assert.match(result.bootstrap_intent, /allowlisted DINO\/RMBG/)
+  assert.match(result.bootstrap_intent, /allowlisted DINO\/RMBG\/MoGe/)
   assert.match(result.plan_note, /--bootstrap-auxiliary-assets/)
   assert.equal(result.plan_status, 'download_plan')
 })
@@ -425,14 +429,14 @@ with tempfile.TemporaryDirectory() as tmp:
 `)
 
   assert.equal(result.missing_code, 'missing_auxiliary_assets')
-  assert.equal(result.missing_count, 8)
+  assert.equal(result.missing_count, 9)
   assert.ok(result.missing_sample.some((value) => value.includes('models/pixal3d/auxiliary/dinov3/')))
   assert.equal(result.complete_code, 'auxiliary_assets_ready')
   assert.deepEqual(result.complete_missing, [])
-  assert.deepEqual(result.assets_complete, { dino: true, rmbg: true })
+  assert.deepEqual(result.assets_complete, { dino: true, moge: true, rmbg: true })
 })
 
-test('auxiliary bootstrap downloads only the exact DINO/RMBG allowlist with a mocked downloader', () => {
+test('auxiliary bootstrap downloads only the exact DINO/RMBG/MoGe allowlist with a mocked downloader', () => {
   const result = runPython(`
 import json, tempfile
 from pathlib import Path
@@ -470,15 +474,18 @@ with tempfile.TemporaryDirectory() as tmp:
     { repo_id: 'camenduru/RMBG-2.0', filename: 'BiRefNet_config.py' },
     { repo_id: 'camenduru/RMBG-2.0', filename: 'birefnet.py' },
     { repo_id: 'camenduru/RMBG-2.0', filename: 'model.safetensors' },
+    { repo_id: 'Ruicheng/moge-2-vitl', filename: 'model.pt' },
   ]
   assert.equal(result.status, 'ready')
   assert.equal(result.code, 'auxiliary_assets_bootstrapped')
   assert.equal(result.downloads_started, true)
+  assert.equal(result.calls.length, 9)
   assert.deepEqual(result.calls, expectedCalls)
   assert.deepEqual(result.files, [
     'dinov3/config.json',
     'dinov3/model.safetensors',
     'dinov3/preprocessor_config.json',
+    'moge/model.pt',
     'rmbg/BiRefNet_config.py',
     'rmbg/birefnet.py',
     'rmbg/config.json',
@@ -502,7 +509,7 @@ with tempfile.TemporaryDirectory() as tmp:
     def downloader(*, repo_id, filename, destination, **_kwargs):
         calls.append({'repo_id': repo_id, 'filename': filename})
         Path(destination).write_text('partial', encoding='utf-8')
-        if repo_id == 'camenduru/RMBG-2.0' and filename == 'model.safetensors':
+        if repo_id == 'Ruicheng/moge-2-vitl' and filename == 'model.pt':
             raise RuntimeError('simulated transfer failure')
         return str(destination)
     bootstrap = bootstrap_auxiliary_assets(ext_dir, downloader=downloader)
@@ -525,11 +532,11 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.bootstrap_status, 'failed')
   assert.equal(result.bootstrap_code, 'auxiliary_bootstrap_failed')
   assert.equal(result.downloads_started, true)
-  assert.equal(result.call_count, 8)
+  assert.equal(result.call_count, 9)
   assert.deepEqual(result.final_files, [])
   assert.equal(result.staging_left, false)
   assert.equal(result.sentinel_code, 'missing_auxiliary_assets')
-  assert.equal(result.missing_count, 8)
+  assert.equal(result.missing_count, 9)
 })
 
 test('pipeline patch writes local DINO/RMBG paths and non-absolute metadata when auxiliary sentinels are complete', () => {
@@ -575,8 +582,11 @@ with tempfile.TemporaryDirectory() as tmp:
         'rmbg_suffix': rmbg.replace('\\\\', '/').split('/Modly/data/')[-1],
         'replacement_kinds': metadata['replacement_kinds'],
         'replacement_refs': metadata['replacement_refs'],
+        'auxiliary_kinds': metadata['auxiliary_kinds'],
+        'auxiliary_refs': metadata['auxiliary_refs'],
         'metadata_contains_tmp': str(Path(tmp)) in metadata_text,
         'unlocalized_keys': [entry['key'] for entry in metadata['unlocalized_runtime_dependencies']],
+        'localizable_keys': [entry['key'] for entry in metadata['localizable_runtime_dependencies']],
     }, sort_keys=True))
 `)
 
@@ -590,11 +600,14 @@ with tempfile.TemporaryDirectory() as tmp:
     dino: 'local:models/pixal3d/auxiliary/dinov3',
     rmbg: 'local:models/pixal3d/auxiliary/rmbg',
   })
+  assert.deepEqual(result.auxiliary_kinds, { dino: 'local', moge: 'local', rmbg: 'local' })
+  assert.equal(result.auxiliary_refs.moge, 'local:models/pixal3d/auxiliary/moge/model.pt')
   assert.equal(result.metadata_contains_tmp, false)
-  assert.deepEqual(result.unlocalized_keys, ['moge', 'naf'])
+  assert.deepEqual(result.unlocalized_keys, ['naf'])
+  assert.deepEqual(result.localizable_keys, ['moge'])
 })
 
-test('default pipeline patch preserves camenduru remote fallback when local auxiliary assets are missing', () => {
+test('default pipeline patch preserves remote/HF-cache fallback when local auxiliary assets are missing', () => {
   const result = runPython(`
 import json, tempfile
 from pathlib import Path
@@ -631,10 +644,12 @@ with tempfile.TemporaryDirectory() as tmp:
         'replacement_kinds': patched['auxiliary_source']['sources'],
         'dino': pipeline['args']['image_cond_model']['args']['model_name'],
         'rmbg': pipeline['args']['rembg_model']['args']['model_name'],
+        'moge': patched['auxiliary_source']['sources']['moge']['value'],
         'readiness_code': readiness['code'],
         'readiness_generation_allowed': readiness['generation_allowed'],
         'readiness_aux_code': readiness['auxiliary_source']['code'],
         'local_aux_exists': resolve_storage_path(layout, 'models/pixal3d/auxiliary/dinov3').exists(),
+        'local_moge_exists': resolve_storage_path(layout, 'models/pixal3d/auxiliary/moge/model.pt').exists(),
     }, sort_keys=True))
 `)
 
@@ -642,10 +657,12 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.patch_aux_code, 'remote_auxiliary_fallback')
   assert.equal(result.dino, 'camenduru/dinov3-vitl16-pretrain-lvd1689m')
   assert.equal(result.rmbg, 'camenduru/RMBG-2.0')
+  assert.equal(result.moge, 'Ruicheng/moge-2-vitl')
   assert.equal(result.readiness_code, 'ready')
   assert.equal(result.readiness_generation_allowed, true)
   assert.equal(result.readiness_aux_code, 'remote_auxiliary_fallback')
   assert.equal(result.local_aux_exists, false)
+  assert.equal(result.local_moge_exists, false)
 })
 
 test('runtime default mode attempts auxiliary bootstrap before remote fallback and uses local paths immediately', () => {
@@ -709,11 +726,13 @@ with tempfile.TemporaryDirectory() as tmp:
     pipeline = json.loads(resolve_storage_path(layout, 'models/pixal3d/generate/pipeline.json').read_text(encoding='utf-8'))
     dino = pipeline['args']['image_cond_model']['args']['model_name']
     rmbg = pipeline['args']['rembg_model']['args']['model_name']
+    moge = result['auxiliary_source']['sources']['moge']['value']
     print(json.dumps({
         'status': result['status'],
         'calls': calls,
         'dino_suffix': dino.replace('\\\\', '/').split('/Modly/data/')[-1],
         'rmbg_suffix': rmbg.replace('\\\\', '/').split('/Modly/data/')[-1],
+        'moge_suffix': moge.replace('\\\\', '/').split('/Modly/data/')[-1],
         'source_code': result['auxiliary_source']['code'],
         'source_kinds': {key: value['kind'] for key, value in result['auxiliary_source']['sources'].items()},
         'bootstrap_code': result['auxiliary_source']['auxiliary_bootstrap']['code'],
@@ -731,16 +750,18 @@ with tempfile.TemporaryDirectory() as tmp:
     { repo_id: 'camenduru/RMBG-2.0', filename: 'BiRefNet_config.py' },
     { repo_id: 'camenduru/RMBG-2.0', filename: 'birefnet.py' },
     { repo_id: 'camenduru/RMBG-2.0', filename: 'model.safetensors' },
+    { repo_id: 'Ruicheng/moge-2-vitl', filename: 'model.pt' },
   ])
   assert.equal(result.dino_suffix, 'models/pixal3d/auxiliary/dinov3')
   assert.equal(result.rmbg_suffix, 'models/pixal3d/auxiliary/rmbg')
+  assert.equal(result.moge_suffix, 'models/pixal3d/auxiliary/moge/model.pt')
   assert.equal(result.source_code, 'local_auxiliary_assets_ready')
-  assert.deepEqual(result.source_kinds, { dino: 'local', rmbg: 'local' })
+  assert.deepEqual(result.source_kinds, { dino: 'local', moge: 'local', rmbg: 'local' })
   assert.equal(result.bootstrap_code, 'auxiliary_assets_bootstrapped')
   assert.equal(result.glb_exists, true)
 })
 
-test('runtime default mode preserves camenduru remote fallback when auxiliary bootstrap fails', () => {
+test('runtime default mode preserves remote/HF-cache fallback when auxiliary bootstrap fails', () => {
   const result = runPython(`
 import json, sys, tempfile, types
 from pathlib import Path
@@ -805,6 +826,7 @@ with tempfile.TemporaryDirectory() as tmp:
         'first_call': calls[0],
         'dino': pipeline['args']['image_cond_model']['args']['model_name'],
         'rmbg': pipeline['args']['rembg_model']['args']['model_name'],
+        'moge': result['auxiliary_source']['sources']['moge']['value'],
         'source_code': result['auxiliary_source']['code'],
         'source_kinds': {key: value['kind'] for key, value in result['auxiliary_source']['sources'].items()},
         'bootstrap_status': result['auxiliary_source']['auxiliary_bootstrap']['status'],
@@ -818,8 +840,9 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.deepEqual(result.first_call, { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'config.json' })
   assert.equal(result.dino, 'camenduru/dinov3-vitl16-pretrain-lvd1689m')
   assert.equal(result.rmbg, 'camenduru/RMBG-2.0')
+  assert.equal(result.moge, 'Ruicheng/moge-2-vitl')
   assert.equal(result.source_code, 'remote_auxiliary_fallback')
-  assert.deepEqual(result.source_kinds, { dino: 'remote', rmbg: 'remote' })
+  assert.deepEqual(result.source_kinds, { dino: 'remote', moge: 'remote', rmbg: 'remote' })
   assert.equal(result.bootstrap_status, 'failed')
   assert.deepEqual(result.warning_codes, ['auxiliary_bootstrap_failed_remote_fallback_preserved'])
   assert.equal(result.glb_exists, true)
@@ -829,7 +852,7 @@ test('strict local/offline readiness and runtime fail early on missing auxiliary
   const result = runPython(`
 import importlib, json, tempfile
 from pathlib import Path
-from pixal3d_extension.assets import PRIMARY_ASSET
+from pixal3d_extension.assets import AUXILIARY_ASSETS, PRIMARY_ASSET
 from pixal3d_extension.paths import resolve_modly_layout, resolve_storage_path
 from pixal3d_extension.readiness import check_readiness
 from pixal3d_extension import runtime
@@ -849,6 +872,13 @@ with tempfile.TemporaryDirectory() as tmp:
         path = resolve_storage_path(layout, sentinel)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(PIPELINE) if sentinel.endswith('pipeline.json') else 'primary', encoding='utf-8')
+    for key, manifest in AUXILIARY_ASSETS.items():
+        if key == 'moge':
+            continue
+        for sentinel in manifest.sentinel_paths:
+            path = resolve_storage_path(layout, sentinel)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('aux', encoding='utf-8')
 
     image = ext_dir / 'input.png'
     image.write_bytes(b'image')
@@ -890,6 +920,7 @@ with tempfile.TemporaryDirectory() as tmp:
         'runtime_statuses': {mode: result['status'] for mode, result in runtime_results.items()},
         'runtime_codes': {mode: result['code'] for mode, result in runtime_results.items()},
         'runtime_missing_counts': {mode: len(result.get('missing', [])) for mode, result in runtime_results.items()},
+        'runtime_missing': {mode: result.get('missing', []) for mode, result in runtime_results.items()},
         'inference_imported': 'inference' in imports,
         'downloader_calls': downloader_calls,
     }, sort_keys=True))
@@ -902,12 +933,13 @@ with tempfile.TemporaryDirectory() as tmp:
   })
   assert.deepEqual(result.runtime_statuses, { local: 'failed', offline: 'failed', strict: 'failed' })
   assert.deepEqual(result.runtime_codes, { local: 'missing_auxiliary_assets', offline: 'missing_auxiliary_assets', strict: 'missing_auxiliary_assets' })
-  assert.deepEqual(result.runtime_missing_counts, { local: 8, offline: 8, strict: 8 })
+  assert.deepEqual(result.runtime_missing_counts, { local: 1, offline: 1, strict: 1 })
+  assert.ok(result.runtime_missing.local.includes('models/pixal3d/auxiliary/moge/model.pt'))
   assert.equal(result.inference_imported, false)
   assert.deepEqual(result.downloader_calls, [])
 })
 
-test('runtime local mode patches inference IMAGE_COND_CONFIGS to the resolved local DINO path before generation', () => {
+test('runtime local mode patches inference DINO configs and MoGe loader to local assets before generation', () => {
   const result = runPython(`
 import json, sys, tempfile, types
 from pathlib import Path
@@ -950,6 +982,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
     patch_pipeline(ext_dir, auxiliary_mode='local', network_available=False)
     local_dino = str(resolve_storage_path(layout, 'models/pixal3d/auxiliary/dinov3'))
+    local_moge = str(resolve_storage_path(layout, 'models/pixal3d/auxiliary/moge/model.pt'))
     image = ext_dir / 'input.png'
     image.write_bytes(b'image')
     (ext_dir / 'outputs').mkdir()
@@ -961,13 +994,18 @@ with tempfile.TemporaryDirectory() as tmp:
         'shape_512': fake_config_object,
     }
     captured = {}
+    def load_moge_model(device='cuda', model_name='Ruicheng/moge-2-vitl'):
+        captured['moge'] = {'device': device, 'model_name': model_name}
+        return types.SimpleNamespace(to=lambda _device: None, eval=lambda: None)
     def run_inference(*, image_path, output_path, seed, model_path, manual_fov, low_vram, resolution):
         del image_path, seed, model_path, manual_fov, low_vram, resolution
         captured['configs'] = {
             'ss': fake_inference.IMAGE_COND_CONFIGS['ss']['model_name'],
             'shape_512': fake_inference.IMAGE_COND_CONFIGS['shape_512'].model_name,
         }
+        fake_inference.load_moge_model(device='cuda')
         Path(output_path).write_bytes(b'raw')
+    fake_inference.load_moge_model = load_moge_model
     fake_inference.run_inference = run_inference
     sys.modules['inference'] = fake_inference
 
@@ -989,7 +1027,9 @@ with tempfile.TemporaryDirectory() as tmp:
     print(json.dumps({
         'status': result['status'],
         'local_dino': local_dino,
+        'local_moge': local_moge,
         'configs': captured['configs'],
+        'moge': captured['moge'],
         'glb_exists': Path(result['output']['glb_path']).is_file(),
     }, sort_keys=True))
 `)
@@ -997,27 +1037,32 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.status, 'completed')
   assert.equal(result.configs.ss, result.local_dino)
   assert.equal(result.configs.shape_512, result.local_dino)
+  assert.equal(result.moge.model_name, result.local_moge)
   assert.equal(result.glb_exists, true)
 })
 
-test('MoGe and NAF offline behavior is represented as remote/cache fallback, not full offline support', () => {
+test('MoGe is local-first while NAF remains remote/cache fallback, so no full offline claim is made', () => {
   const readme = readFileSync(join(repoRoot, 'README.md'), 'utf8')
   assert.match(readme, /not\*\* a full offline-generation guarantee|not\*\* a full offline/i)
   assert.match(readme, /Ruicheng\/moge-2-vitl/)
+  assert.match(readme, /models\/pixal3d\/auxiliary\/moge\/model\.pt/)
   assert.match(readme, /MoGeModel\.from_pretrained\(\)/)
   assert.match(readme, /torch\.hub\.load_state_dict_from_url/)
   assert.match(readme, /naf_release\.pth/)
 
   const result = runPython(`
 import json
-from pixal3d_extension.assets import UNLOCALIZED_RUNTIME_DEPENDENCIES
-print(json.dumps({entry['key']: entry['offline_status'] for entry in UNLOCALIZED_RUNTIME_DEPENDENCIES}, sort_keys=True))
+from pixal3d_extension.assets import AUXILIARY_ASSETS, LOCALIZABLE_RUNTIME_DEPENDENCIES, UNLOCALIZED_RUNTIME_DEPENDENCIES
+print(json.dumps({
+    'moge_sentinels': list(AUXILIARY_ASSETS['moge'].sentinels),
+    'localizable': {entry['key']: entry['offline_status'] for entry in LOCALIZABLE_RUNTIME_DEPENDENCIES},
+    'unlocalized': {entry['key']: entry['offline_status'] for entry in UNLOCALIZED_RUNTIME_DEPENDENCIES},
+}, sort_keys=True))
 `)
 
-  assert.deepEqual(result, {
-    moge: 'remote_or_hf_cache_fallback',
-    naf: 'torch_cache_or_network_fallback',
-  })
+  assert.deepEqual(result.moge_sentinels, ['model.pt'])
+  assert.deepEqual(result.localizable, { moge: 'local_first_with_remote_or_hf_cache_fallback' })
+  assert.deepEqual(result.unlocalized, { naf: 'torch_cache_or_network_fallback' })
 })
 
 test('setup.py can be loaded through runpy from a different current directory', () => {

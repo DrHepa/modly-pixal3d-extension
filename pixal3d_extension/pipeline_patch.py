@@ -19,7 +19,7 @@ RMBG_REPLACEMENT = "camenduru/RMBG-2.0"
 PIPELINE_PATH = Path("models/pixal3d/generate/pipeline.json")
 BACKUP_PATH = Path("models/pixal3d/generate/pipeline.json.modly-original")
 READINESS_METADATA_PATH = Path("models/pixal3d/readiness.json")
-PATCHER_VERSION = "2026-06-13"
+PATCHER_VERSION = "2026-06-15"
 
 _TARGETS = {
     "dino": {
@@ -91,13 +91,17 @@ def _write_metadata(root: Path, metadata: dict[str, Any]) -> None:
     path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _patch_target_sources(auxiliary_resolution: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {key: source for key, source in auxiliary_resolution.get("sources", {}).items() if key in _TARGETS}
+
+
 def _actual_replacement_refs(auxiliary_resolution: dict[str, Any]) -> dict[str, str]:
-    return {key: str(source["value"]) for key, source in auxiliary_resolution.get("sources", {}).items()}
+    return {key: str(source["value"]) for key, source in _patch_target_sources(auxiliary_resolution).items()}
 
 
 def _metadata_replacement_refs(auxiliary_resolution: dict[str, Any]) -> dict[str, str]:
     refs: dict[str, str] = {}
-    for key, source in auxiliary_resolution.get("sources", {}).items():
+    for key, source in _patch_target_sources(auxiliary_resolution).items():
         if source.get("kind") == "local":
             refs[key] = f"local:{source['logical_root']}"
         else:
@@ -105,7 +109,21 @@ def _metadata_replacement_refs(auxiliary_resolution: dict[str, Any]) -> dict[str
     return refs
 
 
+def _metadata_auxiliary_refs(auxiliary_resolution: dict[str, Any]) -> dict[str, str]:
+    refs: dict[str, str] = {}
+    for key, source in auxiliary_resolution.get("sources", {}).items():
+        if source.get("kind") == "local":
+            refs[key] = f"local:{source.get('logical_value') or source['logical_root']}"
+        else:
+            refs[key] = str(source["repo_id"])
+    return refs
+
+
 def _replacement_kinds(auxiliary_resolution: dict[str, Any]) -> dict[str, str]:
+    return {key: str(source["kind"]) for key, source in _patch_target_sources(auxiliary_resolution).items()}
+
+
+def _auxiliary_kinds(auxiliary_resolution: dict[str, Any]) -> dict[str, str]:
     return {key: str(source["kind"]) for key, source in auxiliary_resolution.get("sources", {}).items()}
 
 
@@ -170,6 +188,10 @@ def _metadata_matches(root: Path, auxiliary_resolution: dict[str, Any], data: di
         return False
     if metadata.get("replacement_kinds") != _replacement_kinds(auxiliary_resolution):
         return False
+    if metadata.get("auxiliary_refs") != _metadata_auxiliary_refs(auxiliary_resolution):
+        return False
+    if metadata.get("auxiliary_kinds") != _auxiliary_kinds(auxiliary_resolution):
+        return False
     if metadata.get("local_auxiliary_roots") != _local_auxiliary_roots():
         return False
     diagnostics, update_needed = _inspect_refs(data, _actual_replacement_refs(auxiliary_resolution), metadata={"pipeline_patch": metadata})
@@ -193,11 +215,14 @@ def _write_patch_metadata(
         "auxiliary_mode": auxiliary_resolution.get("mode", "default"),
         "auxiliary_resolution_code": auxiliary_resolution.get("code"),
         "replacement_kinds": _replacement_kinds(auxiliary_resolution),
+        "auxiliary_refs": _metadata_auxiliary_refs(auxiliary_resolution),
+        "auxiliary_kinds": _auxiliary_kinds(auxiliary_resolution),
         "original_refs": {"dino": DINO_SOURCE, "rmbg": RMBG_SOURCE},
         "remote_fallback_refs": {"dino": DINO_REPLACEMENT, "rmbg": RMBG_REPLACEMENT},
         "replacement_refs": _metadata_replacement_refs(auxiliary_resolution),
         "local_auxiliary_roots": _local_auxiliary_roots(),
         "unlocalized_runtime_dependencies": auxiliary_resolution.get("unlocalized_runtime_dependencies", []),
+        "localizable_runtime_dependencies": auxiliary_resolution.get("localizable_runtime_dependencies", []),
         "hashes": {"before": _hash_text(original_text), "after": _hash_text(patched_text)},
         "validation": "expected_substitutions_applied",
     }
@@ -218,7 +243,7 @@ def _resolve_or_fail(
     if auxiliary_resolution["status"] == "blocked":
         return _failure(
             "missing_auxiliary_assets",
-            "local DINO/RMBG auxiliary assets are required for this mode",
+            "local Pixal3D auxiliary assets are required for this mode",
             auxiliary_source=auxiliary_resolution,
             missing=auxiliary_resolution.get("missing", []),
         )

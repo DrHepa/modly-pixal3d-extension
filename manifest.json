@@ -44,7 +44,8 @@
         "models/pixal3d/auxiliary/rmbg/preprocessor_config.json",
         "models/pixal3d/auxiliary/rmbg/BiRefNet_config.py",
         "models/pixal3d/auxiliary/rmbg/birefnet.py",
-        "models/pixal3d/auxiliary/rmbg/model.safetensors"
+        "models/pixal3d/auxiliary/rmbg/model.safetensors",
+        "models/pixal3d/auxiliary/moge/model.pt"
       ],
       "params_schema": [
         {
@@ -100,6 +101,7 @@
       "models/pixal3d/auxiliary/rmbg/BiRefNet_config.py",
       "models/pixal3d/auxiliary/rmbg/birefnet.py",
       "models/pixal3d/auxiliary/rmbg/model.safetensors",
+      "models/pixal3d/auxiliary/moge/model.pt",
       "models/pixal3d/readiness.json"
     ],
     "pipeline_substitutions": {
@@ -113,12 +115,14 @@
         "remote_fallback": "camenduru/RMBG-2.0"
       }
     },
+    "runtime_local_first": {
+      "moge": {
+        "local_checkpoint": "models/pixal3d/auxiliary/moge/model.pt",
+        "remote_fallback": "Ruicheng/moge-2-vitl",
+        "loader": "inference.load_moge_model"
+      }
+    },
     "unlocalized_runtime_dependencies": [
-      {
-        "key": "moge",
-        "source": "Ruicheng/moge-2-vitl",
-        "offline_status": "remote_or_hf_cache_fallback"
-      },
       {
         "key": "naf",
         "source": "https://github.com/valeoai/NAF/releases/download/model/naf_release.pth",
@@ -140,7 +144,8 @@
     "model_roots": [
       "models/pixal3d/generate",
       "models/pixal3d/auxiliary/dinov3",
-      "models/pixal3d/auxiliary/rmbg"
+      "models/pixal3d/auxiliary/rmbg",
+      "models/pixal3d/auxiliary/moge"
     ]
   },
   "entrypoints": {
