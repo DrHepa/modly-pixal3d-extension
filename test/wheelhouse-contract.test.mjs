@@ -292,6 +292,7 @@ with tempfile.TemporaryDirectory() as tmp:
         'dinov3_dir': (models_root / 'auxiliary' / 'dinov3').is_dir(),
         'rmbg_dir': (models_root / 'auxiliary' / 'rmbg').is_dir(),
         'moge_dir': (models_root / 'auxiliary' / 'moge').is_dir(),
+        'naf_dir': (models_root / 'auxiliary' / 'naf').is_dir(),
         'legacy_aux_dir': (models_root / 'aux').exists(),
         'auxiliary_roots': result['auxiliary_assets']['logical_roots'],
         'created_paths': [entry['path'] for entry in result['created']],
@@ -304,15 +305,18 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.dinov3_dir, true)
   assert.equal(result.rmbg_dir, true)
   assert.equal(result.moge_dir, true)
+  assert.equal(result.naf_dir, true)
   assert.equal(result.legacy_aux_dir, false)
   assert.deepEqual(result.auxiliary_roots, {
     dino: 'models/pixal3d/auxiliary/dinov3',
     moge: 'models/pixal3d/auxiliary/moge',
+    naf: 'models/pixal3d/auxiliary/naf',
     rmbg: 'models/pixal3d/auxiliary/rmbg',
   })
   assert.ok(result.created_paths.includes('models/pixal3d/auxiliary/dinov3'))
   assert.ok(result.created_paths.includes('models/pixal3d/auxiliary/rmbg'))
   assert.ok(result.created_paths.includes('models/pixal3d/auxiliary/moge'))
+  assert.ok(result.created_paths.includes('models/pixal3d/auxiliary/naf'))
 })
 
 test('normal setup prepare does not perform hidden auxiliary downloads', () => {
@@ -395,7 +399,7 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.calls.length, 1)
   assert.equal(result.calls[0].force, true)
   assert.match(result.bootstrap_command, /--bootstrap-auxiliary-assets/)
-  assert.match(result.bootstrap_intent, /allowlisted DINO\/RMBG\/MoGe/)
+  assert.match(result.bootstrap_intent, /allowlisted DINO\/RMBG\/MoGe\/NAF/)
   assert.match(result.plan_note, /--bootstrap-auxiliary-assets/)
   assert.equal(result.plan_status, 'download_plan')
 })
@@ -429,14 +433,14 @@ with tempfile.TemporaryDirectory() as tmp:
 `)
 
   assert.equal(result.missing_code, 'missing_auxiliary_assets')
-  assert.equal(result.missing_count, 9)
+  assert.equal(result.missing_count, 10)
   assert.ok(result.missing_sample.some((value) => value.includes('models/pixal3d/auxiliary/dinov3/')))
   assert.equal(result.complete_code, 'auxiliary_assets_ready')
   assert.deepEqual(result.complete_missing, [])
-  assert.deepEqual(result.assets_complete, { dino: true, moge: true, rmbg: true })
+  assert.deepEqual(result.assets_complete, { dino: true, moge: true, naf: true, rmbg: true })
 })
 
-test('auxiliary bootstrap downloads only the exact DINO/RMBG/MoGe allowlist with a mocked downloader', () => {
+test('auxiliary bootstrap downloads only the exact DINO/RMBG/MoGe/NAF allowlist with a mocked downloader', () => {
   const result = runPython(`
 import json, tempfile
 from pathlib import Path
@@ -446,8 +450,10 @@ with tempfile.TemporaryDirectory() as tmp:
     ext_dir = Path(tmp) / 'Modly' / 'data' / 'extensions' / 'pixal3d'
     ext_dir.mkdir(parents=True)
     calls = []
-    def downloader(*, repo_id, filename, destination, **_kwargs):
-        calls.append({'repo_id': repo_id, 'filename': filename})
+    def downloader(*, repo_id, filename, destination, source_kind='hf_repo', url=None, **_kwargs):
+        calls.append({'repo_id': repo_id, 'filename': filename, 'source_kind': source_kind, 'url': url})
+        if source_kind == 'url' and (filename != 'naf_release.pth' or url != 'https://github.com/valeoai/NAF/releases/download/model/naf_release.pth'):
+            raise AssertionError('URL assets must be restricted to the allowlisted NAF checkpoint')
         Path(destination).write_text(f'{repo_id}/{filename}', encoding='utf-8')
         return str(destination)
     bootstrap = bootstrap_auxiliary_assets(ext_dir, downloader=downloader)
@@ -458,6 +464,8 @@ with tempfile.TemporaryDirectory() as tmp:
         'status': bootstrap['status'],
         'code': bootstrap['code'],
         'downloads_started': bootstrap['downloads_started'],
+        'allowlist_files': sum(len(entry['files']) for entry in bootstrap['allowlist'].values()),
+        'naf_allowlist': bootstrap['allowlist']['naf'],
         'calls': calls,
         'files': files,
         'sentinel_code': sentinels['code'],
@@ -466,26 +474,36 @@ with tempfile.TemporaryDirectory() as tmp:
 `)
 
   const expectedCalls = [
-    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'config.json' },
-    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'preprocessor_config.json' },
-    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'model.safetensors' },
-    { repo_id: 'camenduru/RMBG-2.0', filename: 'config.json' },
-    { repo_id: 'camenduru/RMBG-2.0', filename: 'preprocessor_config.json' },
-    { repo_id: 'camenduru/RMBG-2.0', filename: 'BiRefNet_config.py' },
-    { repo_id: 'camenduru/RMBG-2.0', filename: 'birefnet.py' },
-    { repo_id: 'camenduru/RMBG-2.0', filename: 'model.safetensors' },
-    { repo_id: 'Ruicheng/moge-2-vitl', filename: 'model.pt' },
+    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'config.json', source_kind: 'hf_repo', url: null },
+    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'preprocessor_config.json', source_kind: 'hf_repo', url: null },
+    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'model.safetensors', source_kind: 'hf_repo', url: null },
+    { repo_id: 'camenduru/RMBG-2.0', filename: 'config.json', source_kind: 'hf_repo', url: null },
+    { repo_id: 'camenduru/RMBG-2.0', filename: 'preprocessor_config.json', source_kind: 'hf_repo', url: null },
+    { repo_id: 'camenduru/RMBG-2.0', filename: 'BiRefNet_config.py', source_kind: 'hf_repo', url: null },
+    { repo_id: 'camenduru/RMBG-2.0', filename: 'birefnet.py', source_kind: 'hf_repo', url: null },
+    { repo_id: 'camenduru/RMBG-2.0', filename: 'model.safetensors', source_kind: 'hf_repo', url: null },
+    { repo_id: 'Ruicheng/moge-2-vitl', filename: 'model.pt', source_kind: 'hf_repo', url: null },
+    { repo_id: 'https://github.com/valeoai/NAF/releases/download/model/naf_release.pth', filename: 'naf_release.pth', source_kind: 'url', url: 'https://github.com/valeoai/NAF/releases/download/model/naf_release.pth' },
   ]
   assert.equal(result.status, 'ready')
   assert.equal(result.code, 'auxiliary_assets_bootstrapped')
   assert.equal(result.downloads_started, true)
-  assert.equal(result.calls.length, 9)
+  assert.equal(result.allowlist_files, 10)
+  assert.deepEqual(result.naf_allowlist, {
+    files: ['naf_release.pth'],
+    local_root: 'models/pixal3d/auxiliary/naf',
+    source: 'https://github.com/valeoai/NAF/releases/download/model/naf_release.pth',
+    source_kind: 'url',
+    url: 'https://github.com/valeoai/NAF/releases/download/model/naf_release.pth',
+  })
+  assert.equal(result.calls.length, 10)
   assert.deepEqual(result.calls, expectedCalls)
   assert.deepEqual(result.files, [
     'dinov3/config.json',
     'dinov3/model.safetensors',
     'dinov3/preprocessor_config.json',
     'moge/model.pt',
+    'naf/naf_release.pth',
     'rmbg/BiRefNet_config.py',
     'rmbg/birefnet.py',
     'rmbg/config.json',
@@ -506,10 +524,10 @@ with tempfile.TemporaryDirectory() as tmp:
     ext_dir = Path(tmp) / 'Modly' / 'data' / 'extensions' / 'pixal3d'
     ext_dir.mkdir(parents=True)
     calls = []
-    def downloader(*, repo_id, filename, destination, **_kwargs):
-        calls.append({'repo_id': repo_id, 'filename': filename})
+    def downloader(*, repo_id, filename, destination, source_kind='hf_repo', **_kwargs):
+        calls.append({'repo_id': repo_id, 'filename': filename, 'source_kind': source_kind})
         Path(destination).write_text('partial', encoding='utf-8')
-        if repo_id == 'Ruicheng/moge-2-vitl' and filename == 'model.pt':
+        if source_kind == 'url' and filename == 'naf_release.pth':
             raise RuntimeError('simulated transfer failure')
         return str(destination)
     bootstrap = bootstrap_auxiliary_assets(ext_dir, downloader=downloader)
@@ -532,11 +550,44 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.bootstrap_status, 'failed')
   assert.equal(result.bootstrap_code, 'auxiliary_bootstrap_failed')
   assert.equal(result.downloads_started, true)
-  assert.equal(result.call_count, 9)
+  assert.equal(result.call_count, 10)
   assert.deepEqual(result.final_files, [])
   assert.equal(result.staging_left, false)
   assert.equal(result.sentinel_code, 'missing_auxiliary_assets')
-  assert.equal(result.missing_count, 9)
+  assert.equal(result.missing_count, 10)
+})
+
+test('auxiliary URL downloader rejects non-allowlisted URL filenames before network access', () => {
+  const result = runPython(`
+import json, tempfile
+from pathlib import Path
+import pixal3d_extension.assets as assets
+
+with tempfile.TemporaryDirectory() as tmp:
+    calls = []
+    original_urlopen = assets.urllib.request.urlopen
+    def forbidden_urlopen(*_args, **_kwargs):
+        calls.append('network')
+        raise AssertionError('mismatched URL basename must fail before network access')
+    assets.urllib.request.urlopen = forbidden_urlopen
+    try:
+        try:
+            assets._default_auxiliary_downloader(
+                repo_id='https://github.com/valeoai/NAF/releases/download/model/not_allowlisted.pth',
+                filename='naf_release.pth',
+                destination=Path(tmp) / 'naf_release.pth',
+                source_kind='url',
+                url='https://github.com/valeoai/NAF/releases/download/model/not_allowlisted.pth',
+            )
+        except RuntimeError as exc:
+            error = str(exc)
+    finally:
+        assets.urllib.request.urlopen = original_urlopen
+    print(json.dumps({'error': error, 'network_calls': calls}, sort_keys=True))
+`)
+
+  assert.match(result.error, /URL basename is not allowlisted/)
+  assert.deepEqual(result.network_calls, [])
 })
 
 test('pipeline patch writes local DINO/RMBG paths and non-absolute metadata when auxiliary sentinels are complete', () => {
@@ -600,11 +651,12 @@ with tempfile.TemporaryDirectory() as tmp:
     dino: 'local:models/pixal3d/auxiliary/dinov3',
     rmbg: 'local:models/pixal3d/auxiliary/rmbg',
   })
-  assert.deepEqual(result.auxiliary_kinds, { dino: 'local', moge: 'local', rmbg: 'local' })
+  assert.deepEqual(result.auxiliary_kinds, { dino: 'local', moge: 'local', naf: 'local', rmbg: 'local' })
   assert.equal(result.auxiliary_refs.moge, 'local:models/pixal3d/auxiliary/moge/model.pt')
+  assert.equal(result.auxiliary_refs.naf, 'local:models/pixal3d/auxiliary/naf/naf_release.pth')
   assert.equal(result.metadata_contains_tmp, false)
-  assert.deepEqual(result.unlocalized_keys, ['naf'])
-  assert.deepEqual(result.localizable_keys, ['moge'])
+  assert.deepEqual(result.unlocalized_keys, [])
+  assert.deepEqual(result.localizable_keys, ['moge', 'naf'])
 })
 
 test('default pipeline patch preserves remote/HF-cache fallback when local auxiliary assets are missing', () => {
@@ -645,11 +697,13 @@ with tempfile.TemporaryDirectory() as tmp:
         'dino': pipeline['args']['image_cond_model']['args']['model_name'],
         'rmbg': pipeline['args']['rembg_model']['args']['model_name'],
         'moge': patched['auxiliary_source']['sources']['moge']['value'],
+        'naf': patched['auxiliary_source']['sources']['naf']['value'],
         'readiness_code': readiness['code'],
         'readiness_generation_allowed': readiness['generation_allowed'],
         'readiness_aux_code': readiness['auxiliary_source']['code'],
         'local_aux_exists': resolve_storage_path(layout, 'models/pixal3d/auxiliary/dinov3').exists(),
         'local_moge_exists': resolve_storage_path(layout, 'models/pixal3d/auxiliary/moge/model.pt').exists(),
+        'local_naf_exists': resolve_storage_path(layout, 'models/pixal3d/auxiliary/naf/naf_release.pth').exists(),
     }, sort_keys=True))
 `)
 
@@ -658,11 +712,13 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.dino, 'camenduru/dinov3-vitl16-pretrain-lvd1689m')
   assert.equal(result.rmbg, 'camenduru/RMBG-2.0')
   assert.equal(result.moge, 'Ruicheng/moge-2-vitl')
+  assert.equal(result.naf, 'https://github.com/valeoai/NAF/releases/download/model/naf_release.pth')
   assert.equal(result.readiness_code, 'ready')
   assert.equal(result.readiness_generation_allowed, true)
   assert.equal(result.readiness_aux_code, 'remote_auxiliary_fallback')
   assert.equal(result.local_aux_exists, false)
   assert.equal(result.local_moge_exists, false)
+  assert.equal(result.local_naf_exists, false)
 })
 
 test('runtime default mode attempts auxiliary bootstrap before remote fallback and uses local paths immediately', () => {
@@ -703,8 +759,8 @@ with tempfile.TemporaryDirectory() as tmp:
     image.write_bytes(b'image')
     (ext_dir / 'outputs').mkdir()
     calls = []
-    def downloader(*, repo_id, filename, destination, **_kwargs):
-        calls.append({'repo_id': repo_id, 'filename': filename})
+    def downloader(*, repo_id, filename, destination, source_kind='hf_repo', url=None, **_kwargs):
+        calls.append({'repo_id': repo_id, 'filename': filename, 'source_kind': source_kind, 'url': url})
         Path(destination).write_text(f'{repo_id}/{filename}', encoding='utf-8')
         return str(destination)
     def fake_pipeline(_source):
@@ -727,12 +783,14 @@ with tempfile.TemporaryDirectory() as tmp:
     dino = pipeline['args']['image_cond_model']['args']['model_name']
     rmbg = pipeline['args']['rembg_model']['args']['model_name']
     moge = result['auxiliary_source']['sources']['moge']['value']
+    naf = result['auxiliary_source']['sources']['naf']['value']
     print(json.dumps({
         'status': result['status'],
         'calls': calls,
         'dino_suffix': dino.replace('\\\\', '/').split('/Modly/data/')[-1],
         'rmbg_suffix': rmbg.replace('\\\\', '/').split('/Modly/data/')[-1],
         'moge_suffix': moge.replace('\\\\', '/').split('/Modly/data/')[-1],
+        'naf_suffix': naf.replace('\\\\', '/').split('/Modly/data/')[-1],
         'source_code': result['auxiliary_source']['code'],
         'source_kinds': {key: value['kind'] for key, value in result['auxiliary_source']['sources'].items()},
         'bootstrap_code': result['auxiliary_source']['auxiliary_bootstrap']['code'],
@@ -742,26 +800,28 @@ with tempfile.TemporaryDirectory() as tmp:
 
   assert.equal(result.status, 'completed')
   assert.deepEqual(result.calls, [
-    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'config.json' },
-    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'preprocessor_config.json' },
-    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'model.safetensors' },
-    { repo_id: 'camenduru/RMBG-2.0', filename: 'config.json' },
-    { repo_id: 'camenduru/RMBG-2.0', filename: 'preprocessor_config.json' },
-    { repo_id: 'camenduru/RMBG-2.0', filename: 'BiRefNet_config.py' },
-    { repo_id: 'camenduru/RMBG-2.0', filename: 'birefnet.py' },
-    { repo_id: 'camenduru/RMBG-2.0', filename: 'model.safetensors' },
-    { repo_id: 'Ruicheng/moge-2-vitl', filename: 'model.pt' },
+    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'config.json', source_kind: 'hf_repo', url: null },
+    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'preprocessor_config.json', source_kind: 'hf_repo', url: null },
+    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'model.safetensors', source_kind: 'hf_repo', url: null },
+    { repo_id: 'camenduru/RMBG-2.0', filename: 'config.json', source_kind: 'hf_repo', url: null },
+    { repo_id: 'camenduru/RMBG-2.0', filename: 'preprocessor_config.json', source_kind: 'hf_repo', url: null },
+    { repo_id: 'camenduru/RMBG-2.0', filename: 'BiRefNet_config.py', source_kind: 'hf_repo', url: null },
+    { repo_id: 'camenduru/RMBG-2.0', filename: 'birefnet.py', source_kind: 'hf_repo', url: null },
+    { repo_id: 'camenduru/RMBG-2.0', filename: 'model.safetensors', source_kind: 'hf_repo', url: null },
+    { repo_id: 'Ruicheng/moge-2-vitl', filename: 'model.pt', source_kind: 'hf_repo', url: null },
+    { repo_id: 'https://github.com/valeoai/NAF/releases/download/model/naf_release.pth', filename: 'naf_release.pth', source_kind: 'url', url: 'https://github.com/valeoai/NAF/releases/download/model/naf_release.pth' },
   ])
   assert.equal(result.dino_suffix, 'models/pixal3d/auxiliary/dinov3')
   assert.equal(result.rmbg_suffix, 'models/pixal3d/auxiliary/rmbg')
   assert.equal(result.moge_suffix, 'models/pixal3d/auxiliary/moge/model.pt')
+  assert.equal(result.naf_suffix, 'models/pixal3d/auxiliary/naf/naf_release.pth')
   assert.equal(result.source_code, 'local_auxiliary_assets_ready')
-  assert.deepEqual(result.source_kinds, { dino: 'local', moge: 'local', rmbg: 'local' })
+  assert.deepEqual(result.source_kinds, { dino: 'local', moge: 'local', naf: 'local', rmbg: 'local' })
   assert.equal(result.bootstrap_code, 'auxiliary_assets_bootstrapped')
   assert.equal(result.glb_exists, true)
 })
 
-test('runtime default mode preserves remote/HF-cache fallback when auxiliary bootstrap fails', () => {
+test('runtime default mode preserves remote/HF/Torch-cache fallback when auxiliary bootstrap fails', () => {
   const result = runPython(`
 import json, sys, tempfile, types
 from pathlib import Path
@@ -799,8 +859,8 @@ with tempfile.TemporaryDirectory() as tmp:
     image.write_bytes(b'image')
     (ext_dir / 'outputs').mkdir()
     calls = []
-    def failing_downloader(*, repo_id, filename, destination, **_kwargs):
-        calls.append({'repo_id': repo_id, 'filename': filename})
+    def failing_downloader(*, repo_id, filename, destination, source_kind='hf_repo', **_kwargs):
+        calls.append({'repo_id': repo_id, 'filename': filename, 'source_kind': source_kind})
         Path(destination).write_text('partial', encoding='utf-8')
         raise RuntimeError('simulated network failure')
     def fake_pipeline(_source):
@@ -827,6 +887,7 @@ with tempfile.TemporaryDirectory() as tmp:
         'dino': pipeline['args']['image_cond_model']['args']['model_name'],
         'rmbg': pipeline['args']['rembg_model']['args']['model_name'],
         'moge': result['auxiliary_source']['sources']['moge']['value'],
+        'naf': result['auxiliary_source']['sources']['naf']['value'],
         'source_code': result['auxiliary_source']['code'],
         'source_kinds': {key: value['kind'] for key, value in result['auxiliary_source']['sources'].items()},
         'bootstrap_status': result['auxiliary_source']['auxiliary_bootstrap']['status'],
@@ -837,18 +898,19 @@ with tempfile.TemporaryDirectory() as tmp:
 
   assert.equal(result.status, 'completed')
   assert.equal(result.call_count, 1)
-  assert.deepEqual(result.first_call, { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'config.json' })
+  assert.deepEqual(result.first_call, { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'config.json', source_kind: 'hf_repo' })
   assert.equal(result.dino, 'camenduru/dinov3-vitl16-pretrain-lvd1689m')
   assert.equal(result.rmbg, 'camenduru/RMBG-2.0')
   assert.equal(result.moge, 'Ruicheng/moge-2-vitl')
+  assert.equal(result.naf, 'https://github.com/valeoai/NAF/releases/download/model/naf_release.pth')
   assert.equal(result.source_code, 'remote_auxiliary_fallback')
-  assert.deepEqual(result.source_kinds, { dino: 'remote', moge: 'remote', rmbg: 'remote' })
+  assert.deepEqual(result.source_kinds, { dino: 'remote', moge: 'remote', naf: 'remote', rmbg: 'remote' })
   assert.equal(result.bootstrap_status, 'failed')
   assert.deepEqual(result.warning_codes, ['auxiliary_bootstrap_failed_remote_fallback_preserved'])
   assert.equal(result.glb_exists, true)
 })
 
-test('strict local/offline readiness and runtime fail early on missing auxiliary assets without importing inference', () => {
+test('strict local/offline readiness and runtime fail early on missing NAF without importing inference or hubconf', () => {
   const result = runPython(`
 import importlib, json, tempfile
 from pathlib import Path
@@ -873,7 +935,7 @@ with tempfile.TemporaryDirectory() as tmp:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(PIPELINE) if sentinel.endswith('pipeline.json') else 'primary', encoding='utf-8')
     for key, manifest in AUXILIARY_ASSETS.items():
-        if key == 'moge':
+        if key == 'naf':
             continue
         for sentinel in manifest.sentinel_paths:
             path = resolve_storage_path(layout, sentinel)
@@ -891,8 +953,8 @@ with tempfile.TemporaryDirectory() as tmp:
     original_import_module = runtime.importlib.import_module
     def forbidden_import(name):
         imports.append(name)
-        if name == 'inference':
-            raise AssertionError('inference must not be imported before missing_auxiliary_assets failure')
+        if name in {'inference', 'hubconf'}:
+            raise AssertionError('inference/hubconf must not be imported before missing_auxiliary_assets failure')
         return original_import_module(name)
     runtime.importlib.import_module = forbidden_import
     try:
@@ -922,6 +984,7 @@ with tempfile.TemporaryDirectory() as tmp:
         'runtime_missing_counts': {mode: len(result.get('missing', [])) for mode, result in runtime_results.items()},
         'runtime_missing': {mode: result.get('missing', []) for mode, result in runtime_results.items()},
         'inference_imported': 'inference' in imports,
+        'hubconf_imported': 'hubconf' in imports,
         'downloader_calls': downloader_calls,
     }, sort_keys=True))
 `)
@@ -934,8 +997,9 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.deepEqual(result.runtime_statuses, { local: 'failed', offline: 'failed', strict: 'failed' })
   assert.deepEqual(result.runtime_codes, { local: 'missing_auxiliary_assets', offline: 'missing_auxiliary_assets', strict: 'missing_auxiliary_assets' })
   assert.deepEqual(result.runtime_missing_counts, { local: 1, offline: 1, strict: 1 })
-  assert.ok(result.runtime_missing.local.includes('models/pixal3d/auxiliary/moge/model.pt'))
+  assert.ok(result.runtime_missing.local.includes('models/pixal3d/auxiliary/naf/naf_release.pth'))
   assert.equal(result.inference_imported, false)
+  assert.equal(result.hubconf_imported, false)
   assert.deepEqual(result.downloader_calls, [])
 })
 
@@ -1009,6 +1073,16 @@ with tempfile.TemporaryDirectory() as tmp:
     fake_inference.run_inference = run_inference
     sys.modules['inference'] = fake_inference
 
+    fake_hubconf = types.ModuleType('hubconf')
+    class FakeNAF:
+        def to(self, _device):
+            return self
+        def load_state_dict(self, _state_dict):
+            return None
+    fake_hubconf.NAF = FakeNAF
+    fake_hubconf.naf = lambda pretrained=True, device='cpu': FakeNAF().to(device)
+    sys.modules['hubconf'] = fake_hubconf
+
     runtime._prepare_runtime_compat = lambda: None
     runtime._install_windows_native_module_aliases = lambda: None
     runtime._install_natten_fallback = lambda: None
@@ -1041,28 +1115,165 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.glb_exists, true)
 })
 
-test('MoGe is local-first while NAF remains remote/cache fallback, so no full offline claim is made', () => {
+test('runtime local mode patches NAF to local checkpoint without Torch Hub downloader', () => {
+  const result = runPython(`
+import json, sys, tempfile, types
+from pathlib import Path
+from pixal3d_extension.assets import AUXILIARY_ASSETS, PRIMARY_ASSET
+from pixal3d_extension.paths import resolve_modly_layout, resolve_storage_path
+from pixal3d_extension.pipeline_patch import patch_pipeline
+from pixal3d_extension import runtime
+
+PIPELINE = {
+    'args': {
+        'image_cond_model': {'args': {'model_name': 'facebook/dinov3-vitl16-pretrain-lvd1689m'}},
+        'rembg_model': {'args': {'model_name': 'briaai/RMBG-2.0'}},
+    }
+}
+
+class FakeScene:
+    def apply_transform(self, matrix):
+        pass
+    def export(self, file_type):
+        return b'rotated'
+
+fake_trimesh = types.ModuleType('trimesh')
+fake_trimesh.load = lambda path, file_type, force, process: FakeScene()
+fake_trimesh.transformations = types.SimpleNamespace(rotation_matrix=lambda angle, axis: None)
+sys.modules['trimesh'] = fake_trimesh
+
+with tempfile.TemporaryDirectory() as tmp:
+    ext_dir = Path(tmp) / 'Modly' / 'data' / 'extensions' / 'pixal3d'
+    ext_dir.mkdir(parents=True)
+    layout = resolve_modly_layout(ext_dir)
+    for sentinel in PRIMARY_ASSET.sentinel_paths:
+        path = resolve_storage_path(layout, sentinel)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(PIPELINE) if sentinel.endswith('pipeline.json') else 'primary', encoding='utf-8')
+    for manifest in AUXILIARY_ASSETS.values():
+        for sentinel in manifest.sentinel_paths:
+            path = resolve_storage_path(layout, sentinel)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('aux', encoding='utf-8')
+
+    patch_pipeline(ext_dir, auxiliary_mode='local', network_available=False)
+    local_naf = str(resolve_storage_path(layout, 'models/pixal3d/auxiliary/naf/naf_release.pth'))
+    image = ext_dir / 'input.png'
+    image.write_bytes(b'image')
+    (ext_dir / 'outputs').mkdir()
+
+    captured = {'torch_hub_calls': 0}
+    fake_torch = types.ModuleType('torch')
+    def fake_torch_load(path, map_location=None):
+        captured['torch_load'] = {'path': str(path), 'map_location': str(map_location)}
+        return {'weights': 'local'}
+    fake_torch.load = fake_torch_load
+    def forbidden_url_loader(*_args, **_kwargs):
+        captured['torch_hub_calls'] += 1
+        raise AssertionError('local NAF mode must not call torch.hub.load_state_dict_from_url')
+    fake_torch.hub = types.SimpleNamespace(load_state_dict_from_url=forbidden_url_loader)
+    sys.modules['torch'] = fake_torch
+
+    fake_hubconf = types.ModuleType('hubconf')
+    class FakeNAF:
+        def to(self, device):
+            captured['naf_device'] = str(device)
+            return self
+        def load_state_dict(self, state_dict):
+            captured['naf_state_dict'] = state_dict
+            return None
+    fake_hubconf.NAF = FakeNAF
+    def remote_naf(pretrained=True, device='cpu'):
+        if pretrained:
+            fake_torch.hub.load_state_dict_from_url('https://github.com/valeoai/NAF/releases/download/model/naf_release.pth', progress=True, map_location=device)
+        return FakeNAF().to(device)
+    fake_hubconf.naf = remote_naf
+    sys.modules['hubconf'] = fake_hubconf
+
+    fake_inference = types.ModuleType('inference')
+    fake_inference.IMAGE_COND_CONFIGS = {}
+    fake_inference.load_moge_model = lambda *args, **kwargs: None
+    def run_inference(*, image_path, output_path, seed, model_path, manual_fov, low_vram, resolution):
+        del image_path, seed, model_path, manual_fov, low_vram, resolution
+        from hubconf import naf
+        model = naf(pretrained=True, device='cuda')
+        captured['patched_checkpoint'] = getattr(naf, '__modly_local_checkpoint__', None)
+        captured['returned_model_type'] = type(model).__name__
+        Path(output_path).write_bytes(b'raw')
+    fake_inference.run_inference = run_inference
+    sys.modules['inference'] = fake_inference
+
+    runtime._prepare_runtime_compat = lambda: None
+    runtime._install_windows_native_module_aliases = lambda: None
+    runtime._install_natten_fallback = lambda: None
+    runtime._silence_flex_gemm_autotuners = lambda: None
+
+    result = runtime.run_job({
+        'workspace_root': str(ext_dir),
+        'input_image': 'input.png',
+        'output_dir': 'outputs',
+        'readiness': {'generation_allowed': True, 'code': 'ready'},
+        'auxiliary_mode': 'local',
+        'network_available': False,
+        'model_source': str(resolve_storage_path(layout, 'models/pixal3d/generate')),
+        'params': {'seed': 1},
+    })
+    print(json.dumps({
+        'status': result['status'],
+        'local_naf': local_naf,
+        'patched_checkpoint': captured['patched_checkpoint'],
+        'torch_load': captured.get('torch_load'),
+        'torch_hub_calls': captured['torch_hub_calls'],
+        'naf_device': captured['naf_device'],
+        'naf_state_dict': captured['naf_state_dict'],
+        'returned_model_type': captured['returned_model_type'],
+        'glb_exists': Path(result['output']['glb_path']).is_file(),
+    }, sort_keys=True))
+`)
+
+  assert.equal(result.status, 'completed')
+  assert.equal(result.patched_checkpoint, result.local_naf)
+  assert.deepEqual(result.torch_load, { path: result.local_naf, map_location: 'cuda' })
+  assert.equal(result.torch_hub_calls, 0)
+  assert.equal(result.naf_device, 'cuda')
+  assert.deepEqual(result.naf_state_dict, { weights: 'local' })
+  assert.equal(result.returned_model_type, 'FakeNAF')
+  assert.equal(result.glb_exists, true)
+})
+
+test('DINO/RMBG/MoGe/NAF are local-first while full offline and NATTEN strict kernels remain separate', () => {
   const readme = readFileSync(join(repoRoot, 'README.md'), 'utf8')
   assert.match(readme, /not\*\* a full offline-generation guarantee|not\*\* a full offline/i)
   assert.match(readme, /Ruicheng\/moge-2-vitl/)
   assert.match(readme, /models\/pixal3d\/auxiliary\/moge\/model\.pt/)
+  assert.match(readme, /models\/pixal3d\/auxiliary\/naf\/naf_release\.pth/)
   assert.match(readme, /MoGeModel\.from_pretrained\(\)/)
   assert.match(readme, /torch\.hub\.load_state_dict_from_url/)
+  assert.match(readme, /hubconf\.naf/)
   assert.match(readme, /naf_release\.pth/)
+  assert.match(readme, /no-DNS generation smoke test/i)
+  assert.match(readme, /NATTEN\/libnatten.*separate|separate from strict NAF native kernels/i)
 
   const result = runPython(`
 import json
 from pixal3d_extension.assets import AUXILIARY_ASSETS, LOCALIZABLE_RUNTIME_DEPENDENCIES, UNLOCALIZED_RUNTIME_DEPENDENCIES
 print(json.dumps({
     'moge_sentinels': list(AUXILIARY_ASSETS['moge'].sentinels),
+    'naf_sentinels': list(AUXILIARY_ASSETS['naf'].sentinels),
     'localizable': {entry['key']: entry['offline_status'] for entry in LOCALIZABLE_RUNTIME_DEPENDENCIES},
+    'strict_kernel_notes': {entry['key']: entry.get('strict_kernel_note') for entry in LOCALIZABLE_RUNTIME_DEPENDENCIES if entry.get('strict_kernel_note')},
     'unlocalized': {entry['key']: entry['offline_status'] for entry in UNLOCALIZED_RUNTIME_DEPENDENCIES},
 }, sort_keys=True))
 `)
 
   assert.deepEqual(result.moge_sentinels, ['model.pt'])
-  assert.deepEqual(result.localizable, { moge: 'local_first_with_remote_or_hf_cache_fallback' })
-  assert.deepEqual(result.unlocalized, { naf: 'torch_cache_or_network_fallback' })
+  assert.deepEqual(result.naf_sentinels, ['naf_release.pth'])
+  assert.deepEqual(result.localizable, {
+    moge: 'local_first_with_remote_or_hf_cache_fallback',
+    naf: 'local_first_with_torch_cache_or_network_fallback_in_default',
+  })
+  assert.match(result.strict_kernel_notes.naf, /NATTEN\/libnatten native kernel availability/)
+  assert.deepEqual(result.unlocalized, {})
 })
 
 test('setup.py can be loaded through runpy from a different current directory', () => {

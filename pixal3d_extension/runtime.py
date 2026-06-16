@@ -524,11 +524,12 @@ def _preflight_auxiliary_sources(job: dict) -> tuple[dict | None, dict | None]:
             None,
         )
 
-    if normalized_auxiliary_mode in {"offline", "strict"} and not bool(job.get("allow_remote_runtime_dependencies", False)):
+    unresolved_runtime_dependencies = auxiliary_source.get("unlocalized_runtime_dependencies", [])
+    if normalized_auxiliary_mode in {"offline", "strict"} and unresolved_runtime_dependencies and not bool(job.get("allow_remote_runtime_dependencies", False)):
         return (
             _failure(
                 "offline_runtime_dependencies_unresolved",
-                "DINO/RMBG/MoGe are local, but NAF still relies on Torch cache or network fallback behavior.",
+                "Some Pixal3D runtime dependencies still rely on cache or network fallback behavior.",
                 auxiliary_mode=normalized_auxiliary_mode,
                 auxiliary_source=auxiliary_source,
                 runtime_dependencies=auxiliary_source.get("unlocalized_runtime_dependencies", []),
@@ -616,9 +617,47 @@ def _patch_inference_moge_loader(inference_module: Any, auxiliary_source: dict) 
     setattr(inference_module, "load_moge_model", load_local_moge_model)
 
 
+def _patch_hubconf_naf_loader(auxiliary_source: dict | None) -> None:
+    if not auxiliary_source:
+        return
+    naf_source = auxiliary_source.get("sources", {}).get("naf", {})
+    if naf_source.get("kind") != "local":
+        return
+
+    local_naf_path = str(naf_source["value"])
+    fallback_allowed = auxiliary_source.get("mode") == "default"
+    hubconf_module = importlib.import_module("hubconf")
+    original_naf = getattr(hubconf_module, "naf", None)
+    if not callable(original_naf):
+        raise RuntimeError("hubconf.naf is required for local NAF checkpoint loading")
+    if getattr(original_naf, "__modly_local_checkpoint__", None) == local_naf_path:
+        return
+
+    def load_local_naf(pretrained: bool = True, device: Any = "cpu") -> Any:
+        try:
+            naf_cls = getattr(hubconf_module, "NAF")
+            model = naf_cls().to(device)
+            if pretrained:
+                import torch
+
+                model.load_state_dict(torch.load(local_naf_path, map_location=device))
+            return model
+        except Exception:
+            if fallback_allowed:
+                return original_naf(pretrained=pretrained, device=device)
+            raise
+
+    load_local_naf.__name__ = getattr(original_naf, "__name__", "naf")
+    load_local_naf.__doc__ = getattr(original_naf, "__doc__", None)
+    load_local_naf.__wrapped__ = original_naf  # type: ignore[attr-defined]
+    load_local_naf.__modly_local_checkpoint__ = local_naf_path  # type: ignore[attr-defined]
+    setattr(hubconf_module, "naf", load_local_naf)
+
+
 def _patch_inference_auxiliary_sources(inference_module: Any, auxiliary_source: dict | None) -> None:
     if not auxiliary_source:
         return
+    _patch_hubconf_naf_loader(auxiliary_source)
     _patch_inference_dino_source(inference_module, auxiliary_source)
     _patch_inference_moge_loader(inference_module, auxiliary_source)
 
@@ -666,6 +705,9 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
             _diagnostic_checkpoint("natten:start")
             _install_natten_fallback()
             _diagnostic_checkpoint("natten:done")
+            _diagnostic_checkpoint("naf_loader_patch:start")
+            _patch_hubconf_naf_loader(auxiliary_source)
+            _diagnostic_checkpoint("naf_loader_patch:done")
             _diagnostic_checkpoint("import_inference:start")
             inference_module = importlib.import_module("inference")
             _patch_inference_auxiliary_sources(inference_module, auxiliary_source)

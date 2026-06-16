@@ -81,6 +81,7 @@ RUNTIME_DIRS = [
     "models/pixal3d/auxiliary/dinov3",
     "models/pixal3d/auxiliary/rmbg",
     "models/pixal3d/auxiliary/moge",
+    "models/pixal3d/auxiliary/naf",
 ]
 READINESS_METADATA = "models/pixal3d/readiness.json"
 
@@ -152,10 +153,11 @@ def _auxiliary_asset_bootstrap_plan() -> dict[str, Any]:
     return {
         "logical_roots": {key: manifest.local_root for key, manifest in AUXILIARY_ASSETS.items()},
         "sentinels": {key: list(manifest.sentinel_paths) for key, manifest in AUXILIARY_ASSETS.items()},
-        "download_sources": {key: manifest.repo_id for key, manifest in AUXILIARY_ASSETS.items()},
+        "download_sources": {key: manifest.source for key, manifest in AUXILIARY_ASSETS.items()},
+        "source_kinds": {key: manifest.source_kind for key, manifest in AUXILIARY_ASSETS.items()},
         "bootstrap_command": "python3 setup.py --bootstrap-auxiliary-assets --workspace-root <extension-dir> --json",
-        "bootstrap_intent": "explicitly downloads only the allowlisted DINO/RMBG/MoGe files into models/pixal3d/auxiliary; normal setup does not do this hidden download",
-        "fallback_policy": "default mode may use remote/HF-cache fallback only when local sentinels are missing and network fallback is available; local/offline/strict modes require these files first. NAF remains torch-cache-or-network fallback.",
+        "bootstrap_intent": "explicitly downloads only the allowlisted DINO/RMBG/MoGe/NAF files into models/pixal3d/auxiliary; normal setup does not do this hidden download",
+        "fallback_policy": "default mode may use remote/HF/Torch-cache fallback only when local sentinels are missing and network fallback is available; local/offline/strict modes require these files first. NATTEN/libnatten strict kernels remain a separate runtime validation from NAF checkpoint localization.",
     }
 
 
@@ -172,7 +174,7 @@ def _model_download_plan() -> dict[str, Any]:
         "auxiliary": _auxiliary_asset_bootstrap_plan(),
         "localizable_runtime_dependencies": list(LOCALIZABLE_RUNTIME_DEPENDENCIES),
         "runtime_dependencies": list(UNLOCALIZED_RUNTIME_DEPENDENCIES),
-        "note": "Normal setup emits the asset plan only; use --bootstrap-auxiliary-assets for the explicit DINO/RMBG/MoGe auxiliary bootstrap, and use Modly-owned model download/repair for Pixal3D primary weights. NAF is not localized yet.",
+        "note": "Normal setup emits the asset plan only; use --bootstrap-auxiliary-assets for the explicit DINO/RMBG/MoGe/NAF auxiliary bootstrap, and use Modly-owned model download/repair for Pixal3D primary weights. Local NAF checkpoint availability does not prove NATTEN/libnatten strict kernel availability.",
     }
 
 
@@ -521,8 +523,8 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
     parser.add_argument("--restore-pipeline", action="store_true")
     parser.add_argument("--download-plan", action="store_true")
     parser.add_argument("--download-models", action="store_true")
-    parser.add_argument("--bootstrap-auxiliary-assets", action="store_true", help="Explicitly download the allowlisted local DINO/RMBG/MoGe auxiliary assets.")
-    parser.add_argument("--force-auxiliary-assets", action="store_true", help="Redownload allowlisted DINO/RMBG/MoGe auxiliary files during explicit bootstrap.")
+    parser.add_argument("--bootstrap-auxiliary-assets", action="store_true", help="Explicitly download the allowlisted local DINO/RMBG/MoGe/NAF auxiliary assets.")
+    parser.add_argument("--force-auxiliary-assets", action="store_true", help="Redownload allowlisted DINO/RMBG/MoGe/NAF auxiliary files during explicit bootstrap.")
     parser.add_argument("--auxiliary-mode", choices=["default", "auto", "remote", "local", "offline", "strict"], default="default")
     parser.add_argument("--offline", action="store_true", help="Disable remote auxiliary fallback for readiness/patch planning.")
     parser.add_argument("--json", action="store_true")
@@ -624,7 +626,7 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
                     "setup_readiness": check_setup_readiness(workspace_root),
                     "next_steps": ["rerun readiness", "patch pipeline", "run generation"]
                     if bootstrap_success
-                    else ["check network/auth for Hugging Face auxiliary assets", "rerun explicit auxiliary bootstrap"],
+                    else ["check network/auth for Hugging Face/GitHub auxiliary assets", "rerun explicit auxiliary bootstrap"],
                 }
             )
         return result
@@ -657,7 +659,7 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
             "setup_readiness": check_setup_readiness(workspace_root),
             "next_steps": ["rerun readiness", "patch pipeline", "run generation"]
             if success
-            else ["check network/auth for Hugging Face auxiliary assets", "rerun explicit auxiliary bootstrap"],
+            else ["check network/auth for Hugging Face/GitHub auxiliary assets", "rerun explicit auxiliary bootstrap"],
         }
     if args.patch_pipeline:
         return {**result, **patch_pipeline(workspace_root, auxiliary_mode=auxiliary_mode, network_available=network_available)}

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import urllib.parse
+import urllib.request
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -17,6 +19,12 @@ class AssetManifest:
     local_root: str
     sentinels: tuple[str, ...]
     local_reference: str = "root"
+    source_kind: str = "hf_repo"
+    source_url: str | None = None
+
+    @property
+    def source(self) -> str:
+        return self.source_url or self.repo_id
 
     @property
     def sentinel_paths(self) -> tuple[str, ...]:
@@ -69,16 +77,32 @@ AUXILIARY_ASSETS = {
         sentinels=("model.pt",),
         local_reference="sentinel",
     ),
+    "naf": AssetManifest(
+        key="naf",
+        repo_id="https://github.com/valeoai/NAF/releases/download/model/naf_release.pth",
+        local_root="models/pixal3d/auxiliary/naf",
+        sentinels=("naf_release.pth",),
+        local_reference="sentinel",
+        source_kind="url",
+        source_url="https://github.com/valeoai/NAF/releases/download/model/naf_release.pth",
+    ),
 }
 
-AUXILIARY_BOOTSTRAP_ALLOWLIST = {
-    key: {
-        "repo_id": manifest.repo_id,
+def _bootstrap_allowlist_entry(manifest: AssetManifest) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "source_kind": manifest.source_kind,
+        "source": manifest.source,
         "local_root": manifest.local_root,
         "files": list(manifest.sentinels),
     }
-    for key, manifest in AUXILIARY_ASSETS.items()
-}
+    if manifest.source_kind == "url":
+        entry["url"] = manifest.source
+    else:
+        entry["repo_id"] = manifest.repo_id
+    return entry
+
+
+AUXILIARY_BOOTSTRAP_ALLOWLIST = {key: _bootstrap_allowlist_entry(manifest) for key, manifest in AUXILIARY_ASSETS.items()}
 
 AUXILIARY_SOURCE_MODES = {"default", "auto", "remote", "local", "offline", "strict"}
 LOCAL_REQUIRED_AUXILIARY_SOURCE_MODES = {"local", "offline", "strict"}
@@ -94,17 +118,19 @@ LOCALIZABLE_RUNTIME_DEPENDENCIES = (
         "offline_status": "local_first_with_remote_or_hf_cache_fallback",
         "localization_status": "wired_to_local_checkpoint_when_available",
     },
-)
-
-UNLOCALIZED_RUNTIME_DEPENDENCIES = (
     {
         "key": "naf",
         "source": "https://github.com/valeoai/NAF/releases/download/model/naf_release.pth",
-        "current_behavior": "Packaged NAF code calls torch.hub.load_state_dict_from_url(), so the checkpoint must already be in Torch cache or it may use the network.",
-        "offline_status": "torch_cache_or_network_fallback",
-        "localization_status": "checkpoint_not_declared_as_local_asset",
+        "local_root": AUXILIARY_ASSETS["naf"].local_root,
+        "local_checkpoint": AUXILIARY_ASSETS["naf"].sentinel_paths[0],
+        "runtime_hook": "hubconf.naf",
+        "offline_status": "local_first_with_torch_cache_or_network_fallback_in_default",
+        "localization_status": "wired_to_local_checkpoint_when_available",
+        "strict_kernel_note": "NAF checkpoint localization is separate from NATTEN/libnatten native kernel availability.",
     },
 )
+
+UNLOCALIZED_RUNTIME_DEPENDENCIES: tuple[dict[str, Any], ...] = ()
 
 REQUIRED_SENTINEL_PATHS = [
     *PRIMARY_ASSET.sentinel_paths,
@@ -139,6 +165,8 @@ def _asset_status(workspace_root: Path, manifest: AssetManifest) -> dict[str, An
     return {
         "key": manifest.key,
         "repo_id": manifest.repo_id,
+        "source_kind": manifest.source_kind,
+        "source": manifest.source,
         "logical_root": manifest.local_root,
         "resolved_path": str(resolved_root),
         "logical_value": logical_value,
@@ -178,13 +206,34 @@ def _default_auxiliary_downloader(
     destination: str | Path,
     token: str | None = None,
     revision: str | None = None,
+    source_kind: str = "hf_repo",
+    url: str | None = None,
 ) -> str:
-    """Download one allowlisted auxiliary file through Hugging Face Hub.
+    """Download one allowlisted auxiliary file through its declared source.
 
     The import stays inside this function so importing pixal3d_extension.assets
     never performs network-facing setup or requires huggingface_hub until an
-    explicit bootstrap path calls it.
+    explicit bootstrap path calls it. HF assets use hf_hub_download; URL assets
+    are copied from the exact declared URL basename into the staged destination.
     """
+
+    destination_path = Path(destination)
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if source_kind == "url":
+        source_url = url or repo_id
+        parsed = urllib.parse.urlparse(source_url)
+        if parsed.scheme not in {"http", "https"}:
+            raise RuntimeError(f"unsupported auxiliary URL scheme for {filename!r}")
+        if PurePosixPath(parsed.path).name != PurePosixPath(filename).name:
+            raise RuntimeError(f"auxiliary URL basename is not allowlisted for {filename!r}")
+        request = urllib.request.Request(source_url, headers={"User-Agent": "modly-pixal3d-bootstrap"})
+        with urllib.request.urlopen(request) as response, destination_path.open("wb") as output:
+            shutil.copyfileobj(response, output)
+        return str(destination_path)
+
+    if source_kind != "hf_repo":
+        raise RuntimeError(f"unsupported auxiliary source kind: {source_kind!r}")
 
     from huggingface_hub import hf_hub_download
 
@@ -194,8 +243,6 @@ def _default_auxiliary_downloader(
     if revision is not None:
         kwargs["revision"] = revision
     cached_path = Path(hf_hub_download(**kwargs))
-    destination_path = Path(destination)
-    destination_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(cached_path, destination_path)
     return str(destination_path)
 
@@ -239,7 +286,7 @@ def bootstrap_auxiliary_assets(
     token: str | None = None,
     revision: str | None = None,
 ) -> dict[str, Any]:
-    """Populate exact allowlisted DINO/RMBG/MoGe auxiliary assets.
+    """Populate exact allowlisted DINO/RMBG/MoGe/NAF auxiliary assets.
 
     Files are staged under the Modly model storage tree first. Final sentinel
     files are replaced only after every allowlisted file has been staged
@@ -277,6 +324,8 @@ def bootstrap_auxiliary_assets(
         for key, manifest in AUXILIARY_ASSETS.items():
             staged[key] = {
                 "repo_id": manifest.repo_id,
+                "source_kind": manifest.source_kind,
+                "source": manifest.source,
                 "logical_root": manifest.local_root,
                 "files": [],
                 "downloaded": [],
@@ -294,13 +343,24 @@ def bootstrap_auxiliary_assets(
                     staged[key]["reused"].append(filename)
                 else:
                     downloads_started = True
-                    attempted.append({"asset": key, "repo_id": manifest.repo_id, "filename": filename})
+                    attempt = {
+                        "asset": key,
+                        "source_kind": manifest.source_kind,
+                        "source": manifest.source,
+                        "repo_id": manifest.repo_id,
+                        "filename": filename,
+                    }
+                    if manifest.source_kind == "url":
+                        attempt["url"] = manifest.source
+                    attempted.append(attempt)
                     download_result = active_downloader(
                         repo_id=manifest.repo_id,
                         filename=filename,
                         destination=stage_path,
                         token=token,
                         revision=revision,
+                        source_kind=manifest.source_kind,
+                        url=manifest.source_url,
                     )
                     if not stage_path.is_file() and isinstance(download_result, (str, os.PathLike)):
                         candidate = Path(download_result)
@@ -332,7 +392,7 @@ def bootstrap_auxiliary_assets(
         return _bootstrap_failure(
             root,
             "auxiliary_bootstrap_failed",
-            "failed to bootstrap Pixal3D DINO/RMBG/MoGe auxiliary assets",
+            "failed to bootstrap Pixal3D DINO/RMBG/MoGe/NAF auxiliary assets",
             downloads_started=downloads_started,
             attempted=attempted,
             error=f"{type(exc).__name__}: {exc}",
@@ -401,6 +461,8 @@ def resolve_auxiliary_sources(
             "kind": "local",
             "value": asset["resolved_value"],
             "repo_id": manifest.repo_id,
+            "source_kind": manifest.source_kind,
+            "source": manifest.source,
             "logical_root": manifest.local_root,
             "logical_value": asset["logical_value"],
             "local_reference": manifest.local_reference,
@@ -423,8 +485,10 @@ def resolve_auxiliary_sources(
         fallback_used = True
         sources[key] = {
             "kind": "remote",
-            "value": manifest.repo_id,
+            "value": manifest.source,
             "repo_id": manifest.repo_id,
+            "source_kind": manifest.source_kind,
+            "source": manifest.source,
             "logical_root": manifest.local_root,
         }
 

@@ -28,6 +28,7 @@ SETUP_REQUIRED_PATHS = [
     "models/pixal3d/auxiliary/dinov3",
     "models/pixal3d/auxiliary/rmbg",
     "models/pixal3d/auxiliary/moge",
+    "models/pixal3d/auxiliary/naf",
     "models/pixal3d/readiness.json",
 ]
 
@@ -159,11 +160,12 @@ def check_readiness(
             "generation_allowed": False,
         }
 
-    if normalized_auxiliary_mode in {"offline", "strict"} and not allow_remote_runtime_dependencies:
+    unresolved_runtime_dependencies = auxiliary_source.get("unlocalized_runtime_dependencies", [])
+    if normalized_auxiliary_mode in {"offline", "strict"} and unresolved_runtime_dependencies and not allow_remote_runtime_dependencies:
         return {
             "status": "blocked",
             "code": "offline_runtime_dependencies_unresolved",
-            "message": "DINO/RMBG/MoGe can be local, but NAF still depends on Torch cache or network fallback.",
+            "message": "Some Pixal3D runtime dependencies still depend on cache or network fallback.",
             "auxiliary_source": auxiliary_source,
             "localizable_runtime_dependencies": LOCALIZABLE_RUNTIME_DEPENDENCY_STATUS,
             "runtime_dependencies": RUNTIME_DEPENDENCY_STATUS,

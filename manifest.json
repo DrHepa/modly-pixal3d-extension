@@ -45,7 +45,8 @@
         "models/pixal3d/auxiliary/rmbg/BiRefNet_config.py",
         "models/pixal3d/auxiliary/rmbg/birefnet.py",
         "models/pixal3d/auxiliary/rmbg/model.safetensors",
-        "models/pixal3d/auxiliary/moge/model.pt"
+        "models/pixal3d/auxiliary/moge/model.pt",
+        "models/pixal3d/auxiliary/naf/naf_release.pth"
       ],
       "params_schema": [
         {
@@ -102,6 +103,7 @@
       "models/pixal3d/auxiliary/rmbg/birefnet.py",
       "models/pixal3d/auxiliary/rmbg/model.safetensors",
       "models/pixal3d/auxiliary/moge/model.pt",
+      "models/pixal3d/auxiliary/naf/naf_release.pth",
       "models/pixal3d/readiness.json"
     ],
     "pipeline_substitutions": {
@@ -120,15 +122,15 @@
         "local_checkpoint": "models/pixal3d/auxiliary/moge/model.pt",
         "remote_fallback": "Ruicheng/moge-2-vitl",
         "loader": "inference.load_moge_model"
+      },
+      "naf": {
+        "local_checkpoint": "models/pixal3d/auxiliary/naf/naf_release.pth",
+        "remote_fallback": "https://github.com/valeoai/NAF/releases/download/model/naf_release.pth",
+        "loader": "hubconf.naf",
+        "strict_kernel_note": "NAF checkpoint localization is separate from NATTEN/libnatten native kernel availability."
       }
     },
-    "unlocalized_runtime_dependencies": [
-      {
-        "key": "naf",
-        "source": "https://github.com/valeoai/NAF/releases/download/model/naf_release.pth",
-        "offline_status": "torch_cache_or_network_fallback"
-      }
-    ]
+    "unlocalized_runtime_dependencies": []
   },
   "platforms": [
     { "platform": "linux-aarch64-cp312-nvidia-cuda", "status": "prepared" },
@@ -145,7 +147,8 @@
       "models/pixal3d/generate",
       "models/pixal3d/auxiliary/dinov3",
       "models/pixal3d/auxiliary/rmbg",
-      "models/pixal3d/auxiliary/moge"
+      "models/pixal3d/auxiliary/moge",
+      "models/pixal3d/auxiliary/naf"
     ]
   },
   "entrypoints": {
