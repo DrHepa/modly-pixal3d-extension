@@ -3,7 +3,7 @@
   "kind": "model",
   "type": "model",
   "name": "Pixal3D",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "DrHepa",
   "description": "Pixal3D image-to-3D Modly model extension. Outputs are aligned to the input image projection; angled inputs may produce angled meshes by design.",
   "generator_class": "Pixal3DGenerator",
