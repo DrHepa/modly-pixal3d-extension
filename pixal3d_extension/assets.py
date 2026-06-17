@@ -138,6 +138,70 @@ REQUIRED_SENTINEL_PATHS = [
 ]
 
 
+def _manifest_relative_file(manifest: AssetManifest, sentinel_path: str) -> PurePosixPath:
+    return PurePosixPath(sentinel_path).relative_to(PurePosixPath(manifest.local_root))
+
+
+def _safe_manifest_filename(filename: str) -> str:
+    parsed = urllib.parse.urlparse(filename)
+    path = PurePosixPath(filename)
+    if parsed.scheme or parsed.netloc or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise RuntimeError(f"requested file is not an allowlisted HF auxiliary asset: {filename!r}")
+    return str(path)
+
+
+def _validate_allowlisted_hf_asset(repo_id: str, filename: str) -> str:
+    safe_filename = _safe_manifest_filename(filename)
+    for manifest in AUXILIARY_ASSETS.values():
+        if manifest.source_kind != "hf_repo" or manifest.repo_id != repo_id:
+            continue
+        allowed_files = {str(_manifest_relative_file(manifest, sentinel)) for sentinel in manifest.sentinel_paths}
+        if safe_filename in allowed_files:
+            return safe_filename
+    raise RuntimeError(f"requested file is not an allowlisted HF auxiliary asset: {repo_id}/{safe_filename}")
+
+
+def _validate_allowlisted_url_asset(source_url: str, filename: str) -> str:
+    safe_filename = _safe_manifest_filename(filename)
+    parsed = urllib.parse.urlparse(source_url)
+    if parsed.scheme not in {"http", "https"}:
+        raise RuntimeError(f"unsupported auxiliary URL scheme for {filename!r}")
+    if PurePosixPath(parsed.path).name != PurePosixPath(safe_filename).name:
+        raise RuntimeError(f"auxiliary URL basename is not allowlisted for {filename!r}")
+    for manifest in AUXILIARY_ASSETS.values():
+        if manifest.source_kind != "url" or manifest.source_url != source_url:
+            continue
+        allowed_files = {str(_manifest_relative_file(manifest, sentinel)) for sentinel in manifest.sentinel_paths}
+        if safe_filename in allowed_files:
+            return safe_filename
+    raise RuntimeError(f"auxiliary URL is not allowlisted for {filename!r}")
+
+
+def _hf_resolve_url(repo_id: str, filename: str, revision: str | None = None) -> str:
+    repo_path = urllib.parse.quote(repo_id, safe="/")
+    revision_path = urllib.parse.quote(revision or "main", safe="")
+    file_path = "/".join(urllib.parse.quote(part, safe="") for part in PurePosixPath(filename).parts)
+    return f"https://huggingface.co/{repo_path}/resolve/{revision_path}/{file_path}"
+
+
+def _download_hf_asset_direct(
+    *,
+    repo_id: str,
+    filename: str,
+    destination_path: Path,
+    token: str | None = None,
+    revision: str | None = None,
+) -> str:
+    source_url = _hf_resolve_url(repo_id, filename, revision)
+    headers = {"User-Agent": "modly-pixal3d-bootstrap"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(source_url, headers=headers)
+    with urllib.request.urlopen(request) as response, destination_path.open("wb") as output:
+        shutil.copyfileobj(response, output)
+    return str(destination_path)
+
+
 def normalize_auxiliary_source_mode(mode: str | None) -> str:
     normalized = (mode or "default").strip().lower()
     if normalized == "auto":
@@ -222,11 +286,7 @@ def _default_auxiliary_downloader(
 
     if source_kind == "url":
         source_url = url or repo_id
-        parsed = urllib.parse.urlparse(source_url)
-        if parsed.scheme not in {"http", "https"}:
-            raise RuntimeError(f"unsupported auxiliary URL scheme for {filename!r}")
-        if PurePosixPath(parsed.path).name != PurePosixPath(filename).name:
-            raise RuntimeError(f"auxiliary URL basename is not allowlisted for {filename!r}")
+        filename = _validate_allowlisted_url_asset(source_url, filename)
         request = urllib.request.Request(source_url, headers={"User-Agent": "modly-pixal3d-bootstrap"})
         with urllib.request.urlopen(request) as response, destination_path.open("wb") as output:
             shutil.copyfileobj(response, output)
@@ -235,7 +295,21 @@ def _default_auxiliary_downloader(
     if source_kind != "hf_repo":
         raise RuntimeError(f"unsupported auxiliary source kind: {source_kind!r}")
 
-    from huggingface_hub import hf_hub_download
+    filename = _validate_allowlisted_hf_asset(repo_id, filename)
+
+    try:
+        from huggingface_hub import hf_hub_download
+    except ModuleNotFoundError as exc:
+        missing_name = getattr(exc, "name", None)
+        if missing_name not in {None, "huggingface_hub"} and "huggingface_hub" not in str(exc):
+            raise
+        return _download_hf_asset_direct(
+            repo_id=repo_id,
+            filename=filename,
+            destination_path=destination_path,
+            token=token,
+            revision=revision,
+        )
 
     kwargs: dict[str, Any] = {"repo_id": repo_id, "filename": filename}
     if token is not None:
@@ -245,10 +319,6 @@ def _default_auxiliary_downloader(
     cached_path = Path(hf_hub_download(**kwargs))
     shutil.copy2(cached_path, destination_path)
     return str(destination_path)
-
-
-def _manifest_relative_file(manifest: AssetManifest, sentinel_path: str) -> PurePosixPath:
-    return PurePosixPath(sentinel_path).relative_to(PurePosixPath(manifest.local_root))
 
 
 def _bootstrap_failure(

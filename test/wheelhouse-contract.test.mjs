@@ -590,6 +590,206 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.deepEqual(result.network_calls, [])
 })
 
+test('auxiliary HF downloader falls back to direct allowlisted Hugging Face URL when hub is unavailable', () => {
+  const result = runPython(`
+import builtins, io, json, tempfile
+from pathlib import Path
+import pixal3d_extension.assets as assets
+
+class FakeResponse:
+    def __init__(self, payload):
+        self.stream = io.BytesIO(payload)
+    def __enter__(self):
+        return self
+    def __exit__(self, *_args):
+        self.stream.close()
+    def read(self, size=-1):
+        return self.stream.read(size)
+
+with tempfile.TemporaryDirectory() as tmp:
+    calls = []
+    original_import = builtins.__import__
+    original_urlopen = assets.urllib.request.urlopen
+    def fake_import(name, *args, **kwargs):
+        if name == 'huggingface_hub':
+            raise ModuleNotFoundError("No module named 'huggingface_hub'")
+        return original_import(name, *args, **kwargs)
+    def fake_urlopen(request):
+        calls.append({
+            'url': request.full_url,
+            'authorization_is_bearer': request.get_header('Authorization') == 'Bearer hf_redacted',
+            'token_in_url': 'hf_redacted' in request.full_url,
+        })
+        return FakeResponse(b'dino-config')
+    builtins.__import__ = fake_import
+    assets.urllib.request.urlopen = fake_urlopen
+    try:
+        destination = Path(tmp) / 'stage' / 'config.json'
+        downloaded = assets._default_auxiliary_downloader(
+            repo_id='camenduru/dinov3-vitl16-pretrain-lvd1689m',
+            filename='config.json',
+            destination=destination,
+            token='hf_redacted',
+        )
+    finally:
+        builtins.__import__ = original_import
+        assets.urllib.request.urlopen = original_urlopen
+    print(json.dumps({
+        'downloaded': str(downloaded),
+        'destination_exists': destination.is_file(),
+        'destination_text': destination.read_text(encoding='utf-8'),
+        'calls': calls,
+    }, sort_keys=True))
+`)
+
+  assert.equal(result.destination_exists, true)
+  assert.equal(result.destination_text, 'dino-config')
+  assert.match(result.downloaded.replaceAll('\\', '/'), /stage\/config\.json$/)
+  assert.deepEqual(result.calls, [
+    {
+      authorization_is_bearer: true,
+      token_in_url: false,
+      url: 'https://huggingface.co/camenduru/dinov3-vitl16-pretrain-lvd1689m/resolve/main/config.json',
+    },
+  ])
+})
+
+test('auxiliary HF direct fallback encodes explicit revisions in resolve URLs', () => {
+  const result = runPython(`
+import builtins, io, json, tempfile
+from pathlib import Path
+import pixal3d_extension.assets as assets
+
+class FakeResponse:
+    def __init__(self, payload):
+        self.stream = io.BytesIO(payload)
+    def __enter__(self):
+        return self
+    def __exit__(self, *_args):
+        self.stream.close()
+    def read(self, size=-1):
+        return self.stream.read(size)
+
+with tempfile.TemporaryDirectory() as tmp:
+    calls = []
+    original_import = builtins.__import__
+    original_urlopen = assets.urllib.request.urlopen
+    def fake_import(name, *args, **kwargs):
+        if name == 'huggingface_hub':
+            raise ModuleNotFoundError("No module named 'huggingface_hub'")
+        return original_import(name, *args, **kwargs)
+    def fake_urlopen(request):
+        calls.append(request.full_url)
+        return FakeResponse(b'moge')
+    builtins.__import__ = fake_import
+    assets.urllib.request.urlopen = fake_urlopen
+    try:
+        destination = Path(tmp) / 'model.pt'
+        assets._default_auxiliary_downloader(
+            repo_id='Ruicheng/moge-2-vitl',
+            filename='model.pt',
+            destination=destination,
+            revision='refs/pr/42',
+        )
+    finally:
+        builtins.__import__ = original_import
+        assets.urllib.request.urlopen = original_urlopen
+    print(json.dumps({'calls': calls, 'destination_text': destination.read_text(encoding='utf-8')}, sort_keys=True))
+`)
+
+  assert.deepEqual(result.calls, [
+    'https://huggingface.co/Ruicheng/moge-2-vitl/resolve/refs%2Fpr%2F42/model.pt',
+  ])
+  assert.equal(result.destination_text, 'moge')
+})
+
+test('auxiliary HF direct fallback rejects non-allowlisted repo and filenames before network access', () => {
+  const result = runPython(`
+import builtins, json, tempfile
+from pathlib import Path
+import pixal3d_extension.assets as assets
+
+with tempfile.TemporaryDirectory() as tmp:
+    network_calls = []
+    errors = []
+    original_import = builtins.__import__
+    original_urlopen = assets.urllib.request.urlopen
+    def fake_import(name, *args, **kwargs):
+        if name == 'huggingface_hub':
+            raise ModuleNotFoundError("No module named 'huggingface_hub'")
+        return original_import(name, *args, **kwargs)
+    def forbidden_urlopen(*_args, **_kwargs):
+        network_calls.append('network')
+        raise AssertionError('non-allowlisted HF assets must fail before network access')
+    builtins.__import__ = fake_import
+    assets.urllib.request.urlopen = forbidden_urlopen
+    try:
+        cases = [
+            {'repo_id': 'not-allowed/repo', 'filename': 'config.json'},
+            {'repo_id': 'camenduru/dinov3-vitl16-pretrain-lvd1689m', 'filename': 'not_allowlisted.bin'},
+            {'repo_id': 'https://huggingface.co/camenduru/dinov3-vitl16-pretrain-lvd1689m', 'filename': 'config.json'},
+        ]
+        for index, case in enumerate(cases):
+            try:
+                assets._default_auxiliary_downloader(
+                    repo_id=case['repo_id'],
+                    filename=case['filename'],
+                    destination=Path(tmp) / f'case-{index}',
+                )
+            except RuntimeError as exc:
+                errors.append(str(exc))
+    finally:
+        builtins.__import__ = original_import
+        assets.urllib.request.urlopen = original_urlopen
+    print(json.dumps({'errors': errors, 'network_calls': network_calls}, sort_keys=True))
+`)
+
+  assert.equal(result.errors.length, 3)
+  assert.ok(result.errors.every((error) => /allowlisted HF auxiliary asset/.test(error)))
+  assert.deepEqual(result.network_calls, [])
+})
+
+test('auxiliary URL downloader allows only the exact NAF release URL', () => {
+  const result = runPython(`
+import io, json, tempfile
+from pathlib import Path
+import pixal3d_extension.assets as assets
+
+class FakeResponse:
+    def __init__(self, payload):
+        self.stream = io.BytesIO(payload)
+    def __enter__(self):
+        return self
+    def __exit__(self, *_args):
+        self.stream.close()
+    def read(self, size=-1):
+        return self.stream.read(size)
+
+with tempfile.TemporaryDirectory() as tmp:
+    calls = []
+    original_urlopen = assets.urllib.request.urlopen
+    def fake_urlopen(request):
+        calls.append(request.full_url)
+        return FakeResponse(b'naf')
+    assets.urllib.request.urlopen = fake_urlopen
+    try:
+        destination = Path(tmp) / 'naf_release.pth'
+        assets._default_auxiliary_downloader(
+            repo_id='https://github.com/valeoai/NAF/releases/download/model/naf_release.pth',
+            filename='naf_release.pth',
+            destination=destination,
+            source_kind='url',
+            url='https://github.com/valeoai/NAF/releases/download/model/naf_release.pth',
+        )
+    finally:
+        assets.urllib.request.urlopen = original_urlopen
+    print(json.dumps({'calls': calls, 'destination_text': destination.read_text(encoding='utf-8')}, sort_keys=True))
+`)
+
+  assert.deepEqual(result.calls, ['https://github.com/valeoai/NAF/releases/download/model/naf_release.pth'])
+  assert.equal(result.destination_text, 'naf')
+})
+
 test('pipeline patch writes local DINO/RMBG paths and non-absolute metadata when auxiliary sentinels are complete', () => {
   const result = runPython(`
 import json, tempfile
