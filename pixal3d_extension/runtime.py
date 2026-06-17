@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib
 import importlib.machinery
 import faulthandler
-import math
 import os
 import random
 import sys
@@ -337,16 +336,6 @@ def _resolve_glb(output_dir: Path, pipeline_result: Any) -> Path | None:
         return candidate if candidate.is_file() and is_contained_path(output_dir, candidate) else None
     matches = sorted(output_dir.glob("*.glb"))
     return matches[0] if matches else None
-
-
-def _apply_final_glb_yaw_rotation(glb_path: Path) -> Path:
-    import trimesh
-
-    scene = trimesh.load(glb_path, file_type="glb", force="scene", process=False)
-    rotation = trimesh.transformations.rotation_matrix(math.pi, [0.0, 1.0, 0.0])
-    scene.apply_transform(rotation)
-    glb_path.write_bytes(scene.export(file_type="glb"))
-    return glb_path
 
 
 def _resolve_job_paths(job: dict) -> tuple[Path, Path] | dict:
@@ -740,14 +729,6 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
     glb_path = _resolve_glb(output_dir, result)
     if glb_path is None:
         return _failure("output_missing", "Pixal3D runtime did not produce a GLB output")
-
-    try:
-        _diagnostic_checkpoint("final_glb_yaw_rotation:start")
-        glb_path = _apply_final_glb_yaw_rotation(glb_path)
-        _diagnostic_checkpoint("final_glb_yaw_rotation:done")
-    except Exception as exc:
-        _diagnostic_checkpoint(f"final_glb_yaw_rotation:exception:{type(exc).__name__}")
-        return _failure("runtime_failed", f"failed to rotate final GLB output: {exc}")
 
     pbr = result.get("pbr", {}) if isinstance(result, dict) else {}
     return {

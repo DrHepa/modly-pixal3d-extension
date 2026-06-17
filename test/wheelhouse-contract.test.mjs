@@ -2951,70 +2951,10 @@ test('wheelhouse docs separate end-user release assets from maintainer build and
   }
 })
 
-test('runtime rotates the final exported GLB 180 degrees around glTF Y-up axis', () => {
-  const result = runPython(`
-import json, math, tempfile
-from pathlib import Path
-import sys, types
-
-captured = {}
-
-class FakeScene:
-    def apply_transform(self, matrix):
-        captured['matrix'] = matrix
-    def export(self, file_type):
-        captured['export_file_type'] = file_type
-        return b'rotated-glb-bytes'
-
-fake_trimesh = types.ModuleType('trimesh')
-fake_trimesh.load = lambda path, file_type, force, process: FakeScene()
-fake_trimesh.transformations = types.SimpleNamespace(
-    rotation_matrix=lambda angle, axis: {'angle': angle, 'axis': list(axis)}
-)
-sys.modules['trimesh'] = fake_trimesh
-
-from pixal3d_extension.runtime import _apply_final_glb_yaw_rotation
-
-with tempfile.TemporaryDirectory() as tmp:
-    glb_path = Path(tmp) / 'mesh.glb'
-    glb_path.write_bytes(b'raw-glb-bytes')
-    _apply_final_glb_yaw_rotation(glb_path)
-    print(json.dumps({
-        'angle_is_pi': abs(captured['matrix']['angle'] - math.pi) < 1e-12,
-        'axis': captured['matrix']['axis'],
-        'bytes': glb_path.read_bytes().decode('utf8'),
-        'export_file_type': captured['export_file_type'],
-    }, sort_keys=True))
-`)
-
-  assert.equal(result.angle_is_pi, true)
-  assert.deepEqual(result.axis, [0, 1, 0])
-  assert.equal(result.bytes, 'rotated-glb-bytes')
-  assert.equal(result.export_file_type, 'glb')
-})
-
-test('run_job returns the rotated final GLB path instead of raw pipeline output orientation', () => {
+test('run_job returns the raw pipeline GLB without a fixed final yaw rewrite', () => {
   const result = runPython(`
 import json, tempfile
 from pathlib import Path
-import sys, types
-
-captured = {'rotations': 0}
-
-class FakeScene:
-    def apply_transform(self, matrix):
-        captured['rotations'] += 1
-        captured['matrix'] = matrix
-    def export(self, file_type):
-        captured['export_file_type'] = file_type
-        return b'rotated-final-glb'
-
-fake_trimesh = types.ModuleType('trimesh')
-fake_trimesh.load = lambda path, file_type, force, process: FakeScene()
-fake_trimesh.transformations = types.SimpleNamespace(
-    rotation_matrix=lambda angle, axis: {'angle': angle, 'axis': list(axis)}
-)
-sys.modules['trimesh'] = fake_trimesh
 
 from pixal3d_extension.runtime import run_job
 
@@ -3045,17 +2985,13 @@ with tempfile.TemporaryDirectory() as tmp:
         'glb_name': glb_path.name,
         'pbr': result['output']['pbr'],
         'bytes': glb_path.read_bytes().decode('utf8'),
-        'rotations': captured['rotations'],
-        'axis': captured['matrix']['axis'],
     }, sort_keys=True))
 `)
 
   assert.equal(result.status, 'completed')
   assert.equal(result.glb_name, 'pipeline-output.glb')
   assert.deepEqual(result.pbr, { baseColor: 'kept' })
-  assert.equal(result.bytes, 'rotated-final-glb')
-  assert.equal(result.rotations, 1)
-  assert.deepEqual(result.axis, [0, 1, 0])
+  assert.equal(result.bytes, 'raw-final-glb')
 })
 
 test('runtime emits crash diagnostic checkpoints to stderr during generation', () => {
@@ -3098,5 +3034,5 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.match(result.stderr, /\[Pixal3D Diagnostic\] run_job:start/)
   assert.match(result.stderr, /\[Pixal3D Diagnostic\] pipeline_factory:create:start/)
   assert.match(result.stderr, /\[Pixal3D Diagnostic\] pipeline_factory:call:done/)
-  assert.match(result.stderr, /\[Pixal3D Diagnostic\] final_glb_yaw_rotation:done/)
+  assert.doesNotMatch(result.stderr, /final_glb_yaw_rotation/)
 })

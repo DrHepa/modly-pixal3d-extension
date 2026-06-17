@@ -69,7 +69,7 @@ Practical implications:
 - that input-dependent tilt is expected Pixal3D behavior, not a Modly orientation bug;
 - do not apply a fixed post-export pitch correction to all Pixal3D outputs, because it can break already-upright generations.
 
-The extension preserves Pixal3D's input-dependent tilt/pitch behavior, but it now rewrites the final exported GLB with a fixed 180 degree yaw around glTF's Y-up axis. That correction is applied to the asset itself so Modly UI and downstream consumers receive the same front-facing orientation.
+The extension preserves Pixal3D's exported GLB orientation. Do not apply a fixed post-export yaw correction to all Pixal3D outputs; front/back orientation can depend on upstream generation behavior and should be validated with representative inputs instead of rewritten unconditionally.
 
 ## Remaining runtime requirement
 
@@ -102,4 +102,4 @@ This is **not** a full offline-generation guarantee yet. Local DINO/RMBG/MoGe/NA
 - Primary Modly packaged-app lane: Windows `x64` / Python `cp311` / CUDA `12.4`.
 - Setup contract: release-backed wheelhouse with checksum verification and native import probes.
 - Runtime status: Windows `x64` / Python `cp311` / CUDA `12.4` has been validated through a complete Modly Low VRAM 1024 generation, including native NATTEN sampling, GLB extraction, final GLB save, and Modly workspace fetch.
-- Runtime note: use Low VRAM mode on 8GB-class GPUs; generation quality and orientation depend on the input view, with a final 180 degree GLB yaw correction applied for Modly/downstream front-facing consumption.
+- Runtime note: use Low VRAM mode on 8GB-class GPUs; generation quality and orientation depend on the input view and upstream Pixal3D export behavior. The extension does not rewrite the final GLB orientation with a fixed yaw transform.
