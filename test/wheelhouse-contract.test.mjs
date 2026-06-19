@@ -1534,6 +1534,184 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.ok(!result.aarch64[1].includes('torch==2.6.0'))
 })
 
+test('runtime failure helper returns structured diagnostics with restricted environment context', () => {
+  const result = runPython(`
+import json, os, tempfile
+from pathlib import Path
+from pixal3d_extension import runtime
+
+allowed = {'TEMP', 'TMP', 'TMPDIR', 'HF_HOME', 'HF_HUB_CACHE', 'TRANSFORMERS_CACHE', 'TORCH_HOME', 'XDG_CACHE_HOME'}
+for key in [*allowed, 'MODLY_TOKEN', 'HF_TOKEN', 'AWS_SECRET_ACCESS_KEY']:
+    os.environ.pop(key, None)
+os.environ['TEMP'] = 'C:\\\\Temp'
+os.environ['HF_HOME'] = 'I:\\\\hf-cache'
+os.environ['MODLY_TOKEN'] = 'secret-token'
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    image = root / 'input.png'
+    output = root / 'outputs'
+    image.write_bytes(b'image')
+    output.mkdir()
+    try:
+        raise OSError("[WinError 3] Impossibile trovare il percorso specificato: 'I:\\\\'")
+    except OSError as exc:
+        failure = runtime._runtime_failure(
+            exc,
+            'import_inference',
+            {'model_source': 'local-model-source'},
+            image,
+            output,
+        )
+    context = failure['runtime_context']
+    print(json.dumps({
+        'status': failure['status'],
+        'code': failure['code'],
+        'message': failure['message'],
+        'generation_allowed': failure['generation_allowed'],
+        'checkpoint': failure['checkpoint'],
+        'exception_type': failure['exception_type'],
+        'traceback_contains_oserror': 'OSError' in failure['traceback'],
+        'traceback_contains_path': 'I:' in failure['traceback'],
+        'runtime_context': context,
+        'env_keys': sorted(context['env'].keys()),
+        'has_secret_key': 'MODLY_TOKEN' in context['env'] or 'HF_TOKEN' in context['env'] or 'AWS_SECRET_ACCESS_KEY' in context['env'],
+        'context_has_secret_top_level': 'MODLY_TOKEN' in context or 'HF_TOKEN' in context or 'AWS_SECRET_ACCESS_KEY' in context,
+        'path_hint': failure.get('path_hint'),
+    }, sort_keys=True))
+`)
+
+  assert.equal(result.status, 'failed')
+  assert.equal(result.code, 'runtime_failed')
+  assert.equal(result.generation_allowed, false)
+  assert.match(result.message, /\[WinError 3\]/)
+  assert.equal(result.checkpoint, 'import_inference')
+  assert.equal(result.exception_type, 'OSError')
+  assert.equal(result.traceback_contains_oserror, true)
+  assert.equal(result.traceback_contains_path, true)
+  assert.equal(result.runtime_context.model_source, 'local-model-source')
+  assert.match(result.runtime_context.input_image.replaceAll('\\', '/'), /input\.png$/)
+  assert.match(result.runtime_context.output_dir.replaceAll('\\', '/'), /outputs$/)
+  assert.match(result.runtime_context.cwd.replaceAll('\\', '/'), /modly-pixal3d-extension$/)
+  assert.deepEqual(result.env_keys, ['HF_HOME', 'TEMP'])
+  assert.deepEqual(result.runtime_context.env, { HF_HOME: 'I:\\hf-cache', TEMP: 'C:\\Temp' })
+  assert.equal(result.has_secret_key, false)
+  assert.equal(result.context_has_secret_top_level, false)
+  assert.deepEqual(result.path_hint, {
+    code: 'missing_windows_path',
+    message: 'A configured runtime/cache/model/input/output path appears to reference a missing Windows drive or root.',
+    path: 'I:\\',
+  })
+})
+
+test('run_job reports runtime checkpoint diagnostics when upstream inference import fails', () => {
+  const result = runPython(`
+import json, os, sys, tempfile, types
+from pathlib import Path
+from pixal3d_extension.assets import AUXILIARY_ASSETS, PRIMARY_ASSET
+from pixal3d_extension.paths import resolve_modly_layout, resolve_storage_path
+from pixal3d_extension.pipeline_patch import patch_pipeline
+from pixal3d_extension import runtime
+
+for key in ['TEMP', 'TMP', 'TMPDIR', 'HF_HOME', 'HF_HUB_CACHE', 'TRANSFORMERS_CACHE', 'TORCH_HOME', 'XDG_CACHE_HOME', 'MODLY_TOKEN']:
+    os.environ.pop(key, None)
+os.environ['HF_HUB_CACHE'] = 'I:\\\\hf-cache'
+os.environ['MODLY_TOKEN'] = 'secret-token'
+
+PIPELINE = {
+    'args': {
+        'image_cond_model': {'args': {'model_name': 'facebook/dinov3-vitl16-pretrain-lvd1689m'}},
+        'rembg_model': {'args': {'model_name': 'briaai/RMBG-2.0'}},
+    }
+}
+
+with tempfile.TemporaryDirectory() as tmp:
+    ext_dir = Path(tmp) / 'Modly' / 'data' / 'extensions' / 'pixal3d'
+    ext_dir.mkdir(parents=True)
+    layout = resolve_modly_layout(ext_dir)
+    for sentinel in PRIMARY_ASSET.sentinel_paths:
+        path = resolve_storage_path(layout, sentinel)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(PIPELINE) if sentinel.endswith('pipeline.json') else 'primary', encoding='utf-8')
+    for manifest in AUXILIARY_ASSETS.values():
+        for sentinel in manifest.sentinel_paths:
+            path = resolve_storage_path(layout, sentinel)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('aux', encoding='utf-8')
+    patch_pipeline(ext_dir, auxiliary_mode='local', network_available=False)
+
+    image = ext_dir / 'input.png'
+    image.write_bytes(b'image')
+    (ext_dir / 'outputs').mkdir()
+
+    fake_hubconf = types.ModuleType('hubconf')
+    class FakeNAF:
+        def to(self, _device):
+            return self
+        def load_state_dict(self, _state_dict):
+            return None
+    fake_hubconf.NAF = FakeNAF
+    fake_hubconf.naf = lambda pretrained=True, device='cpu': FakeNAF().to(device)
+    sys.modules['hubconf'] = fake_hubconf
+
+    runtime._prepare_runtime_compat = lambda: None
+    runtime._install_windows_native_module_aliases = lambda: None
+    runtime._install_natten_fallback = lambda: None
+    runtime._silence_flex_gemm_autotuners = lambda: None
+
+    original_import_module = runtime.importlib.import_module
+    def failing_import(name):
+        if name == 'hubconf':
+            return fake_hubconf
+        if name == 'inference':
+            raise OSError("[WinError 3] Cannot find path: 'I:\\\\'")
+        return original_import_module(name)
+    runtime.importlib.import_module = failing_import
+    try:
+        result = runtime.run_job({
+            'workspace_root': str(ext_dir),
+            'input_image': 'input.png',
+            'output_dir': 'outputs',
+            'readiness': {'generation_allowed': True, 'code': 'ready'},
+            'auxiliary_mode': 'local',
+            'network_available': False,
+            'model_source': str(resolve_storage_path(layout, 'models/pixal3d/generate')),
+            'params': {'seed': 1},
+        })
+    finally:
+        runtime.importlib.import_module = original_import_module
+
+    print(json.dumps({
+        'status': result['status'],
+        'code': result['code'],
+        'message': result['message'],
+        'checkpoint': result.get('checkpoint'),
+        'exception_type': result.get('exception_type'),
+        'traceback_contains_import_module': 'failing_import' in result.get('traceback', ''),
+        'traceback_contains_oserror': 'OSError' in result.get('traceback', ''),
+        'context': result.get('runtime_context'),
+        'path_hint': result.get('path_hint'),
+    }, sort_keys=True))
+`)
+
+  assert.equal(result.status, 'failed')
+  assert.equal(result.code, 'runtime_failed')
+  assert.match(result.message, /\[WinError 3\]/)
+  assert.equal(result.checkpoint, 'import_inference')
+  assert.equal(result.exception_type, 'OSError')
+  assert.equal(result.traceback_contains_import_module, true)
+  assert.equal(result.traceback_contains_oserror, true)
+  assert.match(result.context.input_image.replaceAll('\\', '/'), /input\.png$/)
+  assert.match(result.context.output_dir.replaceAll('\\', '/'), /outputs$/)
+  assert.match(result.context.model_source.replaceAll('\\', '/'), /models\/pixal3d\/generate$/)
+  assert.deepEqual(Object.keys(result.context.env), ['HF_HUB_CACHE'])
+  assert.equal(result.context.env.HF_HUB_CACHE, 'I:\\hf-cache')
+  assert.deepEqual(result.path_hint, {
+    code: 'missing_windows_path',
+    message: 'A configured runtime/cache/model/input/output path appears to reference a missing Windows drive or root.',
+    path: 'I:\\',
+  })
+})
+
 test('runtime suppresses upstream FlexGEMM autotuner verbose without disabling cache', () => {
   const runtime = readFileSync(join(repoRoot, 'pixal3d_extension', 'runtime.py'), 'utf8')
   assert.match(runtime, /def _silence_flex_gemm_autotuners\(\)/)

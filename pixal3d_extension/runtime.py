@@ -5,8 +5,10 @@ import importlib.machinery
 import faulthandler
 import os
 import random
+import re
 import sys
 import time
+import traceback
 import types
 import uuid
 from pathlib import Path
@@ -309,6 +311,81 @@ def _silence_flex_gemm_autotuners() -> None:
 
 def _failure(code: str, message: str, **extra: Any) -> dict:
     return {"status": "failed", "code": code, "message": message, "generation_allowed": False, **extra}
+
+
+_RUNTIME_ENV_KEYS = (
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "HF_HOME",
+    "HF_HUB_CACHE",
+    "TRANSFORMERS_CACHE",
+    "TORCH_HOME",
+    "XDG_CACHE_HOME",
+)
+_WINDOWS_DRIVE_PATH_RE = re.compile(r"""['\"](?P<path>[A-Za-z]:(?:[\\/][^'\"]*)?)['\"]""")
+_WINDOWS_DRIVE_PATH_FALLBACK_RE = re.compile(r"(?P<path>[A-Za-z]:[\\/]\S*)")
+
+
+def _selected_runtime_env() -> dict:
+    return {key: os.environ[key] for key in _RUNTIME_ENV_KEYS if key in os.environ}
+
+
+def _runtime_context(job: dict, image_path: Path, output_dir: Path) -> dict:
+    return {
+        "cwd": os.getcwd(),
+        "env": _selected_runtime_env(),
+        "input_image": str(image_path),
+        "output_dir": str(output_dir),
+        "model_source": str(job.get("model_source") or PIXAL3D_MODEL_SOURCE),
+    }
+
+
+def _looks_like_windows_missing_path(exc: Exception) -> bool:
+    message = str(exc).lower()
+    if "winerror 3" in message:
+        return True
+    if not isinstance(exc, OSError):
+        return False
+    return any(
+        marker in message
+        for marker in (
+            "cannot find the path",
+            "cannot find path",
+            "system cannot find the path specified",
+            "impossibile trovare il percorso",
+            "non riesce a trovare il percorso",
+        )
+    )
+
+
+def _extract_windows_missing_path(exc: Exception) -> str | None:
+    if not _looks_like_windows_missing_path(exc):
+        return None
+    message = str(exc)
+    match = _WINDOWS_DRIVE_PATH_RE.search(message) or _WINDOWS_DRIVE_PATH_FALLBACK_RE.search(message)
+    if match is None:
+        return None
+    return match.group("path").rstrip(".,;)")
+
+
+def _runtime_failure(exc: Exception, checkpoint: str, job: dict, image_path: Path, output_dir: Path) -> dict:
+    result = _failure(
+        "runtime_failed",
+        str(exc),
+        checkpoint=checkpoint,
+        exception_type=type(exc).__name__,
+        traceback="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+        runtime_context=_runtime_context(job, image_path, output_dir),
+    )
+    failed_path = _extract_windows_missing_path(exc)
+    if failed_path is not None:
+        result["path_hint"] = {
+            "code": "missing_windows_path",
+            "message": "A configured runtime/cache/model/input/output path appears to reference a missing Windows drive or root.",
+            "path": failed_path,
+        }
+    return result
 
 
 def _parse_low_vram(value: Any, default: bool = True) -> bool:
@@ -666,14 +743,18 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
     if preflight_error is not None:
         return preflight_error
 
+    checkpoint = "runtime_block"
     try:
+        checkpoint = "preflight_ok"
         _diagnostic_checkpoint("run_job:preflight:ok")
         params = job.get("params") or {}
         parsed_low_vram = _parse_low_vram(params.get("low_vram"), default=True)
         if pipeline_factory is not None:
+            checkpoint = "pipeline_factory_create"
             _diagnostic_checkpoint("pipeline_factory:create:start")
             pipeline = pipeline_factory(job.get("model_source") or PIXAL3D_MODEL_SOURCE)
             _diagnostic_checkpoint("pipeline_factory:create:done")
+            checkpoint = "pipeline_factory_call"
             _diagnostic_checkpoint("pipeline_factory:call:start")
             result = pipeline(
                 image_path=str(image_path),
@@ -685,31 +766,39 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
             )
             _diagnostic_checkpoint("pipeline_factory:call:done")
         else:
+            checkpoint = "runtime_compat"
             _diagnostic_checkpoint("runtime_compat:start")
             _prepare_runtime_compat()
             _diagnostic_checkpoint("runtime_compat:done")
+            checkpoint = "windows_aliases"
             _diagnostic_checkpoint("windows_aliases:start")
             _install_windows_native_module_aliases()
             _diagnostic_checkpoint("windows_aliases:done")
+            checkpoint = "natten"
             _diagnostic_checkpoint("natten:start")
             _install_natten_fallback()
             _diagnostic_checkpoint("natten:done")
+            checkpoint = "naf_loader_patch"
             _diagnostic_checkpoint("naf_loader_patch:start")
             _patch_hubconf_naf_loader(auxiliary_source)
             _diagnostic_checkpoint("naf_loader_patch:done")
+            checkpoint = "import_inference"
             _diagnostic_checkpoint("import_inference:start")
             inference_module = importlib.import_module("inference")
             _patch_inference_auxiliary_sources(inference_module, auxiliary_source)
             run_inference = inference_module.run_inference
             _diagnostic_checkpoint("import_inference:done")
 
+            checkpoint = "flex_gemm_silence"
             _silence_flex_gemm_autotuners()
             _diagnostic_checkpoint("flex_gemm_silence:done")
 
+            checkpoint = "prepare_inference_args"
             seed = int(params.get("seed", -1))
             if seed == -1:
                 seed = random.randint(0, 2**32 - 1)
             glb_path = output_dir / f"{int(time.time())}_{uuid.uuid4().hex[:8]}_pixal3d.glb"
+            checkpoint = "run_inference"
             _diagnostic_checkpoint("run_inference:start")
             run_inference(
                 image_path=str(image_path),
@@ -724,7 +813,7 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
             result = {"glb_path": str(glb_path), "pbr": {}}
     except Exception as exc:  # pragma: no cover - contract retained for real runtime failures.
         _diagnostic_checkpoint(f"runtime_exception:{type(exc).__name__}")
-        return _failure("runtime_failed", str(exc))
+        return _runtime_failure(exc, checkpoint, job, image_path, output_dir)
 
     glb_path = _resolve_glb(output_dir, result)
     if glb_path is None:
