@@ -1780,6 +1780,292 @@ print(json.dumps({
   })
 })
 
+test('texture_size schema is UI-compatible select with safe default', () => {
+  const manifest = JSON.parse(readFileSync(join(repoRoot, 'manifest.json'), 'utf8'))
+  const manifestParam = manifest.nodes[0].params_schema.find((param) => param.id === 'texture_size')
+  assert.ok(manifestParam)
+  assert.equal(manifestParam.label, 'Texture Size')
+  assert.equal(manifestParam.type, 'select')
+  assert.equal(manifestParam.default, 1024)
+  assert.deepEqual(manifestParam.options, [
+    { value: 1024, label: '1024' },
+    { value: 2048, label: '2048' },
+  ])
+  assert.match(manifestParam.tooltip, /final GLB texture atlas size/i)
+  assert.match(manifestParam.tooltip, /1024.*reduces VRAM/i)
+  assert.match(manifestParam.tooltip, /2048.*higher quality.*higher VRAM/i)
+
+  const generatorSchema = runPython(`
+import json
+from generator import Pixal3DGenerator
+schema = Pixal3DGenerator.params_schema()
+texture_size = next(param for param in schema if param['id'] == 'texture_size')
+print(json.dumps(texture_size, sort_keys=True))
+`)
+  assert.equal(generatorSchema.label, 'Texture Size')
+  assert.equal(generatorSchema.type, 'select')
+  assert.equal(generatorSchema.default, 1024)
+  assert.deepEqual(generatorSchema.options, [
+    { value: 1024, label: '1024' },
+    { value: 2048, label: '2048' },
+  ])
+  assert.match(generatorSchema.tooltip, /final GLB texture atlas size/i)
+  assert.match(generatorSchema.tooltip, /1024.*reduces VRAM/i)
+  assert.match(generatorSchema.tooltip, /2048.*higher quality.*higher VRAM/i)
+})
+
+test('texture_size runtime parser scopes env override and passes safe value through pipeline factory', () => {
+  const result = runPython(`
+import json, os, tempfile
+from pathlib import Path
+from pixal3d_extension import runtime
+from pixal3d_extension.runtime import PIXAL3D_TEXTURE_SIZE_ENV, _parse_texture_size, _scoped_texture_size_env
+
+parsed = {
+    'default_none': _parse_texture_size(None),
+    'string_1024': _parse_texture_size('1024'),
+    'string_2048_padded': _parse_texture_size(' 2048 '),
+    'int_2048': _parse_texture_size(2048),
+    'invalid_string': _parse_texture_size('4096'),
+    'invalid_int': _parse_texture_size(4096),
+    'bool_true': _parse_texture_size(True),
+}
+
+previous = os.environ.get(PIXAL3D_TEXTURE_SIZE_ENV)
+try:
+    os.environ.pop(PIXAL3D_TEXTURE_SIZE_ENV, None)
+    with _scoped_texture_size_env(2048):
+        absent_during = os.environ.get(PIXAL3D_TEXTURE_SIZE_ENV)
+    absent_after = PIXAL3D_TEXTURE_SIZE_ENV in os.environ
+
+    os.environ[PIXAL3D_TEXTURE_SIZE_ENV] = '2048'
+    with _scoped_texture_size_env(1024):
+        existing_during = os.environ.get(PIXAL3D_TEXTURE_SIZE_ENV)
+    existing_after = os.environ.get(PIXAL3D_TEXTURE_SIZE_ENV)
+finally:
+    if previous is None:
+        os.environ.pop(PIXAL3D_TEXTURE_SIZE_ENV, None)
+    else:
+        os.environ[PIXAL3D_TEXTURE_SIZE_ENV] = previous
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    image = root / 'input.png'
+    image.write_bytes(b'image')
+    output = root / 'outputs'
+    output.mkdir()
+    captured = {}
+    def fake_pipeline(_source):
+        def pipeline(**kwargs):
+            captured.update(kwargs)
+            glb_path = Path(kwargs['output_dir']) / 'texture-size.glb'
+            glb_path.write_bytes(b'raw')
+            return {'glb_path': str(glb_path)}
+        return pipeline
+    result = runtime.run_job({
+        'input_image': str(image),
+        'output_dir': str(output),
+        'readiness': {'generation_allowed': True, 'code': 'ready'},
+        'params': {'texture_size': '4096'},
+    }, pipeline_factory=fake_pipeline)
+
+print(json.dumps({
+    'parsed': parsed,
+    'absent_during': absent_during,
+    'absent_after': absent_after,
+    'existing_during': existing_during,
+    'existing_after': existing_after,
+    'status': result['status'],
+    'pipeline_texture_size': captured.get('texture_size'),
+    'params_texture_size': result['params']['texture_size'],
+}, sort_keys=True))
+`)
+
+  assert.deepEqual(result.parsed, {
+    bool_true: 1024,
+    default_none: 1024,
+    int_2048: 2048,
+    invalid_int: 1024,
+    invalid_string: 1024,
+    string_1024: 1024,
+    string_2048_padded: 2048,
+  })
+  assert.equal(result.absent_during, '2048')
+  assert.equal(result.absent_after, false)
+  assert.equal(result.existing_during, '1024')
+  assert.equal(result.existing_after, '2048')
+  assert.equal(result.status, 'completed')
+  assert.equal(result.pipeline_texture_size, 1024)
+  assert.equal(result.params_texture_size, 1024)
+})
+
+test('runtime scopes PIXAL3D_TEXTURE_SIZE around upstream run_inference without unsupported kwargs', () => {
+  const result = runPython(`
+import json, os, sys, tempfile, types
+from pathlib import Path
+from pixal3d_extension import runtime
+from pixal3d_extension.runtime import PIXAL3D_TEXTURE_SIZE_ENV
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    image = root / 'input.png'
+    image.write_bytes(b'image')
+    output = root / 'outputs'
+    output.mkdir()
+    captured = {}
+
+    fake_inference = types.ModuleType('inference')
+    def run_inference(*, image_path, output_path, seed, model_path, manual_fov, low_vram, resolution):
+        del image_path, seed, model_path, manual_fov, low_vram, resolution
+        captured['env_during'] = os.environ.get(PIXAL3D_TEXTURE_SIZE_ENV)
+        Path(output_path).write_bytes(b'raw')
+    fake_inference.run_inference = run_inference
+    fake_inference.IMAGE_COND_CONFIGS = {}
+    fake_inference.load_moge_model = lambda *args, **kwargs: None
+    sys.modules['inference'] = fake_inference
+
+    runtime._prepare_runtime_compat = lambda: None
+    runtime._install_windows_native_module_aliases = lambda: None
+    runtime._install_natten_fallback = lambda: None
+    runtime._silence_flex_gemm_autotuners = lambda: None
+
+    previous = os.environ.get(PIXAL3D_TEXTURE_SIZE_ENV)
+    try:
+        os.environ[PIXAL3D_TEXTURE_SIZE_ENV] = '2048'
+        result = runtime.run_job({
+            'input_image': str(image),
+            'output_dir': str(output),
+            'readiness': {'generation_allowed': True, 'code': 'ready'},
+            'params': {'texture_size': '1024'},
+        })
+        env_after = os.environ.get(PIXAL3D_TEXTURE_SIZE_ENV)
+    finally:
+        if previous is None:
+            os.environ.pop(PIXAL3D_TEXTURE_SIZE_ENV, None)
+        else:
+            os.environ[PIXAL3D_TEXTURE_SIZE_ENV] = previous
+
+print(json.dumps({
+    'status': result['status'],
+    'env_during': captured['env_during'],
+    'env_after': env_after,
+    'params_texture_size': result['params']['texture_size'],
+}, sort_keys=True))
+`)
+
+  assert.equal(result.status, 'completed')
+  assert.equal(result.env_during, '1024')
+  assert.equal(result.env_after, '2048')
+  assert.equal(result.params_texture_size, 1024)
+})
+
+test('o_voxel compat postprocess caps texture_size from PIXAL3D_TEXTURE_SIZE', () => {
+  const result = runPython(`
+import importlib, json, os, sys, types
+
+for name in [
+    'pixal3d_extension.o_voxel_compat.postprocess',
+    'cv2',
+    'cumesh',
+    'nvdiffrast',
+    'nvdiffrast.torch',
+    'torch',
+    'trimesh',
+    'trimesh.visual',
+    'trimesh.visual.material',
+    'flex_gemm',
+    'flex_gemm.ops',
+    'flex_gemm.ops.grid_sample',
+    'PIL',
+    'PIL.Image',
+    'tqdm',
+]:
+    sys.modules.pop(name, None)
+
+def module(name):
+    created = types.ModuleType(name)
+    sys.modules[name] = created
+    return created
+
+module('cv2')
+module('cumesh')
+
+fake_numpy = types.ModuleType('numpy')
+fake_numpy.ndarray = object
+fake_numpy.radians = lambda value: value * 3.141592653589793 / 180.0
+sys.modules['numpy'] = fake_numpy
+
+fake_nvdiffrast = module('nvdiffrast')
+fake_dr = module('nvdiffrast.torch')
+fake_nvdiffrast.torch = fake_dr
+
+fake_torch = module('torch')
+fake_torch.Tensor = object
+
+fake_trimesh = module('trimesh')
+fake_trimesh.__path__ = []
+fake_visual = module('trimesh.visual')
+fake_material = module('trimesh.visual.material')
+fake_visual.material = fake_material
+fake_trimesh.visual = fake_visual
+
+fake_flex = module('flex_gemm')
+fake_flex.__path__ = []
+fake_ops = module('flex_gemm.ops')
+fake_ops.__path__ = []
+fake_grid = module('flex_gemm.ops.grid_sample')
+fake_grid.grid_sample_3d = lambda *args, **kwargs: None
+fake_ops.grid_sample = fake_grid
+fake_flex.ops = fake_ops
+
+fake_pil = module('PIL')
+fake_pil.__path__ = []
+fake_image = module('PIL.Image')
+fake_pil.Image = fake_image
+
+fake_tqdm = module('tqdm')
+fake_tqdm.tqdm = lambda *args, **kwargs: None
+
+postprocess = importlib.import_module('pixal3d_extension.o_voxel_compat.postprocess')
+env_key = postprocess.PIXAL3D_TEXTURE_SIZE_ENV
+previous = os.environ.get(env_key)
+try:
+    os.environ.pop(env_key, None)
+    no_override_2048 = postprocess._effective_texture_size(2048)
+    no_override_4096 = postprocess._effective_texture_size(4096)
+    os.environ[env_key] = '1024'
+    env_1024_caps_4096 = postprocess._effective_texture_size(4096)
+    os.environ[env_key] = '2048'
+    env_2048_caps_4096 = postprocess._effective_texture_size(4096)
+    env_2048_preserves_lower_caller = postprocess._effective_texture_size(1024)
+    os.environ[env_key] = '4096'
+    invalid_env = postprocess._effective_texture_size(2048)
+finally:
+    if previous is None:
+        os.environ.pop(env_key, None)
+    else:
+        os.environ[env_key] = previous
+
+print(json.dumps({
+    'no_override_2048': no_override_2048,
+    'no_override_4096': no_override_4096,
+    'env_1024_caps_4096': env_1024_caps_4096,
+    'env_2048_caps_4096': env_2048_caps_4096,
+    'env_2048_preserves_lower_caller': env_2048_preserves_lower_caller,
+    'invalid_env': invalid_env,
+}, sort_keys=True))
+`)
+
+  assert.deepEqual(result, {
+    env_1024_caps_4096: 1024,
+    env_2048_caps_4096: 2048,
+    env_2048_preserves_lower_caller: 1024,
+    invalid_env: 1024,
+    no_override_2048: 2048,
+    no_override_4096: 2048,
+  })
+})
+
 test('linux x64 cp312 cuda124 wheelhouse workflow is documented and manifest-backed', () => {
   const manifest = JSON.parse(readFileSync(join(repoRoot, 'wheelhouse.manifest.json'), 'utf8'))
   const workflowPath = join(repoRoot, '.github', 'workflows', 'wheelhouse-linux-x64-cp312-cuda124.yml')
@@ -3137,8 +3423,8 @@ from pathlib import Path
 from pixal3d_extension.runtime import run_job
 
 def fake_pipeline(_source):
-    def pipeline(*, image_path, output_dir, seed, resolution, low_vram, manual_fov):
-        del image_path, seed, resolution, low_vram, manual_fov
+    def pipeline(*, image_path, output_dir, seed, resolution, low_vram, texture_size, manual_fov):
+        del image_path, seed, resolution, low_vram, texture_size, manual_fov
         glb_path = Path(output_dir) / 'pipeline-output.glb'
         glb_path.write_bytes(b'raw-final-glb')
         return {'glb_path': str(glb_path), 'pbr': {'baseColor': 'kept'}}

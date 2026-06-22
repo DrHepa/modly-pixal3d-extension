@@ -75,6 +75,17 @@ class Pixal3DGenerator:
                 "tooltip": "Prefer low-VRAM mode for safer Pixal3D generation; Standard loads all models on GPU.",
             },
             {
+                "id": "texture_size",
+                "label": "Texture Size",
+                "type": "select",
+                "default": 1024,
+                "options": [
+                    {"value": 1024, "label": "1024"},
+                    {"value": 2048, "label": "2048"},
+                ],
+                "tooltip": "Final GLB texture atlas size. 1024 reduces VRAM during final texturing; 2048 is higher quality and uses higher VRAM.",
+            },
+            {
                 "id": "seed",
                 "label": "Seed",
                 "type": "int",

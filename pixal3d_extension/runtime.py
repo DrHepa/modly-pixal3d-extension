@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import importlib
 import importlib.machinery
 import faulthandler
@@ -19,6 +20,9 @@ from pixal3d_extension.paths import is_contained_path, require_contained_path
 from pixal3d_extension.pipeline_patch import patch_pipeline, validate_pipeline_patch
 
 PIXAL3D_MODEL_SOURCE = "TencentARC/Pixal3D"
+PIXAL3D_TEXTURE_SIZE_ENV = "PIXAL3D_TEXTURE_SIZE"
+SUPPORTED_TEXTURE_SIZES = (1024, 2048)
+DEFAULT_TEXTURE_SIZE = 1024
 SUPPORTED_RUNTIME_LANES = {
     "linux-aarch64-cp312-cuda124",
     "linux-x64-cp312-cuda124",
@@ -407,6 +411,38 @@ def _parse_low_vram(value: Any, default: bool = True) -> bool:
     return default
 
 
+def _parse_texture_size(value: Any, default: int = DEFAULT_TEXTURE_SIZE) -> int:
+    safe_default = default if default in SUPPORTED_TEXTURE_SIZES else DEFAULT_TEXTURE_SIZE
+    if value is None:
+        return safe_default
+    if isinstance(value, bool):
+        return safe_default
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = int(value.strip())
+        except ValueError:
+            return safe_default
+    else:
+        return safe_default
+    return parsed if parsed in SUPPORTED_TEXTURE_SIZES else safe_default
+
+
+@contextmanager
+def _scoped_texture_size_env(texture_size: Any):
+    parsed_texture_size = _parse_texture_size(texture_size)
+    previous = os.environ.get(PIXAL3D_TEXTURE_SIZE_ENV)
+    os.environ[PIXAL3D_TEXTURE_SIZE_ENV] = str(parsed_texture_size)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(PIXAL3D_TEXTURE_SIZE_ENV, None)
+        else:
+            os.environ[PIXAL3D_TEXTURE_SIZE_ENV] = previous
+
+
 def _resolve_glb(output_dir: Path, pipeline_result: Any) -> Path | None:
     if isinstance(pipeline_result, dict) and pipeline_result.get("glb_path"):
         candidate = Path(pipeline_result["glb_path"])
@@ -749,6 +785,7 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
         _diagnostic_checkpoint("run_job:preflight:ok")
         params = job.get("params") or {}
         parsed_low_vram = _parse_low_vram(params.get("low_vram"), default=True)
+        parsed_texture_size = _parse_texture_size(params.get("texture_size"), default=DEFAULT_TEXTURE_SIZE)
         if pipeline_factory is not None:
             checkpoint = "pipeline_factory_create"
             _diagnostic_checkpoint("pipeline_factory:create:start")
@@ -762,6 +799,7 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
                 seed=params.get("seed"),
                 resolution=params.get("resolution", 1024),
                 low_vram=parsed_low_vram,
+                texture_size=parsed_texture_size,
                 manual_fov=params.get("manual_fov"),
             )
             _diagnostic_checkpoint("pipeline_factory:call:done")
@@ -800,15 +838,16 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
             glb_path = output_dir / f"{int(time.time())}_{uuid.uuid4().hex[:8]}_pixal3d.glb"
             checkpoint = "run_inference"
             _diagnostic_checkpoint("run_inference:start")
-            run_inference(
-                image_path=str(image_path),
-                output_path=str(glb_path),
-                seed=seed,
-                model_path=job.get("model_source") or PIXAL3D_MODEL_SOURCE,
-                manual_fov=float(params.get("manual_fov") or -1.0),
-                low_vram=parsed_low_vram,
-                resolution=int(params.get("resolution", 1024)),
-            )
+            with _scoped_texture_size_env(parsed_texture_size):
+                run_inference(
+                    image_path=str(image_path),
+                    output_path=str(glb_path),
+                    seed=seed,
+                    model_path=job.get("model_source") or PIXAL3D_MODEL_SOURCE,
+                    manual_fov=float(params.get("manual_fov") or -1.0),
+                    low_vram=parsed_low_vram,
+                    resolution=int(params.get("resolution", 1024)),
+                )
             _diagnostic_checkpoint("run_inference:done")
             result = {"glb_path": str(glb_path), "pbr": {}}
     except Exception as exc:  # pragma: no cover - contract retained for real runtime failures.
@@ -829,6 +868,7 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
             "seed": params.get("seed"),
             "resolution": params.get("resolution", 1024),
             "low_vram": parsed_low_vram,
+            "texture_size": parsed_texture_size,
             "manual_fov": params.get("manual_fov"),
         },
     }

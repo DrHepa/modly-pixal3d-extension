@@ -1,5 +1,7 @@
 from typing import *
 
+import os
+
 import cv2
 import cumesh
 import numpy as np
@@ -10,6 +12,39 @@ import trimesh.visual
 from flex_gemm.ops.grid_sample import grid_sample_3d
 from PIL import Image
 from tqdm import tqdm
+
+
+PIXAL3D_TEXTURE_SIZE_ENV = "PIXAL3D_TEXTURE_SIZE"
+SUPPORTED_TEXTURE_SIZES = (1024, 2048)
+DEFAULT_TEXTURE_SIZE = 2048
+DEFAULT_TEXTURE_SIZE_OVERRIDE = 1024
+
+
+def _normalize_texture_size(value: Any, default: int = DEFAULT_TEXTURE_SIZE) -> int:
+    safe_default = default if default in SUPPORTED_TEXTURE_SIZES else DEFAULT_TEXTURE_SIZE
+    if value is None:
+        return safe_default
+    if isinstance(value, bool):
+        return safe_default
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = int(value.strip())
+        except ValueError:
+            return safe_default
+    else:
+        return safe_default
+    return parsed if parsed in SUPPORTED_TEXTURE_SIZES else safe_default
+
+
+def _effective_texture_size(texture_size: Any) -> int:
+    caller_texture_size = _normalize_texture_size(texture_size, default=DEFAULT_TEXTURE_SIZE)
+    requested_texture_size = os.environ.get(PIXAL3D_TEXTURE_SIZE_ENV)
+    if requested_texture_size is None:
+        return caller_texture_size
+    requested_texture_size = _normalize_texture_size(requested_texture_size, default=DEFAULT_TEXTURE_SIZE_OVERRIDE)
+    return min(caller_texture_size, requested_texture_size)
 
 
 def to_glb(
@@ -42,6 +77,8 @@ def to_glb(
     already-installed Windows native wheels for cumesh, flex_gemm, and
     nvdiffrast.
     """
+
+    texture_size = _effective_texture_size(texture_size)
 
     if isinstance(aabb, (list, tuple)):
         aabb = np.array(aabb)
