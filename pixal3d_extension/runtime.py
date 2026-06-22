@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from pixal3d_extension.assets import bootstrap_auxiliary_assets, normalize_auxiliary_source_mode, resolve_auxiliary_sources, requires_local_auxiliary
-from pixal3d_extension.paths import is_contained_path, require_contained_path
+from pixal3d_extension.paths import derive_modly_home, is_contained_path, require_contained_path
 from pixal3d_extension.pipeline_patch import patch_pipeline, validate_pipeline_patch
 
 PIXAL3D_MODEL_SOURCE = "TencentARC/Pixal3D"
@@ -451,6 +451,19 @@ def _resolve_glb(output_dir: Path, pipeline_result: Any) -> Path | None:
     return matches[0] if matches else None
 
 
+def _resolve_workspace_output_dir(workspace_root: str | Path, output_dir: str) -> Path | dict:
+    try:
+        candidate = require_contained_path(workspace_root, output_dir, allow_absolute=True)
+    except ValueError:
+        return _failure("unsafe_path", "output_dir must be contained in the workspace root")
+
+    base = Path(workspace_root)
+    allowed_roots = (base / "outputs", base / "workspace")
+    if not any(is_contained_path(allowed_root, candidate) for allowed_root in allowed_roots):
+        return _failure("unsafe_path", "output_dir must be contained in the workspace outputs or workspace root")
+    return candidate
+
+
 def _resolve_job_paths(job: dict) -> tuple[Path, Path] | dict:
     workspace_root = job.get("workspace_root")
     if not workspace_root:
@@ -465,10 +478,9 @@ def _resolve_job_paths(job: dict) -> tuple[Path, Path] | dict:
     except ValueError:
         return _failure("unsafe_path", "input_image must be contained in the workspace root")
 
-    try:
-        output_dir = require_contained_path(workspace_root, job.get("output_dir", ""), allowed_root=Path(workspace_root) / "outputs")
-    except ValueError:
-        return _failure("unsafe_path", "output_dir must be contained in the workspace outputs root")
+    output_dir = _resolve_workspace_output_dir(workspace_root, job.get("output_dir", ""))
+    if isinstance(output_dir, dict):
+        return output_dir
 
     return image_path, output_dir
 
@@ -492,6 +504,13 @@ def _job_network_available(job: dict, auxiliary_mode: str) -> bool:
 def _job_auxiliary_bootstrap_downloader(job: dict) -> Any:
     params = job.get("params") or {}
     return job.get("auxiliary_bootstrap_downloader") or params.get("auxiliary_bootstrap_downloader")
+
+
+def _job_modly_home(job: dict) -> str | Path | None:
+    return derive_modly_home(
+        model_dir=job.get("model_source"),
+        workspace_dir=job.get("workspace_root") or job.get("output_dir"),
+    ) or job.get("workspace_root")
 
 
 def _with_auxiliary_bootstrap_metadata(auxiliary_source: dict, bootstrap_result: dict | None) -> dict:
@@ -550,7 +569,7 @@ def _preflight_auxiliary_sources(job: dict) -> tuple[dict | None, dict | None]:
     except ValueError as exc:
         return _failure("invalid_auxiliary_mode", str(exc), auxiliary_mode=auxiliary_mode), None
     network_available = _job_network_available(job, normalized_auxiliary_mode)
-    workspace_root = job.get("workspace_root")
+    workspace_root = _job_modly_home(job)
 
     if not workspace_root:
         if local_required:

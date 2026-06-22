@@ -196,6 +196,138 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.deepEqual(result.errors, ['..\\escape', 'C:\\tmp\\x', '.hidden\\x'])
 })
 
+test('Modly home derivation recognizes model and workspace logical paths without hardcoded roots', () => {
+  const result = runPython(`
+import json
+from pixal3d_extension.paths import derive_modly_home, derive_modly_home_from_model_dir, derive_modly_home_from_workspace_dir
+
+def normalized(path):
+    return None if path is None else str(path).replace('\\\\', '/')
+
+print(json.dumps({
+    'win_model': normalized(derive_modly_home_from_model_dir(r'C:\\Software\\llm\\models\\pixal3d\\generate')),
+    'posix_model': normalized(derive_modly_home_from_model_dir('/opt/modly/models/pixal3d/generate')),
+    'win_workspace': normalized(derive_modly_home_from_workspace_dir(r'C:\\Software\\llm\\workspace')),
+    'win_workflows': normalized(derive_modly_home_from_workspace_dir(r'C:\\Software\\llm\\workspace\\Workflows')),
+    'posix_workspace': normalized(derive_modly_home_from_workspace_dir('/opt/modly/workspace')),
+    'posix_workflows': normalized(derive_modly_home_from_workspace_dir('/opt/modly/workspace/Workflows')),
+    'prefer_model': normalized(derive_modly_home(
+        model_dir=r'C:\\Software\\llm\\models\\pixal3d\\generate',
+        workspace_dir=r'D:\\Wrong\\workspace\\Workflows',
+    )),
+    'unknown': normalized(derive_modly_home(model_dir='TencentARC/Pixal3D', workspace_dir='/tmp/not-a-modly-path')),
+}, sort_keys=True))
+`)
+
+  assert.deepEqual(result, {
+    posix_model: '/opt/modly',
+    posix_workspace: '/opt/modly',
+    posix_workflows: '/opt/modly',
+    prefer_model: 'C:/Software/llm',
+    unknown: null,
+    win_model: 'C:/Software/llm',
+    win_workspace: 'C:/Software/llm',
+    win_workflows: 'C:/Software/llm',
+  })
+})
+
+test('Pixal3DGenerator generated jobs include workspace_root derived from model_dir', () => {
+  const result = runPython(`
+import json, tempfile
+from pathlib import Path
+from generator import Pixal3DGenerator
+from pixal3d_extension import runtime
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp) / 'Modly'
+    model_dir = root / 'models' / 'pixal3d' / 'generate'
+    model_dir.mkdir(parents=True)
+    output_dir = root / 'workspace' / 'Workflows'
+    output_dir.mkdir(parents=True)
+    captured = {}
+
+    def fake_run_job(job, *, pipeline_factory=None):
+        del pipeline_factory
+        captured['job'] = dict(job)
+        captured['input_exists_during_run'] = Path(job['input_image']).is_file()
+        glb = Path(job['output_dir']) / 'generated-job.glb'
+        glb.write_bytes(b'glb')
+        return {'status': 'completed', 'output': {'glb_path': str(glb)}}
+
+    original_run_job = runtime.run_job
+    runtime.run_job = fake_run_job
+    try:
+        returned = Pixal3DGenerator(model_dir=model_dir, workspace_dir=output_dir).generate(b'png-bytes', params={'seed': 7})
+    finally:
+        runtime.run_job = original_run_job
+
+    job = captured['job']
+    print(json.dumps({
+        'returned_name': returned.name,
+        'workspace_root_matches': Path(job['workspace_root']) == root,
+        'model_source_matches': Path(job['model_source']) == model_dir,
+        'output_dir_matches': Path(job['output_dir']) == output_dir,
+        'input_parent_matches_output': Path(job['input_image']).parent == output_dir,
+        'input_exists_during_run': captured['input_exists_during_run'],
+        'seed': job['params']['seed'],
+    }, sort_keys=True))
+`)
+
+  assert.deepEqual(result, {
+    input_exists_during_run: true,
+    input_parent_matches_output: true,
+    model_source_matches: true,
+    output_dir_matches: true,
+    returned_name: 'generated-job.glb',
+    seed: 7,
+    workspace_root_matches: true,
+  })
+})
+
+test('Pixal3DGenerator load patches with derived Modly root instead of workspace dir', () => {
+  const result = runPython(`
+import json, tempfile
+from pathlib import Path
+from generator import Pixal3DGenerator
+from pixal3d_extension import pipeline_patch
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp) / 'Modly'
+    model_dir = root / 'models' / 'pixal3d' / 'generate'
+    workspace_dir = root / 'workspace' / 'Workflows'
+    model_dir.mkdir(parents=True)
+    workspace_dir.mkdir(parents=True)
+    calls = []
+
+    def fake_patch_pipeline(workspace_root, **kwargs):
+        calls.append({'workspace_root': str(workspace_root), 'kwargs': kwargs})
+        return {'status': 'patched', 'code': 'fake'}
+
+    original_patch_pipeline = pipeline_patch.patch_pipeline
+    pipeline_patch.patch_pipeline = fake_patch_pipeline
+    try:
+        Pixal3DGenerator(model_dir=model_dir, workspace_dir=workspace_dir).load()
+    finally:
+        pipeline_patch.patch_pipeline = original_patch_pipeline
+
+    print(json.dumps({
+        'call_count': len(calls),
+        'called_with_root': Path(calls[0]['workspace_root']) == root,
+        'called_with_workspace_dir': Path(calls[0]['workspace_root']) == workspace_dir,
+        'auxiliary_mode': calls[0]['kwargs']['auxiliary_mode'],
+        'network_available': calls[0]['kwargs']['network_available'],
+    }, sort_keys=True))
+`)
+
+  assert.deepEqual(result, {
+    auxiliary_mode: 'default',
+    call_count: 1,
+    called_with_root: true,
+    called_with_workspace_dir: false,
+    network_available: true,
+  })
+})
+
 test('setup reports model path conflicts as JSON failures before installing dependencies', () => {
   const result = runPython(`
 import json, tempfile
@@ -919,6 +1051,86 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.local_aux_exists, false)
   assert.equal(result.local_moge_exists, false)
   assert.equal(result.local_naf_exists, false)
+})
+
+test('runtime derives Modly root from model_source and patches RMBG before pipeline execution', () => {
+  const result = runPython(`
+import json, tempfile
+from pathlib import Path
+from pixal3d_extension.assets import PRIMARY_ASSET
+from pixal3d_extension.paths import resolve_modly_layout, resolve_storage_path
+from pixal3d_extension import runtime
+
+PIPELINE = {
+    'args': {
+        'image_cond_model': {'args': {'model_name': 'facebook/dinov3-vitl16-pretrain-lvd1689m'}},
+        'rembg_model': {'args': {'model_name': 'briaai/RMBG-2.0'}},
+    }
+}
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp) / 'Modly'
+    workspace_dir = root / 'workspace' / 'Workflows'
+    workspace_dir.mkdir(parents=True)
+    layout = resolve_modly_layout(root)
+    for sentinel in PRIMARY_ASSET.sentinel_paths:
+        path = resolve_storage_path(layout, sentinel)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(PIPELINE) if sentinel.endswith('pipeline.json') else 'primary', encoding='utf-8')
+    pipeline_path = resolve_storage_path(layout, 'models/pixal3d/generate/pipeline.json')
+    model_dir = resolve_storage_path(layout, 'models/pixal3d/generate')
+    image = workspace_dir / 'input.png'
+    image.write_bytes(b'image')
+    calls = []
+    captured = {}
+
+    def downloader(*, repo_id, filename, destination, source_kind='hf_repo', url=None, **_kwargs):
+        calls.append({'repo_id': repo_id, 'filename': filename, 'source_kind': source_kind, 'url': url})
+        Path(destination).parent.mkdir(parents=True, exist_ok=True)
+        Path(destination).write_text(f'{repo_id}/{filename}', encoding='utf-8')
+        return str(destination)
+
+    def fake_pipeline(_source):
+        def pipeline(**kwargs):
+            active = json.loads(pipeline_path.read_text(encoding='utf-8'))
+            captured['dino'] = active['args']['image_cond_model']['args']['model_name']
+            captured['rmbg'] = active['args']['rembg_model']['args']['model_name']
+            glb = Path(kwargs['output_dir']) / 'derived-root-patched.glb'
+            glb.write_bytes(b'raw')
+            return {'glb_path': str(glb)}
+        return pipeline
+
+    result = runtime.run_job({
+        'input_image': str(image),
+        'output_dir': str(workspace_dir),
+        'model_source': str(model_dir),
+        'readiness': {'generation_allowed': True, 'code': 'ready'},
+        'auxiliary_mode': 'default',
+        'network_available': True,
+        'auxiliary_bootstrap_downloader': downloader,
+        'params': {'seed': 1},
+    }, pipeline_factory=fake_pipeline)
+
+    print(json.dumps({
+        'status': result['status'],
+        'call_count': len(calls),
+        'rmbg': captured['rmbg'],
+        'rmbg_is_upstream_gated': captured['rmbg'] == 'briaai/RMBG-2.0',
+        'rmbg_suffix': captured['rmbg'].replace('\\\\', '/').split('/Modly/')[-1],
+        'dino_suffix': captured['dino'].replace('\\\\', '/').split('/Modly/')[-1],
+        'source_code': result['auxiliary_source']['code'],
+        'source_kinds': {key: value['kind'] for key, value in result['auxiliary_source']['sources'].items()},
+    }, sort_keys=True))
+`)
+
+  assert.equal(result.status, 'completed')
+  assert.equal(result.call_count, 10)
+  assert.equal(result.rmbg_is_upstream_gated, false)
+  assert.notEqual(result.rmbg, 'briaai/RMBG-2.0')
+  assert.equal(result.rmbg_suffix, 'models/pixal3d/auxiliary/rmbg')
+  assert.equal(result.dino_suffix, 'models/pixal3d/auxiliary/dinov3')
+  assert.equal(result.source_code, 'local_auxiliary_assets_ready')
+  assert.deepEqual(result.source_kinds, { dino: 'local', moge: 'local', naf: 'local', rmbg: 'local' })
 })
 
 test('runtime default mode attempts auxiliary bootstrap before remote fallback and uses local paths immediately', () => {

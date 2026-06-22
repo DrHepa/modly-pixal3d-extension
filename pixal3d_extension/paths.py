@@ -4,6 +4,8 @@ from pathlib import Path, PurePosixPath
 
 EXTENSION_ID = "pixal3d"
 MODELS_PREFIX = "models"
+PIXAL3D_GENERATE_SUFFIX = (MODELS_PREFIX, EXTENSION_ID, "generate")
+WORKSPACE_SEGMENT = "workspace"
 WINDOWS_RESERVED_SEGMENTS = {
     "CON",
     "PRN",
@@ -45,6 +47,70 @@ def is_safe_relative_path(value: str) -> bool:
 
 def normalize_logical_path(value: str) -> str:
     return value.replace("\\", "/")
+
+
+def _split_logical_path(value: str | Path) -> tuple[str, tuple[str, ...]]:
+    text = normalize_logical_path(str(value))
+    while len(text) > 1 and text.endswith("/") and not (len(text) == 3 and text[1] == ":"):
+        text = text[:-1]
+
+    if len(text) >= 3 and text[0].isalpha() and text[1] == ":" and text[2] == "/":
+        return text[:3], tuple(segment for segment in text[3:].split("/") if segment)
+    if text.startswith("/"):
+        return "/", tuple(segment for segment in text[1:].split("/") if segment)
+    return "", tuple(segment for segment in text.split("/") if segment)
+
+
+def _join_logical_path(prefix: str, segments: tuple[str, ...]) -> str:
+    if prefix:
+        if not segments:
+            return prefix
+        return f"{prefix}{'/'.join(segments)}" if prefix.endswith("/") else f"{prefix}/{'/'.join(segments)}"
+    return "/".join(segments)
+
+
+def _logical_path_from_parts(prefix: str, segments: tuple[str, ...]) -> Path | None:
+    if not prefix and not segments:
+        return None
+    return Path(_join_logical_path(prefix, segments))
+
+
+def derive_modly_home_from_model_dir(model_dir: str | Path | None) -> Path | None:
+    """Derive the Modly home from a local Pixal3D generate model directory.
+
+    The derivation is string/segment based instead of filesystem based so it
+    works for Windows-style paths observed by Linux-hosted contract tests and
+    does not depend on user-specific absolute roots existing on this machine.
+    """
+
+    if model_dir is None:
+        return None
+    prefix, segments = _split_logical_path(model_dir)
+    suffix_length = len(PIXAL3D_GENERATE_SUFFIX)
+    if len(segments) < suffix_length:
+        return None
+    if tuple(segment.lower() for segment in segments[-suffix_length:]) != PIXAL3D_GENERATE_SUFFIX:
+        return None
+    return _logical_path_from_parts(prefix, segments[:-suffix_length])
+
+
+def derive_modly_home_from_workspace_dir(workspace_dir: str | Path | None) -> Path | None:
+    """Derive the Modly home from a Modly workspace directory or child path."""
+
+    if workspace_dir is None:
+        return None
+    prefix, segments = _split_logical_path(workspace_dir)
+    for index in range(len(segments) - 1, -1, -1):
+        if segments[index].lower() != WORKSPACE_SEGMENT:
+            continue
+        return _logical_path_from_parts(prefix, segments[:index])
+    return None
+
+
+def derive_modly_home(*, model_dir: str | Path | None = None, workspace_dir: str | Path | None = None) -> Path | None:
+    """Derive the Modly home, preferring the model storage path when present."""
+
+    return derive_modly_home_from_model_dir(model_dir) or derive_modly_home_from_workspace_dir(workspace_dir)
 
 
 def require_safe_relative_path(value: str) -> str:

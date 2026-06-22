@@ -5,6 +5,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
+from pixal3d_extension.paths import derive_modly_home
+
 
 PIXAL3D_SOURCE = "TencentARC/Pixal3D"
 _DINO_SOURCE = "facebook/dinov3-vitl16-pretrain-lvd1689m"
@@ -109,10 +111,11 @@ class Pixal3DGenerator:
         return (Path(model_dir) / "pipeline.json").is_file()
 
     def load(self) -> "Pixal3DGenerator":
-        if self.workspace_dir is not None:
+        modly_home = derive_modly_home(model_dir=self.model_dir, workspace_dir=self.workspace_dir)
+        if modly_home is not None or self.workspace_dir is not None:
             from pixal3d_extension.pipeline_patch import patch_pipeline
 
-            patch_pipeline(self.workspace_dir, auxiliary_mode="default", network_available=True)
+            patch_pipeline(modly_home or self.workspace_dir, auxiliary_mode="default", network_available=True)
         else:
             _patch_pipeline_json(self.model_dir)
         self._loaded = True
@@ -125,14 +128,20 @@ class Pixal3DGenerator:
         from pixal3d_extension.runtime import run_job
 
         if isinstance(image_or_job, dict):
-            job = image_or_job
+            job = dict(image_or_job)
+            modly_home = derive_modly_home(
+                model_dir=job.get("model_source") or self.model_dir,
+                workspace_dir=job.get("workspace_root") or job.get("output_dir") or self.workspace_dir,
+            )
+            if modly_home is not None:
+                job["workspace_root"] = str(modly_home)
         else:
             output_dir = getattr(self, "outputs_dir", None) or self.workspace_dir
             if output_dir is None:
                 raise RuntimeError("Pixal3D output directory is not configured")
             output_dir = Path(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
-            temp_input = tempfile.NamedTemporaryFile(prefix="pixal3d-input-", suffix=".png", delete=False)
+            temp_input = tempfile.NamedTemporaryFile(prefix="pixal3d-input-", suffix=".png", dir=output_dir, delete=False)
             input_path = Path(temp_input.name)
             temp_input.write(image_or_job)
             temp_input.close()
@@ -143,6 +152,9 @@ class Pixal3DGenerator:
                 "params": params or {},
                 "readiness": {"generation_allowed": self.is_downloaded(), "code": "ready" if self.is_downloaded() else "weights_missing_or_unvalidated"},
             }
+            modly_home = derive_modly_home(model_dir=self.model_dir, workspace_dir=self.workspace_dir or output_dir)
+            if modly_home is not None:
+                job["workspace_root"] = str(modly_home)
 
         try:
             result = run_job(job, pipeline_factory=self.pipeline_factory)
