@@ -320,11 +320,11 @@ with tempfile.TemporaryDirectory() as tmp:
 `)
 
   assert.deepEqual(result, {
-    auxiliary_mode: 'default',
+    auxiliary_mode: 'local',
     call_count: 1,
     called_with_root: true,
     called_with_workspace_dir: false,
-    network_available: true,
+    network_available: false,
   })
 })
 

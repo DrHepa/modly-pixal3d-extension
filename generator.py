@@ -1,37 +1,99 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
+
+_EXTENSION_ROOT = Path(__file__).resolve().parent
+if str(_EXTENSION_ROOT) not in sys.path:
+    sys.path.insert(0, str(_EXTENSION_ROOT))
+
+try:
+    from services.generators.base import BaseGenerator, GenerationCancelled
+except ModuleNotFoundError as exc:
+    if exc.name not in {"services", "services.generators", "services.generators.base"}:
+        raise
+
+    class GenerationCancelled(Exception):
+        """Standalone equivalent used only when Modly's generator API is absent."""
+
+    class BaseGenerator:
+        """Minimal standalone lifecycle contract for extension-local tooling."""
+
+        def __init__(self, model_dir: Path | None, outputs_dir: Path | None) -> None:
+            self.model_dir = model_dir
+            self.outputs_dir = outputs_dir
+            self._model: Any | None = None
+
+        def is_loaded(self) -> bool:
+            return self._model is not None
+
+        def unload(self) -> None:
+            self._model = None
+
+        def _check_cancelled(self, cancel_event: Any | None) -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise GenerationCancelled()
+
 from pixal3d_extension.paths import derive_modly_home
 
 
-PIXAL3D_SOURCE = "TencentARC/Pixal3D"
-_DINO_SOURCE = "facebook/dinov3-vitl16-pretrain-lvd1689m"
-_DINO_REPLACEMENT = "camenduru/dinov3-vitl16-pretrain-lvd1689m"
-_RMBG_SOURCE = "briaai/RMBG-2.0"
-_RMBG_REPLACEMENT = "camenduru/RMBG-2.0"
+_LOADED_STATE = object()
+_UI_MANAGED_ASSETS_MESSAGE = (
+    "Pixal3D runtime downloads are disabled. Open Modly Models to download "
+    "the Pixal3D weights, and use Repair on the Pixal3D extension if its "
+    "setup or auxiliary assets are incomplete."
+)
+_UI_MANAGED_ASSET_FAILURE_CODES = {
+    "missing_assets",
+    "missing_auxiliary_assets",
+    "missing_primary_assets",
+    "weights_missing_or_unvalidated",
+}
 
 
-def _patch_pipeline_json(model_dir: Path | None) -> None:
-    if model_dir is None:
-        return
-    pipeline_path = model_dir / "pipeline.json"
-    if not pipeline_path.is_file():
-        return
-    text = pipeline_path.read_text(encoding="utf-8")
-    patched = text.replace(_DINO_SOURCE, _DINO_REPLACEMENT).replace(_RMBG_SOURCE, _RMBG_REPLACEMENT)
-    if patched == text:
-        return
-    backup_path = model_dir / "pipeline.json.modly-original"
-    if not backup_path.exists():
-        backup_path.write_text(text, encoding="utf-8")
-    pipeline_path.write_text(patched, encoding="utf-8")
+def _prepare_ui_managed_job(job: dict, *, model_dir: Path | None = None) -> dict:
+    prepared = dict(job)
+    params = dict(prepared.get("params") or {})
+    for key in ("auxiliary_bootstrap_downloader", "auxiliary_mode", "network_available", "offline"):
+        prepared.pop(key, None)
+        params.pop(key, None)
+
+    model_source = model_dir or prepared.get("model_source")
+    if model_source is None:
+        raise RuntimeError(_UI_MANAGED_ASSETS_MESSAGE)
+    local_model_dir = Path(model_source).expanduser().resolve()
+
+    prepared["model_source"] = str(local_model_dir)
+    prepared["params"] = params
+    prepared["auxiliary_mode"] = "local"
+    prepared["network_available"] = False
+
+    if not (local_model_dir / "pipeline.json").is_file():
+        prepared["readiness"] = {
+            "generation_allowed": False,
+            "code": "weights_missing_or_unvalidated",
+            "message": _UI_MANAGED_ASSETS_MESSAGE,
+        }
+    elif not isinstance(prepared.get("readiness"), dict):
+        prepared["readiness"] = {"generation_allowed": True, "code": "ready"}
+    return prepared
 
 
-class Pixal3DGenerator:
+def _with_ui_managed_asset_guidance(result: dict) -> dict:
+    if result.get("code") not in _UI_MANAGED_ASSET_FAILURE_CODES:
+        return result
+    detail = result.get("message")
+    message = _UI_MANAGED_ASSETS_MESSAGE
+    if detail:
+        message = f"{message} Runtime preflight: {detail}"
+    return {**result, "message": message}
+
+
+class Pixal3DGenerator(BaseGenerator):
     """Root Modly model generator contract for Pixal3D.
 
     The class is intentionally defined in root ``generator.py`` because local
@@ -46,10 +108,11 @@ class Pixal3DGenerator:
         *,
         pipeline_factory: Callable[[str], Any] | None = None,
     ) -> None:
-        self.model_dir = Path(model_dir) if model_dir is not None else None
-        self.workspace_dir = Path(workspace_dir) if workspace_dir is not None else None
+        resolved_model_dir = Path(model_dir) if model_dir is not None else None
+        resolved_outputs_dir = Path(workspace_dir) if workspace_dir is not None else None
+        super().__init__(resolved_model_dir, resolved_outputs_dir)
+        self.workspace_dir = resolved_outputs_dir
         self.pipeline_factory = pipeline_factory
-        self._loaded = False
 
     @classmethod
     def params_schema(cls) -> list[dict[str, Any]]:
@@ -110,31 +173,42 @@ class Pixal3DGenerator:
         model_dir = self.model_dir or Path(root)
         return (Path(model_dir) / "pipeline.json").is_file()
 
+    def _auto_download(self) -> None:
+        raise RuntimeError(_UI_MANAGED_ASSETS_MESSAGE)
+
     def load(self) -> "Pixal3DGenerator":
         modly_home = derive_modly_home(model_dir=self.model_dir, workspace_dir=self.workspace_dir)
-        if modly_home is not None or self.workspace_dir is not None:
+        workspace_root = modly_home or self.workspace_dir
+        if workspace_root is not None:
             from pixal3d_extension.pipeline_patch import patch_pipeline
 
-            patch_pipeline(modly_home or self.workspace_dir, auxiliary_mode="default", network_available=True)
-        else:
-            _patch_pipeline_json(self.model_dir)
-        self._loaded = True
+            patch_pipeline(workspace_root, auxiliary_mode="local", network_available=False)
+        self._model = _LOADED_STATE
         return self
 
     def unload(self) -> None:
-        self._loaded = False
+        super().unload()
 
-    def generate(self, image_or_job: Any, params: dict | None = None, progress_cb: Any | None = None, cancel_evt: Any | None = None) -> Path:
+    def generate(
+        self,
+        image_bytes: Any,
+        params: dict | None = None,
+        progress_cb: Any | None = None,
+        cancel_event: Any | None = None,
+        *,
+        cancel_evt: Any | None = None,
+    ) -> Path:
+        if cancel_event is not None and cancel_evt is not None:
+            raise TypeError("Pass either cancel_event or cancel_evt, not both")
+        cancel_event = cancel_event if cancel_event is not None else cancel_evt
+        self._check_cancelled(cancel_event)
+
         from pixal3d_extension.runtime import run_job
 
+        image_or_job = image_bytes
+        input_path: Path | None = None
         if isinstance(image_or_job, dict):
             job = dict(image_or_job)
-            modly_home = derive_modly_home(
-                model_dir=job.get("model_source") or self.model_dir,
-                workspace_dir=job.get("workspace_root") or job.get("output_dir") or self.workspace_dir,
-            )
-            if modly_home is not None:
-                job["workspace_root"] = str(modly_home)
         else:
             output_dir = getattr(self, "outputs_dir", None) or self.workspace_dir
             if output_dir is None:
@@ -148,21 +222,27 @@ class Pixal3DGenerator:
             job = {
                 "input_image": str(input_path),
                 "output_dir": str(output_dir),
-                "model_source": str(self.model_dir or PIXAL3D_SOURCE),
+                "model_source": str(self.model_dir) if self.model_dir is not None else None,
                 "params": params or {},
                 "readiness": {"generation_allowed": self.is_downloaded(), "code": "ready" if self.is_downloaded() else "weights_missing_or_unvalidated"},
             }
-            modly_home = derive_modly_home(model_dir=self.model_dir, workspace_dir=self.workspace_dir or output_dir)
+
+        try:
+            job = _prepare_ui_managed_job(job, model_dir=self.model_dir)
+            modly_home = derive_modly_home(
+                model_dir=job.get("model_source"),
+                workspace_dir=job.get("workspace_root") or job.get("output_dir") or self.workspace_dir,
+            )
             if modly_home is not None:
                 job["workspace_root"] = str(modly_home)
 
-        try:
             result = run_job(job, pipeline_factory=self.pipeline_factory)
+            result = _with_ui_managed_asset_guidance(result)
             if result.get("status") != "completed":
                 raise RuntimeError(json.dumps(result, sort_keys=True))
             return Path(result["output"]["glb_path"])
         finally:
-            if not isinstance(image_or_job, dict):
+            if input_path is not None:
                 try:
                     input_path.unlink(missing_ok=True)
                 except Exception:
@@ -174,7 +254,8 @@ def generate(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None)
 
     from pixal3d_extension.runtime import run_job
 
-    return run_job(job, pipeline_factory=pipeline_factory)
+    prepared = _prepare_ui_managed_job(job)
+    return _with_ui_managed_asset_guidance(run_job(prepared, pipeline_factory=pipeline_factory))
 
 
 def main() -> None:
