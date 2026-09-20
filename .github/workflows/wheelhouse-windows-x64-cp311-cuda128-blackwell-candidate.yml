@@ -46,6 +46,9 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $repoRoot = Get-Location
+          $evidenceDir = Join-Path (Join-Path $repoRoot 'build') 'blackwell-toolchain-evidence'
+          New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
           $component = 'Microsoft.VisualStudio.Component.VC.14.38.17.8.x86.x64'
           $vsInstallerDir = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer"
           $vswhere = Join-Path $vsInstallerDir 'vswhere.exe'
@@ -54,24 +57,106 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($installPath)) {
             throw 'Visual Studio 2022 with C++ build tools was not found on the runner.'
           }
-          Write-Host "Installing CUDA 12.8-supported MSVC v143 toolset component $component into $installPath"
-          $process = Start-Process -FilePath $vsInstaller -ArgumentList @(
-            'modify',
-            '--installPath', $installPath,
-            '--add', $component,
-            '--quiet',
-            '--norestart',
-            '--nocache'
-          ) -Wait -PassThru -WindowStyle Hidden
-          if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
-            throw "Visual Studio Installer failed with exit code $($process.ExitCode)."
+          if ($installPath -match '"') {
+            throw "Visual Studio install path contains an unsupported quote character: $installPath"
           }
-          $toolsetDir = Join-Path $installPath 'VC\Tools\MSVC'
-          $toolset = @(Get-ChildItem -Path $toolsetDir -Directory -Filter '14.38.*' | Sort-Object Name -Descending | Select-Object -First 1)
+          if ($component -notmatch '^[A-Za-z0-9._-]+$') {
+            throw "Unexpected Visual Studio component id: $component"
+          }
+          $escapedInstallPath = $installPath -replace '"', '\"'
+          $installerArguments = "modify --installPath `"$escapedInstallPath`" --add $component --quiet --norestart --nocache"
+          "vs_install_path=$installPath" | Set-Content -Path (Join-Path $evidenceDir 'vs-selection.txt') -Encoding UTF8
+          "component=$component" | Add-Content -Path (Join-Path $evidenceDir 'vs-selection.txt') -Encoding UTF8
+
+          function Get-Msvc1438Toolset {
+            param([string]$VsInstallPath)
+            $toolsetDir = Join-Path $VsInstallPath 'VC\Tools\MSVC'
+            if (-not (Test-Path $toolsetDir)) {
+              return @()
+            }
+            return @(Get-ChildItem -Path $toolsetDir -Directory -Filter '14.38.*' | Sort-Object Name -Descending | Select-Object -First 1)
+          }
+
+          function Write-AvailableMsvcToolsets {
+            param([string]$VsInstallPath, [string]$EvidenceDir)
+            $toolsetDir = Join-Path $VsInstallPath 'VC\Tools\MSVC'
+            $outPath = Join-Path $EvidenceDir 'available-msvc-toolsets.txt'
+            if (Test-Path $toolsetDir) {
+              Get-ChildItem -Path $toolsetDir -Directory | Sort-Object Name | ForEach-Object { $_.FullName } | Set-Content -Path $outPath -Encoding UTF8
+            } else {
+              "missing_toolset_dir=$toolsetDir" | Set-Content -Path $outPath -Encoding UTF8
+            }
+            Write-Host 'Available MSVC toolsets:'
+            Get-Content -Path $outPath | ForEach-Object { Write-Host "  $_" }
+          }
+
+          function Copy-VsInstallerLogs {
+            param([string]$EvidenceDir)
+            $logDir = Join-Path $EvidenceDir 'vs-installer-logs'
+            New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+            $candidateLogs = @()
+            foreach ($root in @($env:TEMP, $env:LOCALAPPDATA, $env:ProgramData)) {
+              if (-not [string]::IsNullOrWhiteSpace($root) -and (Test-Path $root)) {
+                $candidateLogs += @(Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Name -match '^(dd_|vs_|VisualStudio).*\.log$' } |
+                  Sort-Object LastWriteTime -Descending |
+                  Select-Object -First 40)
+              }
+            }
+            Write-Host 'VS Installer log candidates:'
+            if ($candidateLogs.Count -eq 0) {
+              'No VS Installer log candidates found.' | Set-Content -Path (Join-Path $EvidenceDir 'vs-installer-log-paths.txt') -Encoding UTF8
+              Write-Host '  none found'
+              return
+            }
+            $candidateLogs | ForEach-Object { $_.FullName } | Set-Content -Path (Join-Path $EvidenceDir 'vs-installer-log-paths.txt') -Encoding UTF8
+            foreach ($log in $candidateLogs) {
+              Write-Host "  $($log.FullName)"
+              Copy-Item -Path $log.FullName -Destination (Join-Path $logDir $log.Name) -Force -ErrorAction SilentlyContinue
+            }
+          }
+
+          Write-AvailableMsvcToolsets -VsInstallPath $installPath -EvidenceDir $evidenceDir
+          $toolset = Get-Msvc1438Toolset -VsInstallPath $installPath
+          if ($toolset.Count -eq 1) {
+            Write-Host "MSVC 14.38 toolset already exists; skipping Visual Studio Installer modify: $($toolset[0].FullName)"
+            exit 0
+          }
+
+          $installerExitCodes = @()
+          for ($attempt = 1; $attempt -le 2; $attempt++) {
+            Write-Host "Installing CUDA 12.8-supported MSVC v143 toolset component $component into $installPath (attempt $attempt of 2)"
+            $process = Start-Process -FilePath $vsInstaller -ArgumentList $installerArguments -Wait -PassThru -WindowStyle Hidden
+            $installerExitCodes += $process.ExitCode
+            "attempt=$attempt exit_code=$($process.ExitCode)" | Add-Content -Path (Join-Path $evidenceDir 'vs-installer-attempts.txt') -Encoding UTF8
+            Write-Host "Visual Studio Installer attempt $attempt exited with code $($process.ExitCode)."
+            Copy-VsInstallerLogs -EvidenceDir $evidenceDir
+            Write-Host 'Re-checking actual MSVC 14.38 toolset after installer attempt.'
+            Write-AvailableMsvcToolsets -VsInstallPath $installPath -EvidenceDir $evidenceDir
+            $toolset = Get-Msvc1438Toolset -VsInstallPath $installPath
+            if ($toolset.Count -eq 1) {
+              Write-Host "Installed MSVC toolset $($toolset[0].Name) after installer attempt $attempt."
+              break
+            }
+            if ($attempt -lt 2) {
+              Write-Host 'Retrying Visual Studio Installer once because MSVC 14.38 is still absent.'
+            }
+          }
+
           if ($toolset.Count -ne 1) {
-            throw "CUDA-supported MSVC 14.38 toolset was not installed under $toolsetDir."
+            Copy-VsInstallerLogs -EvidenceDir $evidenceDir
+            $codes = ($installerExitCodes -join ',')
+            throw "CUDA-supported MSVC 14.38 toolset remains absent after Visual Studio Installer attempts. Installer exit codes: $codes. Evidence directory: $evidenceDir"
           }
-          Write-Host "Installed MSVC toolset $($toolset[0].Name)"
+          Write-Host "Verified CUDA-supported MSVC 14.38 toolset: $($toolset[0].FullName)"
+
+      - name: Upload Blackwell toolchain failure evidence
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: blackwell-toolchain-failure-${{ github.run_id }}
+          path: build/blackwell-toolchain-evidence
+          if-no-files-found: warn
 
       - name: Set up MSVC developer environment
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1

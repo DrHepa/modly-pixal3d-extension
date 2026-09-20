@@ -88,6 +88,8 @@ Eighth-run evidence from GitHub Actions run `27274530136` also completed success
 
 Ninth-run evidence from GitHub Actions run `35533729886` was dispatched from `feat/pixal3d-upstream-multinode` at commit `cc56796d479e58f4e46f28256eacc9bf35748eec` and failed during the NATTEN build before candidate archive assembly. CUDA 12.8 rejected the hosted runner's current MSVC toolchain with `unsupported Microsoft Visual Studio version`; the candidate archive step and artifact upload step were skipped, so there is no fresh artifact or metadata from that run. The prior successful candidate artifacts remain expired.
 
+Tenth-run evidence from GitHub Actions run `35535794357` was dispatched from `feat/pixal3d-upstream-multinode` at commit `0175c870d0643157a5851e137b1fa6342b63fa86` and failed before any MSVC toolset verification because the Visual Studio Installer returned generic exit code `1` while attempting to add `Microsoft.VisualStudio.Component.VC.14.38.17.8.x86.x64`. The workflow now treats that installer code as evidence, not as the final compatibility verdict: it first checks for an existing `VC\Tools\MSVC\14.38.*` toolset and skips modification if present; otherwise it invokes the installer, re-checks the actual toolset directory regardless of the exit code, retries once only if `14.38.*` is still absent, captures VS Installer log candidates into a failure artifact, and fails closed if the CUDA-supported MSVC 14.38 toolset remains absent. This still does not accept an unsupported compiler and does not prove RTX 50-series runtime support.
+
 ## Publish criteria for a future Blackwell lane
 
 A future Blackwell lane requires all of the following before it can be declared supported:
