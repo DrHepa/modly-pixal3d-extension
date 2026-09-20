@@ -14,9 +14,9 @@ function python(source) {
   return JSON.parse(run.stdout)
 }
 
-test('posed-view node has its own real MV weight group and scene input', () => {
+test('calibrated capture node has its own real MV weight group and capture input', () => {
   const node = manifest.nodes.find((item) => item.id === 'generate-mv')
-  assert.equal(node?.input, 'scene')
+  assert.equal(node?.input, 'capture')
   assert.deepEqual(node?.weight_groups, ['pixal3d-base', 'pixal3d-mv'])
   const group = manifest.weight_groups.find((item) => item.id === 'pixal3d-mv')
   const source = group?.model_sources.find((item) => item.repo_id === 'TencentARC/Pixal3D')
@@ -75,7 +75,7 @@ print(json.dumps({'without_host': without_host, 'source': str(generator._model_s
   assert.equal(result.source, '/tmp/host-worldsculpt')
 })
 
-test('host MODEL_NODE_ID selects scene branches for schema, readiness, download, load, and generation', () => {
+test('host MODEL_NODE_ID selects typed branches for schema, readiness, download, load, and generation', () => {
   const result = python(`
 import json
 from generator import Pixal3DGenerator
@@ -219,7 +219,7 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.match(result.blocked, /Pixal3D MV weights missing/)
 })
 
-test('MV generator rejects image bytes and missing scene path instead of single-view fallback', () => {
+test('MV generator rejects image bytes and legacy scene parameters instead of single-view fallback', () => {
   const result = python(`
 import json
 from generator import Pixal3DGenerator
@@ -233,7 +233,7 @@ for image,params in [(b'image',{'scene_manifest_path':'/tmp/Workspace/scene.json
 print(json.dumps(errors))
 `)
   assert.match(result[0], /not image bytes/)
-  assert.match(result[1], /scene_manifest_path/)
+  assert.match(result[1], /typed capture manifest/)
 })
 
 test('normal setup verifies and installs the bundled MV core after base wheelhouse', () => {
@@ -355,7 +355,7 @@ callback=events.append
 gen=Pixal3DGenerator('/tmp/models/pixal3d/generate-mv','/tmp/Workspace');gen.MODEL_NODE_ID='generate-mv'
 gen.shared_model_dirs={'pixal3d-base':'/tmp/base','pixal3d-mv':'/tmp/mv'}
 with patch('pixal3d_extension.multiview.run_multiview',return_value=Path('/tmp/result.glb')) as mock:
-    gen.generate(b'',{'scene_manifest_path':'/tmp/Workspace/scene.json'},callback,cancel)
+    gen.generate(Path('/tmp/Workspace/capture-manifest.json'),{},callback,cancel)
     forwarded=mock.call_args.kwargs['cancel_event'] is cancel and mock.call_args.kwargs['progress_cb'] is callback
 with tempfile.TemporaryDirectory() as tmp:
     root=Path(tmp);workspace=root/'Workspace';views=workspace/'views';views.mkdir(parents=True)

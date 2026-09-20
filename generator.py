@@ -56,6 +56,12 @@ class Pixal3DGenerator:
         self.workspace_dir = Path(workspace_dir) if workspace_dir is not None else None
         self.pipeline_factory = pipeline_factory
         self._loaded = False
+        if self.workspace_dir is not None:
+            # Configure process-global Hugging Face code-cache authority before
+            # any single-view or MV path can import Transformers constants.
+            from pixal3d_extension.multiview import configure_mv_hf_cache
+
+            configure_mv_hf_cache(self.workspace_dir)
 
     def _effective_node_id(self) -> str | None:
         return getattr(self, "MODEL_NODE_ID", None) or getattr(self, "node_id", None)
@@ -161,7 +167,7 @@ class Pixal3DGenerator:
         if self._effective_node_id() == "generate-mv":
             schema = [item for item in schema if item["id"] not in {"manual_fov", "texture_size"}]
             schema.append({"id": "num_views", "label": "Views to Use", "type": "int", "default": 4, "min": 1, "max": 16,
-                           "tooltip": "Use the first N posed frames from transforms.json."})
+                           "tooltip": "Use the first N ordered capture frames with calibrated cameras; frame 0 is the canonical front view."})
         return schema
 
     def readiness_status(self) -> dict:
@@ -348,20 +354,26 @@ class Pixal3DGenerator:
         if self._effective_node_id() == "generate-mv":
             from pixal3d_extension.multiview import run_multiview
 
-            if isinstance(image_or_job, (bytes, bytearray)) and image_or_job:
-                raise ValueError("Pixal3D MV requires a posed-view scene manifest, not image bytes")
-            if not isinstance(params, dict) or not params.get("scene_manifest_path"):
-                raise ValueError("Pixal3D MV requires scene_manifest_path from Modly /from-scene")
+            if isinstance(image_or_job, (bytes, bytearray)):
+                raise ValueError("Pixal3D MV requires a typed capture manifest, not image bytes; use Modly /from-artifact")
+            if getattr(image_or_job, "kind", "capture") != "capture":
+                raise ValueError("Pixal3D MV requires capture input, not a scene manifest")
+            capture_path = getattr(image_or_job, "path", image_or_job)
+            if not isinstance(capture_path, (str, Path)):
+                raise ValueError("Pixal3D MV requires capture_manifest_path as its typed input")
+            capture_path = Path(capture_path)
+            if capture_path.name != "capture-manifest.json":
+                raise ValueError("Pixal3D MV requires capture-manifest.json; migrate legacy posed scenes to calibrated captures")
             if self.workspace_dir is None:
-                raise RuntimeError("Modly workspace directory is required for posed-view input")
+                raise RuntimeError("Modly workspace directory is required for capture input")
             modly_home = derive_modly_home(model_dir=self.model_dir, workspace_dir=self.workspace_dir)
             if modly_home is None:
                 raise RuntimeError("Modly home is required to locate the NAF checkpoint")
-            output_dir = getattr(self, "outputs_dir", None) or self.workspace_dir
-            return run_multiview(scene_manifest_path=params["scene_manifest_path"], workspace_dir=self.workspace_dir,
+            output_dir = getattr(self, "outputs_dir", None) or self.workspace_dir / "Workflows"
+            return run_multiview(capture_manifest_path=capture_path, workspace_dir=self.workspace_dir,
                                  mv_root=self._model_source(), base_root=self._base_source(),
                                  naf_path=modly_home / "models/pixal3d/auxiliary/naf/naf_release.pth",
-                                 output_dir=output_dir, params=params,
+                                 output_dir=output_dir, params=params or {},
                                  progress_cb=progress_cb, cancel_event=cancel_evt)
         compatibility_error = self._single_view_compatibility_error()
         if compatibility_error is not None:

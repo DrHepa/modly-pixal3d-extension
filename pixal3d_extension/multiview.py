@@ -9,6 +9,7 @@ from importlib import metadata
 import math
 import os
 import random
+import sys
 import tempfile
 import threading
 import time
@@ -58,6 +59,129 @@ AUXILIARY_FILES = (
     "auxiliary/rmbg/model.safetensors",
 )
 _MV_RUN_LOCK = threading.RLock()
+_MV_CACHE_LOCK = threading.RLock()
+_MV_CACHE_AUTHORITY: Path | None = None
+
+
+def _validate_mv_cache_layout(workspace: Path, targets: tuple[Path, ...]) -> None:
+    """Reject files, symlinks, and resolved escapes before cache mutation."""
+
+    if workspace.exists() and not workspace.is_dir():
+        raise ValueError("Modly workspace path must be a directory")
+    for target in targets:
+        if not _within(workspace, target):
+            raise ValueError("Pixal3D MV cache must remain within the Modly workspace")
+        current = workspace
+        for part in target.relative_to(workspace).parts:
+            current = current / part
+            if current.is_symlink():
+                raise ValueError(
+                    f"Pixal3D MV cache descendant symlink/path component is not allowed: {current}"
+                )
+            if current.exists() and not current.is_dir():
+                raise ValueError(f"Pixal3D MV cache path component must be a directory: {current}")
+            if not _within(workspace, current.resolve(strict=False)):
+                raise ValueError("Pixal3D MV cache must remain within the Modly workspace")
+
+
+def _validate_mv_cache_tree(cache_root: Path) -> None:
+    """Fail closed on unsafe nodes anywhere in an existing cache tree."""
+
+    if not cache_root.exists():
+        return
+
+    pending = [cache_root]
+    while pending:
+        directory = pending.pop()
+        try:
+            entries = list(os.scandir(directory))
+        except OSError as exc:
+            raise ValueError(
+                f"Pixal3D MV cache tree cannot be safely inspected: {directory}"
+            ) from exc
+        for entry in entries:
+            path = Path(entry.path)
+            try:
+                if entry.is_symlink():
+                    raise ValueError(
+                        f"Pixal3D MV cache descendant symlink is not allowed: {path}"
+                    )
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(path)
+                elif not entry.is_file(follow_symlinks=False):
+                    raise ValueError(
+                        f"Pixal3D MV cache descendant must be a directory or regular file: {path}"
+                    )
+            except OSError as exc:
+                raise ValueError(
+                    f"Pixal3D MV cache descendant cannot be safely inspected: {path}"
+                ) from exc
+
+
+def configure_mv_hf_cache(workspace_dir: str | Path) -> Path:
+    """Bind Hugging Face code caches to a writable Modly workspace path.
+
+    RMBG uses ``trust_remote_code`` even when every model file is local. The
+    Transformers dynamic-module loader therefore still materializes Python
+    modules in ``HF_MODULES_CACHE``. Configure that authority before importing
+    Transformers/Pixal3D so a read-only or foreign-owned user cache cannot break
+    otherwise fully local inference.
+
+    The cache is intentionally stable for the extension-runner process: once
+    Transformers constants are imported they remain process-global. It contains
+    generated Python modules only, never model weights.
+    """
+
+    global _MV_CACHE_AUTHORITY
+
+    workspace = Path(workspace_dir).expanduser().resolve(strict=False)
+    cache_parent = workspace / ".pixal3d-runtime"
+    cache = cache_parent / "huggingface"
+    paths = {
+        "HF_HOME": cache,
+        "HF_HUB_CACHE": cache / "hub",
+        "HF_MODULES_CACHE": cache / "modules",
+        "TRANSFORMERS_CACHE": cache / "transformers",
+        "XDG_CACHE_HOME": cache / "xdg",
+    }
+    transformers_modules = paths["HF_MODULES_CACHE"] / "transformers_modules"
+    targets = (cache_parent, cache, *paths.values(), transformers_modules)
+
+    with _MV_CACHE_LOCK:
+        # Validate the complete prospective layout before mkdir or environment
+        # changes. In particular, an existing child symlink must not turn an
+        # otherwise workspace-relative cache into an external write authority.
+        _validate_mv_cache_layout(workspace, targets)
+        _validate_mv_cache_tree(cache_parent)
+        if _MV_CACHE_AUTHORITY is not None and _MV_CACHE_AUTHORITY != cache:
+            raise RuntimeError(
+                "Pixal3D Hugging Face cache is already bound to a different Modly workspace"
+            )
+
+        # Do not pretend an environment update can replace constants already
+        # bound by Transformers. The generator initializes this cache as soon
+        # as its workspace is known, before any Pixal3D runtime import.
+        imported = sys.modules.get("transformers.dynamic_module_utils")
+        imported_cache = getattr(imported, "HF_MODULES_CACHE", None) if imported is not None else None
+        if imported_cache is not None and Path(imported_cache).resolve() != paths["HF_MODULES_CACHE"]:
+            raise RuntimeError(
+                "Transformers dynamic modules were imported before the Pixal3D workspace cache was configured"
+            )
+
+        workspace.mkdir(parents=True, exist_ok=True)
+        for target in targets:
+            target.mkdir(parents=True, exist_ok=True)
+        # Revalidate the complete custody boundary after creation. This catches
+        # unsafe descendants rather than only the configured cache directories.
+        _validate_mv_cache_layout(workspace, targets)
+        _validate_mv_cache_tree(cache_parent)
+
+        for key, path in paths.items():
+            os.environ[key] = str(path)
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        _MV_CACHE_AUTHORITY = cache
+        return cache
 
 
 def mv_runtime_available() -> bool:
@@ -301,17 +425,36 @@ def _check_cancel(cancel_event: Any | None) -> None:
 
 
 def run_multiview(
-    *, scene_manifest_path: str | Path, workspace_dir: str | Path,
+    *, capture_manifest_path: str | Path | None = None,
+    scene_manifest_path: str | Path | None = None, workspace_dir: str | Path,
     mv_root: str | Path, base_root: str | Path, naf_path: str | Path, output_dir: str | Path,
     params: dict[str, Any], inference_runner: Callable[..., Any] | None = None,
     progress_cb: Callable[[int, str], None] | None = None, cancel_event: Any | None = None,
 ) -> Path:
-    """Run the real upstream posed-view cascade, fail-closed before heavy imports."""
+    """Run calibrated capture media through the real upstream posed-view cascade.
+
+    ``scene_manifest_path`` remains an explicit low-level compatibility entry for
+    already-calibrated callers; the Modly node itself accepts only capture input.
+    """
 
     _check_cancel(cancel_event)
+    if (capture_manifest_path is None) == (scene_manifest_path is None):
+        raise ValueError("Provide exactly one capture_manifest_path or legacy scene_manifest_path")
     if progress_cb is not None:
-        progress_cb(2, "Validating posed views")
-    views_dir = resolve_views_dir(scene_manifest_path, workspace_dir)
+        progress_cb(2, "Validating calibrated capture" if capture_manifest_path is not None else "Validating posed views")
+    num_views = int(params.get("num_views", 4))
+    if not 1 <= num_views <= 16:
+        raise ValueError("num_views must be between 1 and 16")
+    if capture_manifest_path is not None:
+        from .multiview_capture import prepare_capture_views, validate_mv_capture
+        from .scene_prepare_contract import validate_workspace_output_parent
+
+        validate_mv_capture(Path(capture_manifest_path), Path(workspace_dir), num_views)
+        output = validate_workspace_output_parent(Path(output_dir), Path(workspace_dir), "MV output directory")
+        views = prepare_capture_views(Path(capture_manifest_path), Path(workspace_dir), output, num_views, cancel_event=cancel_event)
+    else:
+        views = nullcontext(resolve_views_dir(scene_manifest_path, workspace_dir))
+        output = Path(output_dir).resolve()
     root = Path(mv_root).resolve()
     base = Path(base_root).resolve()
     missing = missing_mv_assets(root, base, naf_path)
@@ -321,53 +464,48 @@ def run_multiview(
     resolution = int(params.get("resolution", 1024))
     if resolution not in (1024, 1536):
         raise ValueError("resolution must be 1024 or 1536")
-    num_views = int(params.get("num_views", 4))
-    if not 1 <= num_views <= 16:
-        raise ValueError("num_views must be between 1 and 16")
     seed = int(params.get("seed", -1))
     if seed == -1:
         seed = random.randint(0, 2**32 - 1)
     if not 0 <= seed <= 2**32 - 1:
         raise ValueError("seed is out of range")
     low_vram = params.get("low_vram", "low_vram") in ("low_vram", True)
-    output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
     glb_path = output / f"{int(time.time())}_{uuid.uuid4().hex[:8]}_pixal3d_mv.glb"
 
     real_inference = inference_runner is None
-    if real_inference:
-        _verify_naf_checkpoint(Path(naf_path).resolve())
-        _verified_naf_hubconf()
-        if not mv_runtime_available():
-            raise RuntimeError("Pixal3D MV Python wheel is not installed; the published single-view wheelhouse is insufficient")
-        from pixal3d_extension import runtime
-        runtime._prepare_runtime_compat()
-        runtime._install_windows_native_module_aliases()
-        runtime._install_natten_fallback()
-        runtime._silence_flex_gemm_autotuners()
-        os.environ["HF_HUB_OFFLINE"] = "1"
-        os.environ["TRANSFORMERS_OFFLINE"] = "1"
-        from pixal3d_extension.vendor import inference_mv
-        dino_path = str(base / "auxiliary" / "dinov3")
-        for item in inference_mv.IMAGE_COND_CONFIGS.values():
-            item["model_name"] = dino_path
-        inference_runner = inference_mv.run_inference
-
-    with tempfile.TemporaryDirectory(prefix="pixal3d-mv-config-", dir=output) as temporary:
-        _check_cancel(cancel_event)
-        if progress_cb is not None:
-            progress_cb(8, "Preparing local model configuration")
-        private_config = prepare_mv_pipeline_config(root, base, Path(temporary) / "pipeline_mv.local.json")
-        loader = _private_local_loader(root, private_config) if real_inference else nullcontext()
-        naf_loader = _local_naf_extractors(inference_mv, Path(naf_path).resolve()) if real_inference else nullcontext()
-        with _MV_RUN_LOCK, loader, naf_loader:
+    with views as views_dir, tempfile.TemporaryDirectory(prefix="pixal3d-mv-config-", dir=output) as temporary:
+        with _MV_RUN_LOCK:
+            if real_inference:
+                configure_mv_hf_cache(workspace_dir)
+                _verify_naf_checkpoint(Path(naf_path).resolve())
+                _verified_naf_hubconf()
+                if not mv_runtime_available():
+                    raise RuntimeError("Pixal3D MV Python wheel is not installed; the published single-view wheelhouse is insufficient")
+                from pixal3d_extension import runtime
+                runtime._prepare_runtime_compat()
+                runtime._install_windows_native_module_aliases()
+                runtime._install_natten_fallback()
+                runtime._silence_flex_gemm_autotuners()
+                from pixal3d_extension.vendor import inference_mv
+                dino_path = str(base / "auxiliary" / "dinov3")
+                for item in inference_mv.IMAGE_COND_CONFIGS.values():
+                    item["model_name"] = dino_path
+                inference_runner = inference_mv.run_inference
             _check_cancel(cancel_event)
-            inference_runner(
-                views_dir=str(views_dir), output_path=str(glb_path), num_views=num_views,
-                seed=seed, model_path=str(root), config_file=str(private_config),
-                low_vram=low_vram, resolution=resolution,
-                progress_cb=progress_cb, cancel_event=cancel_event,
-            )
+            if progress_cb is not None:
+                progress_cb(8, "Preparing local model configuration")
+            private_config = prepare_mv_pipeline_config(root, base, Path(temporary) / "pipeline_mv.local.json")
+            loader = _private_local_loader(root, private_config) if real_inference else nullcontext()
+            naf_loader = _local_naf_extractors(inference_mv, Path(naf_path).resolve()) if real_inference else nullcontext()
+            with loader, naf_loader:
+                _check_cancel(cancel_event)
+                inference_runner(
+                    views_dir=str(views_dir), output_path=str(glb_path), num_views=num_views,
+                    seed=seed, model_path=str(root), config_file=str(private_config),
+                    low_vram=low_vram, resolution=resolution,
+                    progress_cb=progress_cb, cancel_event=cancel_event,
+                )
     _check_cancel(cancel_event)
     if not glb_path.is_file():
         raise RuntimeError("Pixal3D MV runtime did not produce a GLB")

@@ -6,7 +6,7 @@ This repository contains only the extension runtime, setup entrypoint, and a rel
 
 ## Installation
 
-Install this repository as a Modly extension, then use Modly Models to download
+Use **Models/Extensions → Install from GitHub** with this repository, then use Modly Models to download
 the weight groups needed by the node you intend to run. Repair/setup only
 creates dependency environments; it never downloads model weights.
 
@@ -179,9 +179,10 @@ copied or vendored here.
 
 Connect **Load Capture** to **Prepare Scene from Estimates**, or connect an
 existing typed scene to **Normalize Annotated Scene**. Connect either scene
-output to the existing **WorldSculpt** node. Use the existing image and scene
-routes unchanged for older workflows; typed capture/scene model generation uses
-the generic host artifact route.
+output to the existing **WorldSculpt** node. For Pixal3D MV, connect **Load
+Capture** directly to **Calibrated Capture to 3D** and provide the camera
+metadata described below. Typed capture/scene model generation uses the generic
+host artifact route; WorldSculpt remains a separate scene-input model.
 
 ## Outputs
 
@@ -248,13 +249,65 @@ The extension preserves Pixal3D's exported GLB orientation. Do not apply a fixed
 
 ## Remaining runtime requirement
 
-### Posed multi-view node (candidate; not yet live-accepted)
+### Calibrated multi-view capture node (candidate; not yet live-accepted)
 
-`generate-mv` is a separate `scene`-input node. It is **TencentARC Pixal3D multi-view**, not the AlayaLab WorldSculpt scene-composition pipeline. It requires both host-provided `pixal3d-base` and `pixal3d-mv` shared weight roots. The MV group contains only `pipeline_mv.json` and the four `_mv` denoiser JSON/safetensors pairs from `TencentARC/Pixal3D` revision `b0cb2e1b794cab9aa0ac38a95d794a4d9337437f`; the base group owns the three shared decoders and DINO/RMBG. The extension generates a private temporary MV config pointing decoder and matting references into the host-provided base root, without mutating downloaded weights, and validates every referenced checkpoint before importing inference. NAF must already exist at `models/pixal3d/auxiliary/naf/naf_release.pth` for MV; it is never silently downloaded by the MV path.
+`generate-mv` is a `capture -> mesh` node. It is **TencentARC Pixal3D multi-view**, not the AlayaLab WorldSculpt scene-composition pipeline. It requires both host-provided `pixal3d-base` and `pixal3d-mv` shared weight roots. The MV group contains only `pipeline_mv.json` and the four `_mv` denoiser JSON/safetensors pairs from `TencentARC/Pixal3D` revision `b0cb2e1b794cab9aa0ac38a95d794a4d9337437f`; the base group owns the three shared decoders and DINO/RMBG. The extension generates a private temporary MV config pointing decoder and matting references into the host-provided base root, without mutating downloaded weights, and validates every referenced checkpoint before importing inference. NAF must already exist at `models/pixal3d/auxiliary/naf/naf_release.pth` for MV; it is never silently downloaded by the MV path.
 
-The scene input is a Modly `modly.scene-manifest.v1` JSON file in `Workspace` whose `sceneRoot` is a workspace-relative directory containing `transforms.json` and its referenced image files. `transforms.json` needs a non-empty `frames` array, each frame's image path and finite 4×4 camera-to-world matrix, and a horizontal `camera_angle_x` in radians (per frame or top-level). Frame 0 should be the canonical front view. This node does not accept repeated independent images or substitute single-view inference. Modly's current scene endpoint passes the validated scene manifest path in `scene_manifest_path` parameters while forwarding empty image bytes; the extension consumes the manifest path, not those bytes.
+Use the existing `modly.capture-manifest.v1` envelope described above: ordered
+PNG/JPEG images or a video with declared dimensions and decoded frame count.
+`num_views` selects the first N frames in manifest order or video decode order,
+without sorting filenames, duplicating views, or substituting single-view
+inference. The selected media are normalized into a disposable private view
+directory; source images, video, and downloaded weights are never rewritten.
+Image alpha is preserved. Video frame count and dimensions are checked while
+decoding, and staging is removed after success, failure, or cancellation.
 
-**Runtime boundary:** the published native wheelhouse still contains the single-view Pixal3D core wheel. Normal setup now checksum-verifies and force-reinstalls a bundled, additive pure-Python MV core candidate after that wheelhouse; it does not change native CUDA/NATTEN packages or claim GPU compatibility. The vendored upstream `inference_mv.py` invokes the MV cascade through a private generated config and a scoped local-only loader, so downloaded shared weight files are not modified and corrupt/missing local checkpoints cannot trigger an upstream Hugging Face fallback. If the core overlay is absent or invalid, setup fails rather than leaving an inert node. Current tests cover contracts and a mocked inference call, **not** a real MV GLB or Modly UI end-to-end. Modly also needs the multi-source and shared-weight-group host changes before either node's new layout can run live.
+**Camera calibration is still required.** The pinned TencentARC MV implementation
+consumes known poses and FOVs; changing the transport to capture does not add a
+pose-estimation model. Uncalibrated captures fail with an actionable error before
+inference. Add a `multiview` object to the capture manifest, with one camera per
+image or decoded video frame, in the same contiguous zero-based order:
+
+```json
+{
+  "multiview": {
+    "cameraConvention": "blender-c2w",
+    "meshScale": 1.0,
+    "cameras": [
+      {
+        "index": 0,
+        "cameraAngleX": 0.5,
+        "transformMatrix": [[1,0,0,0],[0,0,-1,-3],[0,1,0,0],[0,0,0,1]]
+      }
+    ]
+  }
+}
+```
+
+The example shows the canonical front camera. Supply the actual calibration for
+every frame: a finite proper rigid 4×4 camera-to-world transform in Blender/NeRF
+convention (Z-up world, camera looks along -Z with +Y up), nonzero camera distance,
+and horizontal FOV in radians in `(0, pi)`. `meshScale` is a positive upstream
+scale, defaulting to 1; it is not an inferred metric calibration. Frame 0 should
+be the canonical front view. Arbitrary raw footage needs an external calibration
+step; neither guessed cameras nor SAM3/DA3 inference are silently inserted here.
+
+Submit through `/generate/from-artifact` with `input_kind: "capture"`,
+`input_path: "Captures/object/capture-manifest.json"`, and
+`model_id: "pixal3d/generate-mv"`. The existing host already validates and forwards
+this typed input; the generator trusts that input path, not path overrides in
+parameters. No new host endpoint is required.
+
+**Migration from 0.4.x:** reconnect old MV scene edges to a Load Capture node.
+Convert known `transforms.json` calibration into `multiview.cameras`, preserving
+frame order and mapping `transform_matrix`/`camera_angle_x` to
+`transformMatrix`/`cameraAngleX`. Scene manifests and image-byte calls are rejected
+by the MV generator rather than reinterpreted. The explicitly named low-level
+Python `run_multiview(scene_manifest_path=...)` compatibility entry remains for
+already-calibrated callers; it is not the Modly node input and cannot override a
+simultaneously supplied capture.
+
+**Runtime boundary:** the published native wheelhouse still contains the single-view Pixal3D core wheel. Normal setup now checksum-verifies and force-reinstalls a bundled, additive pure-Python MV core candidate after that wheelhouse; it does not change native CUDA/NATTEN packages or claim GPU compatibility. The vendored upstream `inference_mv.py` invokes the MV cascade through a private generated config and a scoped local-only loader, so downloaded shared weight files are not modified and corrupt/missing local checkpoints cannot trigger an upstream Hugging Face fallback. If the core overlay is absent or invalid, setup fails rather than leaving an inert node. Current tests cover calibrated capture contracts, real bounded image/video decoding, custody, cleanup, and a mocked inference call, **not** a real MV GLB or Modly UI end-to-end. Modly also needs typed capture routing, multi-source downloads, and shared-weight-group support before this layout can run live.
 
 MV NAF loading is intercepted at the exact upstream Torch Hub call and reads only the provisioned local checkpoint; unexpected Hub requests fail closed. MV progress is reported at stage boundaries. Cancellation is checked before and after expensive stages, but the upstream model-loading, cascade, and GLB extraction calls cannot be interrupted mid-call; a cancellation request takes effect at the next boundary.
 

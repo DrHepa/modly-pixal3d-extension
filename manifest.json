@@ -3,7 +3,7 @@
   "kind": "model",
   "type": "model",
   "name": "Pixal3D",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "source": "https://github.com/DrHepa/modly-pixal3d-extension",
   "author": "DrHepa",
   "description": "Pixal3D image, posed-view, and WorldSculpt workflows with clean-room capture-to-scene preparation using official SAM3 and DA3 Base runtimes.",
@@ -130,9 +130,9 @@
     },
     {
       "id": "generate-mv",
-      "name": "Posed Views to 3D",
+      "name": "Calibrated Capture to 3D",
       "type": "model.generate",
-      "input": "scene",
+      "input": "capture",
       "output": "mesh",
       "params_schema": [
         {
@@ -185,7 +185,7 @@
           "default": 4,
           "min": 1,
           "max": 16,
-          "tooltip": "Use the first N posed frames from transforms.json; the first frame must be the canonical front view."
+          "tooltip": "Use the first N ordered capture frames with calibrated cameras; frame 0 is the canonical front view."
         }
       ],
       "weight_groups": [
