@@ -82,6 +82,12 @@ Fifth-run evidence from GitHub Actions run `27076133932` successfully built `nat
 
 Sixth-run evidence from GitHub Actions run `27086897007` reached candidate assembly and failed because `$exactStackPattern = "$CudaTag`torch..."` interpreted PowerShell backtick-`t` as a tab, producing `cu128\torch2.7` instead of `cu128torch2.7`. The script now builds the pattern with braced interpolation: `${CudaTag}torch${TorchMinor}-...`.
 
+Seventh-run evidence from GitHub Actions run `27089946691` completed successfully and uploaded the artifact `pixal3d-wheelhouse-windows-x64-cp311-cuda128-blackwell-candidate` with size `295167752` bytes. That artifact was an Actions candidate artifact only, not a GitHub release asset, and is now expired.
+
+Eighth-run evidence from GitHub Actions run `27274530136` also completed successfully and uploaded the artifact `pixal3d-wheelhouse-windows-x64-cp311-cuda128-blackwell-candidate` with size `295167806` bytes. That artifact was also an Actions candidate artifact only, not a GitHub release asset, and is now expired. These successful CI builds prove the candidate workflow can assemble an archive; they do **not** prove RTX 50-series runtime support, because no real RTX 50-series hardware setup, native import, NATTEN runtime, or generation validation was performed.
+
+Ninth-run evidence from GitHub Actions run `35533729886` was dispatched from `feat/pixal3d-upstream-multinode` at commit `cc56796d479e58f4e46f28256eacc9bf35748eec` and failed during the NATTEN build before candidate archive assembly. CUDA 12.8 rejected the hosted runner's current MSVC toolchain with `unsupported Microsoft Visual Studio version`; the candidate archive step and artifact upload step were skipped, so there is no fresh artifact or metadata from that run. The prior successful candidate artifacts remain expired.
+
 ## Publish criteria for a future Blackwell lane
 
 A future Blackwell lane requires all of the following before it can be declared supported:
@@ -92,5 +98,19 @@ A future Blackwell lane requires all of the following before it can be declared 
 4. NATTEN imports with `HAS_LIBNATTEN == True` on a real NVIDIA Windows machine.
 5. Full Pixal3D Low VRAM generation succeeds on RTX 50-series hardware and exports a valid GLB.
 6. Release asset is checksum-pinned in `wheelhouse.manifest.json` only after validation.
+
+## Official promotion checklist
+
+Do **not** move `windows-x64-cp311-cuda128-blackwell` from candidate/inactive to an official manifest lane until every item below has concrete evidence:
+
+1. Trigger a fresh candidate workflow run from the current promotion branch.
+2. Download the resulting Actions artifact to a temporary audit location, not into an installed extension, runtime venv, model directory, or Modly workspace.
+3. Retain the candidate metadata file `WINDOWS-BLACKWELL-CANDIDATE.json` together with the archive name, archive byte size, archive SHA-256, workflow run URL, workflow run id, source commit, and artifact id.
+4. On a real Windows RTX 50-series machine, run Modly setup/Repair with the real JSON payload (`cuda_version`/`gpu_sm`) and prove the Blackwell lane is selected.
+5. In the repaired extension venv on that same machine, verify `pip check`, torch `2.7.1+cu128`, torchvision `0.22.1+cu128`, torch CUDA `12.8`, GPU SM `120`, every required Windows native import, every upstream compatibility import, and `natten.HAS_LIBNATTEN == True`.
+6. Run Pixal3D Low VRAM generation on RTX 50-series hardware and validate that the returned GLB exists, is non-empty, opens as a valid mesh, and is viewer-compatible.
+7. Publish the validated archive as a GitHub release asset only after the runtime evidence above is recorded.
+8. Add the official lane to `wheelhouse.manifest.json` with exact `filename`, `size_bytes`, `sha256`, compression, packages, and selectors.
+9. Re-run focused wheelhouse/setup contract tests and keep the docs clear that RTX 50-series support begins only at the validated release asset and manifest revision.
 
 Until those conditions are met, RTX 5090 / Blackwell remains experimental and unsupported by the published wheelhouse.

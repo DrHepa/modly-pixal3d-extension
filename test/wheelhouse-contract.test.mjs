@@ -20,6 +20,42 @@ function runPython(source) {
   return JSON.parse(result.stdout)
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+
+test('Blackwell CUDA 12.8 workflow pins a CUDA-supported VS 2022 v143 host compiler and proves nvcc sees it', () => {
+  const workflow = readFileSync(join(repoRoot, '.github/workflows/wheelhouse-windows-x64-cp311-cuda128-blackwell-candidate.yml'), 'utf8')
+  const expectedActionPins = {
+    'actions/checkout': { sha: '11d5960a326750d5838078e36cf38b85af677262', version: 'v4' },
+    'actions/setup-python': { sha: 'a26af69be951a213d495a4c3e4e4022e16d87065', version: 'v5' },
+    'Jimver/cuda-toolkit': { sha: '3d45d157f327c09c04b50ee6ccdea2d9d017ec76', version: 'v0.2.35' },
+    'ilammy/msvc-dev-cmd': { sha: '0b201ec74fa43914dc39ae48a89fd1d8cb592756', version: 'v1' },
+    'actions/upload-artifact': { sha: 'ea165f8d65b6e75b540449e92b4886f43607fa02', version: 'v4' },
+  }
+
+  assert.match(workflow, /runs-on:\s*windows-2022/)
+  assert.doesNotMatch(workflow, /runs-on:\s*windows-latest/)
+  assert.doesNotMatch(workflow, /allow-unsupported-compiler/)
+  for (const [action, { sha, version }] of Object.entries(expectedActionPins)) {
+    assert.match(workflow, new RegExp(`uses:\\s*${escapeRegExp(action)}@${sha}\\s*#\\s*${escapeRegExp(version)}`))
+  }
+  for (const match of workflow.matchAll(/^\s*uses:\s*([^\s#]+)(?:\s*#\s*([^\n]+))?$/gm)) {
+    const [action, ref] = match[1].split('@')
+    assert.ok(action in expectedActionPins, `Unexpected third-party GitHub Action in Blackwell workflow: ${action}`)
+    assert.match(ref, /^[0-9a-f]{40}$/, `GitHub Action ${action} must be pinned to a full 40-character commit SHA`)
+    assert.equal(ref, expectedActionPins[action].sha)
+    assert.equal(match[2]?.trim(), expectedActionPins[action].version)
+  }
+  assert.match(workflow, /Microsoft\.VisualStudio\.Component\.VC\.14\.38\.17\.8\.x86\.x64/)
+  assert.match(workflow, /uses:\s*ilammy\/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756\s*#\s*v1[\s\S]*vsversion:\s*'2022'[\s\S]*toolset:\s*14\.38/)
+  assert.match(workflow, /\$env:VCToolsVersion\s+-notmatch\s+'\^14\\.38\\.'/)
+  assert.match(workflow, /\$clVersion\.Major\s+-ne\s+19\s+-or\s+\$clVersion\.Minor\s+-ne\s+38/)
+  assert.match(workflow, /cuda-host-compiler-probe\.cu/)
+  assert.match(workflow, /nvcc\s+-v\s+-c\s+\$probeSource/)
+})
+
 const MANUAL_FOV_OPTIONS = [
   { value: '-1', label: 'Auto (MoGe)' },
   { value: '0.2', label: '0.2 rad' },
@@ -2581,7 +2617,7 @@ test('Blackwell Windows wheelhouse candidate is exact-stack and artifact-only', 
   assert.match(workflow, /\$env:NATTEN_CUDA_ARCH = \$env:CUDA_ARCH_LIST/)
   assert.match(workflow, /natten-\$env:NATTEN_PACKAGE_VERSION-\*-win_amd64\.whl/)
   assert.match(workflow, /build-windows-x64-cp311-cuda128-blackwell\.ps1 -NattenWheelPath[\s\S]*-NattenVersion \$env:NATTEN_PACKAGE_VERSION/)
-  assert.match(workflow, /actions\/upload-artifact@v4/)
+  assert.match(workflow, /actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\s*#\s*v4/)
   assert.doesNotMatch(workflow, /upload-release-asset/i)
 
   assert.match(script, /windows-x64-cp311-cuda128-blackwell/)

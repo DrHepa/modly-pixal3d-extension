@@ -19,7 +19,7 @@ on:
 jobs:
   build-wheelhouse:
     name: Build windows-x64-cp311-cuda128-blackwell candidate
-    runs-on: windows-latest
+    runs-on: windows-2022
     env:
       WHEELHOUSE_LANE: windows-x64-cp311-cuda128-blackwell
       PYTHON_VERSION: '3.11'
@@ -29,23 +29,92 @@ jobs:
       NATTEN_PACKAGE_VERSION: '0.21.6'
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install CUDA toolkit candidate
-        uses: Jimver/cuda-toolkit@v0.2.35
+        uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
         with:
           cuda: ${{ github.event.inputs.cuda_version }}
           method: network
 
+      - name: Install CUDA-supported VS 2022 v143 MSVC 14.38 toolset
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $component = 'Microsoft.VisualStudio.Component.VC.14.38.17.8.x86.x64'
+          $vsInstallerDir = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer"
+          $vswhere = Join-Path $vsInstallerDir 'vswhere.exe'
+          $vsInstaller = Join-Path $vsInstallerDir 'vs_installer.exe'
+          $installPath = & $vswhere -products * -version '[17.0,18.0)' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath -latest
+          if ([string]::IsNullOrWhiteSpace($installPath)) {
+            throw 'Visual Studio 2022 with C++ build tools was not found on the runner.'
+          }
+          Write-Host "Installing CUDA 12.8-supported MSVC v143 toolset component $component into $installPath"
+          $process = Start-Process -FilePath $vsInstaller -ArgumentList @(
+            'modify',
+            '--installPath', $installPath,
+            '--add', $component,
+            '--quiet',
+            '--norestart',
+            '--nocache'
+          ) -Wait -PassThru -WindowStyle Hidden
+          if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
+            throw "Visual Studio Installer failed with exit code $($process.ExitCode)."
+          }
+          $toolsetDir = Join-Path $installPath 'VC\Tools\MSVC'
+          $toolset = @(Get-ChildItem -Path $toolsetDir -Directory -Filter '14.38.*' | Sort-Object Name -Descending | Select-Object -First 1)
+          if ($toolset.Count -ne 1) {
+            throw "CUDA-supported MSVC 14.38 toolset was not installed under $toolsetDir."
+          }
+          Write-Host "Installed MSVC toolset $($toolset[0].Name)"
+
       - name: Set up MSVC developer environment
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
           arch: x64
+          vsversion: '2022'
+          toolset: 14.38
+
+      - name: Verify CUDA-supported MSVC host compiler
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:CUDA_PATH) {
+            $env:CUDA_PATH = Join-Path $env:ProgramFiles "NVIDIA GPU Computing Toolkit\CUDA\v${{ github.event.inputs.cuda_version }}"
+          }
+          $env:Path = "$($env:CUDA_PATH)\bin;$env:Path"
+          if ($env:VisualStudioVersion -ne '17.0') {
+            throw "Expected Visual Studio 2022 developer environment (VisualStudioVersion=17.0), got '$env:VisualStudioVersion'."
+          }
+          if ($env:VCToolsVersion -notmatch '^14\.38\.') {
+            throw "Expected CUDA 12.8-supported MSVC 14.38 toolset, got VCToolsVersion='$env:VCToolsVersion'."
+          }
+          $clBanner = (& cl 2>&1 | Out-String)
+          Write-Host $clBanner
+          $match = [regex]::Match($clBanner, 'Compiler Version (?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)')
+          if (-not $match.Success) {
+            throw 'Could not parse cl.exe compiler version.'
+          }
+          $clVersion = [version]"$($match.Groups['major'].Value).$($match.Groups['minor'].Value).$($match.Groups['patch'].Value)"
+          if ($clVersion.Major -ne 19 -or $clVersion.Minor -ne 38) {
+            throw "CUDA 12.8 requires an MSVC 193x host compiler for VS 2022; cl.exe reported $clVersion."
+          }
+          nvcc --version
+          $probeSource = Join-Path $env:RUNNER_TEMP 'cuda-host-compiler-probe.cu'
+          $probeObject = Join-Path $env:RUNNER_TEMP 'cuda-host-compiler-probe.obj'
+          @'
+          __global__ void probe_kernel() {}
+          int main() { return 0; }
+          '@ | Set-Content -Path $probeSource -Encoding ASCII
+          nvcc -v -c $probeSource -o $probeObject
+          if (-not (Test-Path $probeObject)) {
+            throw 'nvcc host compiler probe did not produce an object file.'
+          }
 
       - name: Build NATTEN Blackwell candidate wheel
         shell: pwsh
@@ -149,7 +218,7 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File tools/wheelhouse/build-windows-x64-cp311-cuda128-blackwell.ps1 -NattenWheelPath $nattenWheel -NattenVersion $env:NATTEN_PACKAGE_VERSION
 
       - name: Upload Blackwell candidate artifact only
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pixal3d-wheelhouse-${{ env.WHEELHOUSE_LANE }}-candidate
           path: build/wheelhouse/${{ env.WHEELHOUSE_LANE }}/dist/wheelhouse/*
