@@ -3,3 +3,6 @@ __pycache__/
 .pytest_cache/
 *.pyc
 models/
+
+venv-worldsculpt/
+venv-scene-prep/

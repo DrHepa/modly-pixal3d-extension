@@ -1,8 +1,23 @@
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Iterator
 
 
 EXTENSION_ID = "pixal3d"
+_shared_base_root: ContextVar[Path | None] = ContextVar("pixal3d_shared_base_root", default=None)
+
+
+@contextmanager
+def shared_base_root(root: str | Path | None) -> Iterator[None]:
+    """Scope the host-provided shared root to one generator operation."""
+
+    token = _shared_base_root.set(Path(root) if root is not None else None)
+    try:
+        yield
+    finally:
+        _shared_base_root.reset(token)
 MODELS_PREFIX = "models"
 PIXAL3D_GENERATE_SUFFIX = (MODELS_PREFIX, EXTENSION_ID, "generate")
 WORKSPACE_SEGMENT = "workspace"
@@ -155,6 +170,11 @@ def resolve_modly_layout(workspace_root: str | Path, *, ext_dir: str | Path | No
 def resolve_storage_path(layout: ModlyLayout, logical_path: str) -> Path:
     safe_path = require_safe_relative_path(logical_path)
     relative = PurePosixPath(safe_path)
+    # The shared root is supplied by Modly's runner, never inferred from the
+    # private node directory. Keep legacy CLI paths when no shared root exists.
+    shared_root = _shared_base_root.get()
+    if shared_root and relative.parts[:4] == ("models", EXTENSION_ID, "_shared", "pixal3d-base"):
+        return (Path(shared_root) / Path(*relative.parts[4:])).resolve()
     if relative.parts and relative.parts[0] == MODELS_PREFIX:
         return (layout.modly_home / Path(*relative.parts)).resolve()
     return (layout.ext_dir / Path(*relative.parts)).resolve()

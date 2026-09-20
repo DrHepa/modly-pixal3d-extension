@@ -1,0 +1,46 @@
+{
+  "schema": "modly.worldsculpt-wheelhouse.v1",
+  "platform": "linux_aarch64",
+  "python": "3.12",
+  "cuda": "13.0",
+  "torch": "2.12.0+cu130",
+  "source_iopath_sdist_sha256": "3311c16a4d9137223e20f141655759933e1eda24f8bff166af834af3c645ef01",
+  "wheels": [
+    {
+      "file": "fpsample-0.3.3-cp312-cp312-manylinux_2_28_aarch64.whl",
+      "sha256": "cdd2c083d86907a6ca1d3f62d06c9d3d34447e18dfd89992edfe77e5190fee36"
+    },
+    {
+      "file": "ftfy-6.3.1-py3-none-any.whl",
+      "sha256": "7c70eb532015cd2f9adb53f101fb6c7945988d023a085d127d1573dc49dd0083"
+    },
+    {
+      "file": "huggingface_hub-0.36.2-py3-none-any.whl",
+      "sha256": "48f0c8eac16145dfce371e9d2d7772854a4f591bcb56c9cf548accf531d54270"
+    },
+    {
+      "file": "iopath-0.1.10-py3-none-any.whl",
+      "sha256": "78d0ba9ff80bcebe4c3b3b62e966f3953a0c9ff49f0d0abcd00aeadd18bfb9a2"
+    },
+    {
+      "file": "peft-0.18.0-py3-none-any.whl",
+      "sha256": "624f69ca6393b765ccc6734adda7ca57d80b238f0900a42c357d8b67a03d62ff"
+    },
+    {
+      "file": "portalocker-4.3.2-py3-none-any.whl",
+      "sha256": "42f0362e7343af78b25eb095c0cde300e746a0ab6647a835cc30764918490c93"
+    },
+    {
+      "file": "pycocotools-2.0.11-cp312-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+      "sha256": "7fd4121766cc057133534679c0ec3f9023dbd96e9b31cf95c86a069ebdac2b65"
+    },
+    {
+      "file": "transformers-4.57.1-py3-none-any.whl",
+      "sha256": "b10d05da8fa67dc41644dbbf9bc45a44cb86ae33da6f9295f5fbf5b7890bd267"
+    },
+    {
+      "file": "wcwidth-0.8.4-py3-none-any.whl",
+      "sha256": "2097bb1d28a0ba8fe177c2eb607317f9b1627b03f33ebebfd3da670b337a65ba"
+    }
+  ]
+}

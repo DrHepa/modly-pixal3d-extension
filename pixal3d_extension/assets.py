@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
+from pixal3d_extension.naf_checkpoint import verify_naf_checkpoint
 from pixal3d_extension.paths import resolve_modly_layout, resolve_storage_path
 
 
@@ -44,7 +45,7 @@ class AssetManifest:
 PRIMARY_ASSET = AssetManifest(
     key="primary",
     repo_id="TencentARC/Pixal3D",
-    local_root="models/pixal3d/generate",
+    local_root="models/pixal3d/_shared/pixal3d-base",
     sentinels=(
         "pipeline.json",
         "ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
@@ -61,19 +62,19 @@ AUXILIARY_ASSETS = {
     "dino": AssetManifest(
         key="dino",
         repo_id="camenduru/dinov3-vitl16-pretrain-lvd1689m",
-        local_root="models/pixal3d/auxiliary/dinov3",
+        local_root="models/pixal3d/_shared/pixal3d-base/auxiliary/dinov3",
         sentinels=("config.json", "preprocessor_config.json", "model.safetensors"),
     ),
     "rmbg": AssetManifest(
         key="rmbg",
         repo_id="camenduru/RMBG-2.0",
-        local_root="models/pixal3d/auxiliary/rmbg",
+        local_root="models/pixal3d/_shared/pixal3d-base/auxiliary/rmbg",
         sentinels=("config.json", "preprocessor_config.json", "BiRefNet_config.py", "birefnet.py", "model.safetensors"),
     ),
     "moge": AssetManifest(
         key="moge",
         repo_id="Ruicheng/moge-2-vitl",
-        local_root="models/pixal3d/auxiliary/moge",
+        local_root="models/pixal3d/_shared/pixal3d-base/auxiliary/moge",
         sentinels=("model.pt",),
         local_reference="sentinel",
     ),
@@ -102,7 +103,7 @@ def _bootstrap_allowlist_entry(manifest: AssetManifest) -> dict[str, Any]:
     return entry
 
 
-AUXILIARY_BOOTSTRAP_ALLOWLIST = {key: _bootstrap_allowlist_entry(manifest) for key, manifest in AUXILIARY_ASSETS.items()}
+AUXILIARY_BOOTSTRAP_ALLOWLIST = {"naf": _bootstrap_allowlist_entry(AUXILIARY_ASSETS["naf"])}
 
 AUXILIARY_SOURCE_MODES = {"default", "auto", "remote", "local", "offline", "strict"}
 LOCAL_REQUIRED_AUXILIARY_SOURCE_MODES = {"local", "offline", "strict"}
@@ -115,7 +116,7 @@ LOCALIZABLE_RUNTIME_DEPENDENCIES = (
         "local_root": AUXILIARY_ASSETS["moge"].local_root,
         "local_checkpoint": AUXILIARY_ASSETS["moge"].sentinel_paths[0],
         "runtime_hook": "inference.load_moge_model",
-        "offline_status": "local_first_with_remote_or_hf_cache_fallback",
+        "offline_status": "modly_shared_weight_group_required",
         "localization_status": "wired_to_local_checkpoint_when_available",
     },
     {
@@ -124,7 +125,7 @@ LOCALIZABLE_RUNTIME_DEPENDENCIES = (
         "local_root": AUXILIARY_ASSETS["naf"].local_root,
         "local_checkpoint": AUXILIARY_ASSETS["naf"].sentinel_paths[0],
         "runtime_hook": "hubconf.naf",
-        "offline_status": "local_first_with_torch_cache_or_network_fallback_in_default",
+        "offline_status": "first_generation_or_manual_bootstrap_required",
         "localization_status": "wired_to_local_checkpoint_when_available",
         "strict_kernel_note": "NAF checkpoint localization is separate from NATTEN/libnatten native kernel availability.",
     },
@@ -356,7 +357,7 @@ def bootstrap_auxiliary_assets(
     token: str | None = None,
     revision: str | None = None,
 ) -> dict[str, Any]:
-    """Populate exact allowlisted DINO/RMBG/MoGe/NAF auxiliary assets.
+    """Populate the NAF checkpoint that Hugging Face model_sources cannot own.
 
     Files are staged under the Modly model storage tree first. Final sentinel
     files are replaced only after every allowlisted file has been staged
@@ -366,7 +367,15 @@ def bootstrap_auxiliary_assets(
 
     root = Path(workspace_root)
     before = check_auxiliary_sentinels(root)
-    if before["status"] == "ready" and not force:
+    naf_missing = before["assets"]["naf"]["missing"]
+    if not naf_missing and not force:
+        try:
+            verify_naf_checkpoint(Path(before["assets"]["naf"]["resolved_value"]))
+        except (OSError, RuntimeError) as exc:
+            return _bootstrap_failure(
+                root, "auxiliary_bootstrap_failed", "local Pixal3D NAF checkpoint failed integrity validation",
+                downloads_started=False, attempted=[], error=f"{type(exc).__name__}: {exc}",
+            )
         return {
             "status": "ready",
             "code": "auxiliary_assets_ready",
@@ -375,8 +384,8 @@ def bootstrap_auxiliary_assets(
             "force": False,
             "allowlist": AUXILIARY_BOOTSTRAP_ALLOWLIST,
             "sentinel_status": before,
-            "missing": [],
-            "generation_allowed": True,
+            "missing": before.get("missing", []),
+            "generation_allowed": before["status"] == "ready",
         }
 
     layout = resolve_modly_layout(root)
@@ -391,7 +400,8 @@ def bootstrap_auxiliary_assets(
         auxiliary_parent.mkdir(parents=True, exist_ok=True)
         stage_root.mkdir(parents=True, exist_ok=False)
 
-        for key, manifest in AUXILIARY_ASSETS.items():
+        for key in ("naf",):
+            manifest = AUXILIARY_ASSETS[key]
             staged[key] = {
                 "repo_id": manifest.repo_id,
                 "source_kind": manifest.source_kind,
@@ -442,14 +452,17 @@ def bootstrap_auxiliary_assets(
                     raise RuntimeError(f"downloader did not create allowlisted file: {manifest.repo_id}/{filename}")
                 staged[key]["files"].append(filename)
 
-        for key, manifest in AUXILIARY_ASSETS.items():
+        for key in ("naf",):
+            manifest = AUXILIARY_ASSETS[key]
             for sentinel in manifest.sentinel_paths:
                 relative_file = _manifest_relative_file(manifest, sentinel)
                 stage_path = stage_root / key / Path(*relative_file.parts)
                 if not stage_path.is_file():
                     raise RuntimeError(f"staged auxiliary file missing before final copy: {manifest.key}/{relative_file}")
+                verify_naf_checkpoint(stage_path)
 
-        for key, manifest in AUXILIARY_ASSETS.items():
+        for key in ("naf",):
+            manifest = AUXILIARY_ASSETS[key]
             for sentinel in manifest.sentinel_paths:
                 relative_file = _manifest_relative_file(manifest, sentinel)
                 stage_path = stage_root / key / Path(*relative_file.parts)
@@ -462,7 +475,7 @@ def bootstrap_auxiliary_assets(
         return _bootstrap_failure(
             root,
             "auxiliary_bootstrap_failed",
-            "failed to bootstrap Pixal3D DINO/RMBG/MoGe/NAF auxiliary assets",
+            "failed to bootstrap the Pixal3D NAF checkpoint",
             downloads_started=downloads_started,
             attempted=attempted,
             error=f"{type(exc).__name__}: {exc}",
@@ -471,7 +484,7 @@ def bootstrap_auxiliary_assets(
         shutil.rmtree(stage_root, ignore_errors=True)
 
     after = check_auxiliary_sentinels(root)
-    if after["status"] != "ready":
+    if after["assets"]["naf"]["missing"]:
         return {
             "status": "blocked",
             "code": "missing_auxiliary_assets",
@@ -496,8 +509,8 @@ def bootstrap_auxiliary_assets(
         "allowlist": AUXILIARY_BOOTSTRAP_ALLOWLIST,
         "assets": staged,
         "sentinel_status": after,
-        "missing": [],
-        "generation_allowed": True,
+        "missing": after.get("missing", []),
+        "generation_allowed": after["status"] == "ready",
     }
 
 
@@ -540,6 +553,11 @@ def resolve_auxiliary_sources(
 
     for key, manifest in AUXILIARY_ASSETS.items():
         asset = aux_status["assets"][key]
+        if key != "naf" and not asset["complete"]:
+            # These files belong to Modly's shared weight group. A missing
+            # source must never be disguised by an implicit HF-cache download.
+            missing.extend(asset["missing"])
+            continue
         if prefer_local and asset["complete"]:
             sources[key] = local_source(manifest, asset)
             continue

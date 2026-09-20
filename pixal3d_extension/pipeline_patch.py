@@ -16,8 +16,8 @@ DINO_REPLACEMENT = "camenduru/dinov3-vitl16-pretrain-lvd1689m"
 RMBG_SOURCE = "briaai/RMBG-2.0"
 RMBG_REPLACEMENT = "camenduru/RMBG-2.0"
 
-PIPELINE_PATH = Path("models/pixal3d/generate/pipeline.json")
-BACKUP_PATH = Path("models/pixal3d/generate/pipeline.json.modly-original")
+PIPELINE_PATH = Path("models/pixal3d/_shared/pixal3d-base/pipeline.json")
+BACKUP_PATH = Path("models/pixal3d/_shared/pixal3d-base/pipeline.json.modly-original")
 READINESS_METADATA_PATH = Path("models/pixal3d/readiness.json")
 PATCHER_VERSION = "2026-06-15"
 

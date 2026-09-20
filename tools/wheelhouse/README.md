@@ -2,6 +2,21 @@
 
 This directory documents the maintainer workflow for publishing release-backed wheelhouse assets. End users should run `python3 setup.py --prepare --json`; they should not build wheels locally during normal setup.
 
+## Pixal3D multi-view candidate provenance
+
+`build-pixal3d-mv-python-wheel.py` creates the bundled **pure-Python candidate overlay**, not a published native wheelhouse asset. It requires a local TencentARC/Pixal3D checkout at immutable commit `f7cf38429b0bd264f1995f0f8743a88b1c728b94` and the existing base `pixal3d-core` wheel with SHA256 `c46502c5ed195351efd150a229856095119435d356511f9343f71b8974a872f2`. It verifies the four patched Python source hashes, regenerates wheel RECORD hashes, and uses fixed ZIP timestamps for reproducibility. The resulting candidate SHA256 is `3ad32043cc429091d2bb2435e3e4256406f94da2dadfe92c4d36a44aa7c2309c` with those inputs. `setup.py` verifies this hash and reinstalls `wheels/mv/pixal3d_core-0.1.0+modly-py3-none-any.whl` after the release-backed wheelhouse's base wheel; this preserves the original single-view modules while adding the MV pipeline class.
+
+```bash
+python3 tools/wheelhouse/build-pixal3d-mv-python-wheel.py \
+  --source /absolute/path/to/Pixal3D-at-f7cf384 \
+  --base-wheel wheels/pixal3d_core-0.1.0+modly-py3-none-any.whl \
+  --output /tmp/pixal3d_core-mv-candidate.whl
+```
+
+The vendored `pixal3d_extension/vendor/inference_mv.py`, LICENSE and NOTICE are copied from the same immutable source; the inference file SHA256 is `875144f73fdf083e92717dcee260035c7391de09fe48f02316ce3ad3bf7aedf9`. The MV weight revision is separately pinned in `manifest.json` to Hugging Face commit `b0cb2e1b794cab9aa0ac38a95d794a4d9337437f`.
+
+The candidate is deliberately outside `wheelhouse.manifest.json`: it is pure Python and installed from the extension's own hash-verified artifact, while existing native lanes stay unchanged. This is **not** a claim that MV inference works on any GPU or on Blackwell. The native release archive must still be rebuilt and live-tested for each future exact platform/Python/CUDA lane before any MV support claim. Modly's host multi-source/shared-weight changes and a real posed-view UI→GPU→GLB test remain required.
+
 ## Local build recipe
 
 1. Build wheels in a clean Linux `aarch64`, Python `cp312`, CUDA `12.4` environment.

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import subprocess
 
 from pixal3d_extension.assets import (
     AUXILIARY_ASSETS,
@@ -21,13 +23,37 @@ SUPPORTED_RUNTIME_LANES = {
     "windows-x64-cp312-cuda124",
 }
 SUPPORTED_RUNTIME_LANE = "linux-aarch64-cp312-cuda124"
+TRANSFORMERS_VERSION = "4.57.3"
+
+
+def _private_transformers_version() -> str | None:
+    extension_root = Path(__file__).resolve().parents[1]
+    python = extension_root / "venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if not python.is_file():
+        return None
+    try:
+        result = subprocess.run(
+            [str(python), "-c", "from importlib.metadata import version; print(version('transformers'))"],
+            capture_output=True, text=True, timeout=15, check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() or None
+
+
+def single_view_transformers_compatibility() -> dict | None:
+    installed = _private_transformers_version()
+    if installed == TRANSFORMERS_VERSION:
+        return None
+    return {
+        "code": "transformers_version_mismatch",
+        "message": f"Pixal3D requires transformers=={TRANSFORMERS_VERSION} in its private venv; found {installed or 'missing'}.",
+        "required_version": TRANSFORMERS_VERSION,
+        "installed_version": installed,
+    }
 
 SETUP_REQUIRED_PATHS = [
     "venv",
-    "models/pixal3d/generate",
-    "models/pixal3d/auxiliary/dinov3",
-    "models/pixal3d/auxiliary/rmbg",
-    "models/pixal3d/auxiliary/moge",
     "models/pixal3d/auxiliary/naf",
     "models/pixal3d/readiness.json",
 ]
@@ -180,6 +206,14 @@ def check_readiness(
             "auxiliary_source": auxiliary_source,
             "localizable_runtime_dependencies": LOCALIZABLE_RUNTIME_DEPENDENCY_STATUS,
             "runtime_dependencies": RUNTIME_DEPENDENCY_STATUS,
+            "generation_allowed": False,
+        }
+
+    compatibility = single_view_transformers_compatibility()
+    if compatibility is not None:
+        return {
+            "status": "blocked",
+            **compatibility,
             "generation_allowed": False,
         }
 

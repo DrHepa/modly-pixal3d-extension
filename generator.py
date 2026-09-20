@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
-from pixal3d_extension.paths import derive_modly_home
+from pixal3d_extension.paths import derive_modly_home, shared_base_root
 
 
 PIXAL3D_SOURCE = "TencentARC/Pixal3D"
@@ -13,6 +13,12 @@ _DINO_SOURCE = "facebook/dinov3-vitl16-pretrain-lvd1689m"
 _DINO_REPLACEMENT = "camenduru/dinov3-vitl16-pretrain-lvd1689m"
 _RMBG_SOURCE = "briaai/RMBG-2.0"
 _RMBG_REPLACEMENT = "camenduru/RMBG-2.0"
+SHARED_BASE_GROUP = "pixal3d-base"
+SHARED_MV_GROUP = "pixal3d-mv"
+SAM3_GROUP = "sam3"
+DA3_GROUP = "da3-base"
+SCENE_ESTIMATE_NODE = "scene-from-estimates"
+SCENE_NORMALIZE_NODE = "normalize-annotated-scene"
 
 
 def _patch_pipeline_json(model_dir: Path | None) -> None:
@@ -51,9 +57,51 @@ class Pixal3DGenerator:
         self.pipeline_factory = pipeline_factory
         self._loaded = False
 
-    @classmethod
-    def params_schema(cls) -> list[dict[str, Any]]:
-        return [
+    def _effective_node_id(self) -> str | None:
+        return getattr(self, "MODEL_NODE_ID", None) or getattr(self, "node_id", None)
+
+    def _model_source(self) -> Path | None:
+        shared_dirs = getattr(self, "shared_model_dirs", None)
+        node_id = self._effective_node_id()
+        if node_id == "worldsculpt":
+            if isinstance(shared_dirs, dict) and "worldsculpt-adapters" in shared_dirs:
+                return Path(shared_dirs["worldsculpt-adapters"])
+            raise RuntimeError("Modly shared weight groups are required (worldsculpt-adapters); update Modly before using WorldSculpt")
+        group = SHARED_MV_GROUP if node_id == "generate-mv" else SHARED_BASE_GROUP
+        if isinstance(shared_dirs, dict) and group in shared_dirs:
+            return Path(shared_dirs[group])
+        # The extension's multi-source manifest requires PR #348. Do not
+        # silently use stale private weights when the host has no shared root.
+        if node_id in {"generate", "generate-mv"}:
+            raise RuntimeError(f"Modly shared weight groups are required ({group}); update Modly before using this extension")
+        return self.model_dir
+
+    def _base_source(self) -> Path:
+        shared_dirs = getattr(self, "shared_model_dirs", None)
+        if not isinstance(shared_dirs, dict) or SHARED_BASE_GROUP not in shared_dirs:
+            raise RuntimeError("Modly shared weight groups are required (pixal3d-base)")
+        return Path(shared_dirs[SHARED_BASE_GROUP])
+
+    def _scene_prep_sources(self) -> tuple[Path, Path]:
+        shared_dirs = getattr(self, "shared_model_dirs", None)
+        if not isinstance(shared_dirs, dict) or SAM3_GROUP not in shared_dirs or DA3_GROUP not in shared_dirs:
+            raise RuntimeError("Scene preparation requires Modly shared groups sam3 and da3-base")
+        return Path(shared_dirs[SAM3_GROUP]), Path(shared_dirs[DA3_GROUP])
+
+    def _single_view_compatibility_error(self) -> dict | None:
+        from pixal3d_extension.readiness import single_view_transformers_compatibility
+
+        return single_view_transformers_compatibility()
+
+    def params_schema(self) -> list[dict[str, Any]]:
+        if self._effective_node_id() in {SCENE_ESTIMATE_NODE, SCENE_NORMALIZE_NODE}:
+            manifest = json.loads((Path(__file__).resolve().parent / "manifest.json").read_text(encoding="utf-8"))
+            return next(node["params_schema"] for node in manifest["nodes"] if node["id"] == self._effective_node_id())
+        if self._effective_node_id() == "worldsculpt":
+            return [{"id": "face_budget", "label": "Faces per Instance", "type": "int",
+                     "default": 1000000, "min": 1000, "max": 3000000,
+                     "tooltip": "Maximum faces per composed instance; geometry-only GLB."}]
+        schema = [
             {
                 "id": "resolution",
                 "label": "Resolution",
@@ -77,6 +125,19 @@ class Pixal3DGenerator:
                 "tooltip": "Prefer low-VRAM mode for safer Pixal3D generation; Standard loads all models on GPU.",
             },
             {
+                "id": "manual_fov",
+                "label": "Manual FOV",
+                "type": "select",
+                "default": "-1",
+                "options": [
+                    {"value": "-1", "label": "Auto (MoGe)"},
+                    {"value": "0.2", "label": "0.2 rad"},
+                    {"value": "0.35", "label": "0.35 rad"},
+                    {"value": "0.5", "label": "0.5 rad"},
+                ],
+                "tooltip": "Auto uses MoGe camera estimation. Manual values skip MoGe and can help problematic inputs, but may cause perspective changes.",
+            },
+            {
                 "id": "texture_size",
                 "label": "Texture Size",
                 "type": "select",
@@ -97,8 +158,69 @@ class Pixal3DGenerator:
                 "tooltip": "Seed for reproducibility. -1 uses a random seed.",
             },
         ]
+        if self._effective_node_id() == "generate-mv":
+            schema = [item for item in schema if item["id"] not in {"manual_fov", "texture_size"}]
+            schema.append({"id": "num_views", "label": "Views to Use", "type": "int", "default": 4, "min": 1, "max": 16,
+                           "tooltip": "Use the first N posed frames from transforms.json."})
+        return schema
 
     def readiness_status(self) -> dict:
+        if self._effective_node_id() == SCENE_NORMALIZE_NODE:
+            return {"ok": True, "machine_code": "ready", "reason": "Annotated-scene normalization requires no model weights."}
+        if self._effective_node_id() == SCENE_ESTIMATE_NODE:
+            from pixal3d_extension.scene_prepare import validate_scene_prepare_weights
+            from pixal3d_extension.scene_prepare_lane import capability, validate_runtime
+
+            support = capability()
+            if not support["supported"]:
+                return {"ok": False, "machine_code": "scene_prep_unsupported_platform", "reason": support["reason"]}
+            try:
+                sam_root, da3_root = self._scene_prep_sources()
+                validate_scene_prepare_weights(sam_root, da3_root)
+                validate_runtime(Path(__file__).resolve().parent)
+            except (OSError, ValueError, RuntimeError) as exc:
+                return {"ok": False, "machine_code": "scene_prep_not_ready", "reason": str(exc)}
+            return {"ok": True, "machine_code": "ready", "reason": "Pinned local SAM3/DA3 assets and isolated Python 3.12 CUDA runtime are present; live inference remains untested."}
+        if self._effective_node_id() == "worldsculpt":
+            from pixal3d_extension.worldsculpt import missing_runtime, validate_base
+            from pixal3d_extension.worldsculpt_contract import validate_adapters
+
+            missing = missing_runtime()
+            try:
+                base = self._base_source()
+                adapter = self._model_source()
+                modly_home = derive_modly_home(model_dir=self.model_dir, workspace_dir=self.workspace_dir)
+                if modly_home is None:
+                    raise RuntimeError("Modly home is required for the local NAF checkpoint")
+                validate_adapters(adapter)
+                validate_base(base, modly_home / "models/pixal3d/auxiliary/naf/naf_release.pth")
+            except (OSError, ValueError, RuntimeError) as exc:
+                return {"ok": False, "machine_code": "worldsculpt_assets_missing", "reason": str(exc), "missing_runtime": missing}
+            if missing:
+                return {"ok": False, "machine_code": "worldsculpt_runtime_missing",
+                        "reason": "WorldSculpt requires exact pinned runtime dependencies and native kernels.", "missing_runtime": missing}
+            return {"ok": True, "machine_code": "ready", "reason": "Local assets and imports present; GPU inference untested."}
+        if self._effective_node_id() == "generate-mv":
+            from pixal3d_extension.multiview import missing_mv_assets, mv_runtime_available
+
+            try:
+                model_root = self._model_source()
+                base_root = self._base_source()
+            except RuntimeError as exc:
+                return {"ok": False, "machine_code": "mv_shared_groups_unavailable", "reason": str(exc)}
+            modly_home = derive_modly_home(model_dir=self.model_dir, workspace_dir=self.workspace_dir)
+            naf_path = (modly_home / "models/pixal3d/auxiliary/naf/naf_release.pth") if modly_home else Path("__missing_naf__")
+            missing = missing_mv_assets(model_root, base_root, naf_path)
+            runtime_ready = mv_runtime_available()
+            return {"ok": not missing and runtime_ready,
+                    "machine_code": "mv_assets_missing" if missing else "mv_runtime_missing" if not runtime_ready else "ready",
+                    "reason": "Download the Pixal3D MV group and provision NAF before generation." if missing else
+                    "An exact-stack Pixal3D MV Python wheel is required; the published wheelhouse is single-view only." if not runtime_ready else
+                    "Posed-view assets and Python module found; live GPU inference remains to be validated.",
+                    "missing": missing}
+        compatibility_error = self._single_view_compatibility_error()
+        if compatibility_error is not None:
+            return {"ok": False, "machine_code": compatibility_error["code"], "reason": compatibility_error["message"]}
         ready = self.is_downloaded()
         return {
             "ok": ready,
@@ -107,28 +229,151 @@ class Pixal3DGenerator:
         }
 
     def is_downloaded(self, root: str | Path = ".") -> bool:
-        model_dir = self.model_dir or Path(root)
+        if self._effective_node_id() == SCENE_NORMALIZE_NODE:
+            return True
+        if self._effective_node_id() == SCENE_ESTIMATE_NODE:
+            try:
+                from pixal3d_extension.scene_prepare import validate_scene_prepare_weights
+
+                validate_scene_prepare_weights(*self._scene_prep_sources())
+                return True
+            except (OSError, ValueError, RuntimeError):
+                return False
+        model_dir = self._model_source() or Path(root)
+        if self._effective_node_id() == "worldsculpt":
+            return self.readiness_status()["ok"]
+        if self._effective_node_id() == "generate-mv":
+            from pixal3d_extension.multiview import MV_WEIGHT_FILES
+
+            return all((Path(model_dir) / relative).is_file() for relative in MV_WEIGHT_FILES)
         return (Path(model_dir) / "pipeline.json").is_file()
 
     def load(self) -> "Pixal3DGenerator":
-        modly_home = derive_modly_home(model_dir=self.model_dir, workspace_dir=self.workspace_dir)
-        if modly_home is not None or self.workspace_dir is not None:
-            from pixal3d_extension.pipeline_patch import patch_pipeline
+        if self._effective_node_id() in {SCENE_ESTIMATE_NODE, SCENE_NORMALIZE_NODE}:
+            readiness = self.readiness_status()
+            if not readiness["ok"]:
+                raise RuntimeError(f"{readiness['machine_code']}: {readiness['reason']}")
+            self._loaded = True
+            return self
+        if self._effective_node_id() == "worldsculpt":
+            readiness = self.readiness_status()
+            if not readiness["ok"]:
+                raise RuntimeError(f"{readiness['machine_code']}: {readiness['reason']}")
+            self._loaded = True
+            return self
+        model_source = self._model_source()
+        if self._effective_node_id() == "generate-mv":
+            readiness = self.readiness_status()
+            if not readiness["ok"]:
+                raise RuntimeError(f"{readiness['machine_code']}: {readiness['reason']}")
+            self._loaded = True
+            return self
+        compatibility_error = self._single_view_compatibility_error()
+        if compatibility_error is not None:
+            raise RuntimeError(f"{compatibility_error['code']}: {compatibility_error['message']}")
+        with shared_base_root(model_source if getattr(self, "shared_model_dirs", None) else None):
+            modly_home = derive_modly_home(model_dir=self.model_dir, workspace_dir=self.workspace_dir)
+            if modly_home is not None or self.workspace_dir is not None:
+                from pixal3d_extension.pipeline_patch import patch_pipeline
 
-            patch_pipeline(modly_home or self.workspace_dir, auxiliary_mode="default", network_available=True)
-        else:
-            _patch_pipeline_json(self.model_dir)
+                patch_result = patch_pipeline(modly_home or self.workspace_dir, auxiliary_mode="default", network_available=True)
+                if isinstance(patch_result, dict) and patch_result.get("status") != "patched":
+                    raise RuntimeError(patch_result.get("message") or patch_result.get("code", "Pixal3D model assets are missing"))
+            else:
+                _patch_pipeline_json(model_source)
         self._loaded = True
         return self
 
     def unload(self) -> None:
         self._loaded = False
 
+    def is_loaded(self) -> bool:
+        return self._loaded
+
     def generate(self, image_or_job: Any, params: dict | None = None, progress_cb: Any | None = None, cancel_evt: Any | None = None) -> Path:
+        if self._effective_node_id() == SCENE_ESTIMATE_NODE:
+            from pixal3d_extension.scene_prepare import run_scene_from_estimates
+
+            if self.workspace_dir is None:
+                raise RuntimeError("Scene preparation requires the Modly workspace directory")
+            sam_root, da3_root = self._scene_prep_sources()
+            output_dir = getattr(self, "outputs_dir", None) or self.workspace_dir / "Workflows"
+            return run_scene_from_estimates(
+                capture_input=image_or_job,
+                workspace_dir=self.workspace_dir,
+                output_dir=output_dir,
+                sam_root=sam_root,
+                da3_root=da3_root,
+                params=params or {},
+                progress_cb=progress_cb,
+                cancel_event=cancel_evt,
+            )
+        if self._effective_node_id() == SCENE_NORMALIZE_NODE:
+            from pixal3d_extension.scene_prepare_contract import normalize_annotated_scene
+
+            if self.workspace_dir is None:
+                raise RuntimeError("Scene normalization requires the Modly workspace directory")
+            if isinstance(image_or_job, (bytes, bytearray)):
+                raise ValueError("Scene normalization requires a scene manifest, not image bytes")
+            manifest_path = (params or {}).get("scene_manifest_path")
+            if not isinstance(manifest_path, str):
+                manifest_path = str(getattr(image_or_job, "path", image_or_job))
+            output_dir = getattr(self, "outputs_dir", None) or self.workspace_dir / "Workflows"
+            if progress_cb:
+                progress_cb(10, "Validating annotated scene")
+            result = normalize_annotated_scene(Path(manifest_path), self.workspace_dir, output_dir)
+            if progress_cb:
+                progress_cb(100, "Annotated scene normalized")
+            return result
+        if self._effective_node_id() == "worldsculpt":
+            from pixal3d_extension.worldsculpt import resolve_scene_manifest, run_worldsculpt
+
+            if isinstance(image_or_job, (bytes, bytearray)) and image_or_job:
+                raise ValueError("WorldSculpt requires a scene manifest, not image bytes")
+            if not isinstance(params, dict) or not params.get("scene_manifest_path"):
+                raise ValueError("WorldSculpt requires scene_manifest_path from Modly /from-scene")
+            if self.workspace_dir is None:
+                raise RuntimeError("WorldSculpt requires the Modly workspace directory")
+            modly_home = derive_modly_home(model_dir=self.model_dir, workspace_dir=self.workspace_dir)
+            if modly_home is None:
+                raise RuntimeError("WorldSculpt requires the Modly home for NAF")
+            output_dir = getattr(self, "outputs_dir", None) or self.workspace_dir / "Workflows"
+            return run_worldsculpt(
+                scene_dir=resolve_scene_manifest(params["scene_manifest_path"], self.workspace_dir),
+                adapter_root=self._model_source(), base_root=self._base_source(),
+                naf_path=modly_home / "models/pixal3d/auxiliary/naf/naf_release.pth",
+                output_dir=output_dir, workspace_dir=self.workspace_dir,
+                face_budget=params.get("face_budget", 1000000),
+                progress_cb=progress_cb, cancel_event=cancel_evt)
+        if self._effective_node_id() == "generate-mv":
+            from pixal3d_extension.multiview import run_multiview
+
+            if isinstance(image_or_job, (bytes, bytearray)) and image_or_job:
+                raise ValueError("Pixal3D MV requires a posed-view scene manifest, not image bytes")
+            if not isinstance(params, dict) or not params.get("scene_manifest_path"):
+                raise ValueError("Pixal3D MV requires scene_manifest_path from Modly /from-scene")
+            if self.workspace_dir is None:
+                raise RuntimeError("Modly workspace directory is required for posed-view input")
+            modly_home = derive_modly_home(model_dir=self.model_dir, workspace_dir=self.workspace_dir)
+            if modly_home is None:
+                raise RuntimeError("Modly home is required to locate the NAF checkpoint")
+            output_dir = getattr(self, "outputs_dir", None) or self.workspace_dir
+            return run_multiview(scene_manifest_path=params["scene_manifest_path"], workspace_dir=self.workspace_dir,
+                                 mv_root=self._model_source(), base_root=self._base_source(),
+                                 naf_path=modly_home / "models/pixal3d/auxiliary/naf/naf_release.pth",
+                                 output_dir=output_dir, params=params,
+                                 progress_cb=progress_cb, cancel_event=cancel_evt)
+        compatibility_error = self._single_view_compatibility_error()
+        if compatibility_error is not None:
+            raise RuntimeError(f"{compatibility_error['code']}: {compatibility_error['message']}")
         from pixal3d_extension.runtime import run_job
+
+        model_source = self._model_source()
 
         if isinstance(image_or_job, dict):
             job = dict(image_or_job)
+            if model_source is not None:
+                job["model_source"] = str(model_source)
             modly_home = derive_modly_home(
                 model_dir=job.get("model_source") or self.model_dir,
                 workspace_dir=job.get("workspace_root") or job.get("output_dir") or self.workspace_dir,
@@ -148,7 +393,7 @@ class Pixal3DGenerator:
             job = {
                 "input_image": str(input_path),
                 "output_dir": str(output_dir),
-                "model_source": str(self.model_dir or PIXAL3D_SOURCE),
+                "model_source": str(model_source or PIXAL3D_SOURCE),
                 "params": params or {},
                 "readiness": {"generation_allowed": self.is_downloaded(), "code": "ready" if self.is_downloaded() else "weights_missing_or_unvalidated"},
             }
@@ -157,7 +402,8 @@ class Pixal3DGenerator:
                 job["workspace_root"] = str(modly_home)
 
         try:
-            result = run_job(job, pipeline_factory=self.pipeline_factory)
+            with shared_base_root(model_source if getattr(self, "shared_model_dirs", None) else None):
+                result = run_job(job, pipeline_factory=self.pipeline_factory)
             if result.get("status") != "completed":
                 raise RuntimeError(json.dumps(result, sort_keys=True))
             return Path(result["output"]["glb_path"])

@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import importlib
 import importlib.machinery
 import faulthandler
+import math
 import os
 import random
 import re
@@ -23,6 +24,8 @@ PIXAL3D_MODEL_SOURCE = "TencentARC/Pixal3D"
 PIXAL3D_TEXTURE_SIZE_ENV = "PIXAL3D_TEXTURE_SIZE"
 SUPPORTED_TEXTURE_SIZES = (1024, 2048)
 DEFAULT_TEXTURE_SIZE = 1024
+SUPPORTED_MANUAL_FOVS = (-1.0, 0.2, 0.35, 0.5)
+DEFAULT_MANUAL_FOV = -1.0
 SUPPORTED_RUNTIME_LANES = {
     "linux-aarch64-cp312-cuda124",
     "linux-x64-cp312-cuda124",
@@ -429,6 +432,40 @@ def _parse_texture_size(value: Any, default: int = DEFAULT_TEXTURE_SIZE) -> int:
     return parsed if parsed in SUPPORTED_TEXTURE_SIZES else safe_default
 
 
+def _parse_manual_fov(value: Any, default: float = DEFAULT_MANUAL_FOV) -> float:
+    safe_default = DEFAULT_MANUAL_FOV
+    try:
+        parsed_default = float(default)
+    except (TypeError, ValueError):
+        parsed_default = DEFAULT_MANUAL_FOV
+    if math.isfinite(parsed_default):
+        for allowed in SUPPORTED_MANUAL_FOVS:
+            if math.isclose(parsed_default, allowed, rel_tol=0.0, abs_tol=1e-9):
+                safe_default = allowed
+                break
+
+    if value is None:
+        return safe_default
+    if isinstance(value, bool):
+        return safe_default
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+    elif isinstance(value, str):
+        try:
+            parsed = float(value.strip())
+        except ValueError:
+            return safe_default
+    else:
+        return safe_default
+
+    if not math.isfinite(parsed):
+        return safe_default
+    for allowed in SUPPORTED_MANUAL_FOVS:
+        if math.isclose(parsed, allowed, rel_tol=0.0, abs_tol=1e-9):
+            return allowed
+    return safe_default
+
+
 @contextmanager
 def _scoped_texture_size_env(texture_size: Any):
     parsed_texture_size = _parse_texture_size(texture_size)
@@ -611,12 +648,20 @@ def _preflight_auxiliary_sources(job: dict) -> tuple[dict | None, dict | None]:
             workspace_root,
             downloader=_job_auxiliary_bootstrap_downloader(job),
         )
-        if bootstrap_result.get("status") == "ready":
-            auxiliary_source = resolve_auxiliary_sources(
-                workspace_root,
-                mode=normalized_auxiliary_mode,
-                network_available=network_available,
+        if bootstrap_result.get("status") != "ready":
+            return (
+                _failure(
+                    "naf_bootstrap_failed",
+                    "NAF checkpoint download failed; retry generation or run setup.py --bootstrap-auxiliary-assets manually",
+                    auxiliary_bootstrap=bootstrap_result,
+                ),
+                None,
             )
+        auxiliary_source = resolve_auxiliary_sources(
+            workspace_root,
+            mode=normalized_auxiliary_mode,
+            network_available=network_available,
+        )
         patch_error, patched_auxiliary_source = _patch_pipeline_for_runtime(
             workspace_root,
             auxiliary_mode=normalized_auxiliary_mode,
@@ -738,49 +783,27 @@ def _patch_inference_moge_loader(inference_module: Any, auxiliary_source: dict) 
     setattr(inference_module, "load_moge_model", load_local_moge_model)
 
 
-def _patch_hubconf_naf_loader(auxiliary_source: dict | None) -> None:
-    if not auxiliary_source:
-        return
-    naf_source = auxiliary_source.get("sources", {}).get("naf", {})
-    if naf_source.get("kind") != "local":
-        return
-
-    local_naf_path = str(naf_source["value"])
-    fallback_allowed = auxiliary_source.get("mode") == "default"
-    hubconf_module = importlib.import_module("hubconf")
-    original_naf = getattr(hubconf_module, "naf", None)
-    if not callable(original_naf):
-        raise RuntimeError("hubconf.naf is required for local NAF checkpoint loading")
-    if getattr(original_naf, "__modly_local_checkpoint__", None) == local_naf_path:
-        return
-
-    def load_local_naf(pretrained: bool = True, device: Any = "cpu") -> Any:
-        try:
-            naf_cls = getattr(hubconf_module, "NAF")
-            model = naf_cls().to(device)
-            if pretrained:
-                import torch
-
-                model.load_state_dict(torch.load(local_naf_path, map_location=device))
-            return model
-        except Exception:
-            if fallback_allowed:
-                return original_naf(pretrained=pretrained, device=device)
-            raise
-
-    load_local_naf.__name__ = getattr(original_naf, "__name__", "naf")
-    load_local_naf.__doc__ = getattr(original_naf, "__doc__", None)
-    load_local_naf.__wrapped__ = original_naf  # type: ignore[attr-defined]
-    load_local_naf.__modly_local_checkpoint__ = local_naf_path  # type: ignore[attr-defined]
-    setattr(hubconf_module, "naf", load_local_naf)
-
-
 def _patch_inference_auxiliary_sources(inference_module: Any, auxiliary_source: dict | None) -> None:
     if not auxiliary_source:
         return
-    _patch_hubconf_naf_loader(auxiliary_source)
     _patch_inference_dino_source(inference_module, auxiliary_source)
     _patch_inference_moge_loader(inference_module, auxiliary_source)
+
+
+@contextmanager
+def _scoped_single_view_naf_extractors(inference_module: Any, auxiliary_source: dict | None):
+    """Route upstream extractor NAF calls to the verified local checkpoint only."""
+    from pixal3d_extension.multiview import _MV_RUN_LOCK, _local_naf_extractors
+
+    naf_source = (auxiliary_source or {}).get("sources", {}).get("naf", {})
+    if naf_source.get("kind") != "local":
+        raise RuntimeError("single-view inference requires a local NAF checkpoint")
+    if not callable(getattr(inference_module, "build_image_cond_model", None)):
+        raise RuntimeError("single-view inference has no image-condition extractor factory")
+    with _MV_RUN_LOCK, _local_naf_extractors(
+        inference_module, Path(naf_source["value"]).resolve(), verify_checkpoint=True
+    ):
+        yield
 
 
 def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) -> dict:
@@ -805,6 +828,7 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
         params = job.get("params") or {}
         parsed_low_vram = _parse_low_vram(params.get("low_vram"), default=True)
         parsed_texture_size = _parse_texture_size(params.get("texture_size"), default=DEFAULT_TEXTURE_SIZE)
+        parsed_manual_fov = _parse_manual_fov(params.get("manual_fov"), default=DEFAULT_MANUAL_FOV)
         if pipeline_factory is not None:
             checkpoint = "pipeline_factory_create"
             _diagnostic_checkpoint("pipeline_factory:create:start")
@@ -819,7 +843,7 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
                 resolution=params.get("resolution", 1024),
                 low_vram=parsed_low_vram,
                 texture_size=parsed_texture_size,
-                manual_fov=params.get("manual_fov"),
+                manual_fov=parsed_manual_fov,
             )
             _diagnostic_checkpoint("pipeline_factory:call:done")
         else:
@@ -835,10 +859,6 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
             _diagnostic_checkpoint("natten:start")
             _install_natten_fallback()
             _diagnostic_checkpoint("natten:done")
-            checkpoint = "naf_loader_patch"
-            _diagnostic_checkpoint("naf_loader_patch:start")
-            _patch_hubconf_naf_loader(auxiliary_source)
-            _diagnostic_checkpoint("naf_loader_patch:done")
             checkpoint = "import_inference"
             _diagnostic_checkpoint("import_inference:start")
             inference_module = importlib.import_module("inference")
@@ -857,13 +877,13 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
             glb_path = output_dir / f"{int(time.time())}_{uuid.uuid4().hex[:8]}_pixal3d.glb"
             checkpoint = "run_inference"
             _diagnostic_checkpoint("run_inference:start")
-            with _scoped_texture_size_env(parsed_texture_size):
+            with _scoped_texture_size_env(parsed_texture_size), _scoped_single_view_naf_extractors(inference_module, auxiliary_source):
                 run_inference(
                     image_path=str(image_path),
                     output_path=str(glb_path),
                     seed=seed,
                     model_path=job.get("model_source") or PIXAL3D_MODEL_SOURCE,
-                    manual_fov=float(params.get("manual_fov") or -1.0),
+                    manual_fov=parsed_manual_fov,
                     low_vram=parsed_low_vram,
                     resolution=int(params.get("resolution", 1024)),
                 )
@@ -888,6 +908,6 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
             "resolution": params.get("resolution", 1024),
             "low_vram": parsed_low_vram,
             "texture_size": parsed_texture_size,
-            "manual_fov": params.get("manual_fov"),
+            "manual_fov": parsed_manual_fov,
         },
     }

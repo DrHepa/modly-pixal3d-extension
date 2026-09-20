@@ -3,9 +3,10 @@
   "kind": "model",
   "type": "model",
   "name": "Pixal3D",
-  "version": "0.2.0",
+  "version": "0.4.0",
+  "source": "https://github.com/DrHepa/modly-pixal3d-extension",
   "author": "DrHepa",
-  "description": "Pixal3D image-to-3D Modly model extension. Outputs are aligned to the input image projection; angled inputs may produce angled meshes by design.",
+  "description": "Pixal3D image, posed-view, and WorldSculpt workflows with clean-room capture-to-scene preparation using official SAM3 and DA3 Base runtimes.",
   "generator_class": "Pixal3DGenerator",
   "model_identity": {
     "source_model": "TencentARC/Pixal3D",
@@ -13,10 +14,20 @@
     "registration_status": "unregistered"
   },
   "inputs": [
-    { "name": "image", "type": "image", "required": true }
+    {
+      "name": "image",
+      "type": "image",
+      "required": true
+    }
   ],
   "outputs": [
-    { "name": "mesh", "formats": ["glb"], "pbr": true }
+    {
+      "name": "mesh",
+      "formats": [
+        "glb"
+      ],
+      "pbr": true
+    }
   ],
   "params_schema": [],
   "nodes": [
@@ -26,28 +37,6 @@
       "type": "model.generate",
       "input": "image",
       "output": "mesh",
-      "hf_repo": "TencentARC/Pixal3D",
-      "download_check": "pipeline.json",
-      "weight_owner_id": "generate",
-      "hf_skip_prefixes": [
-        "README.md",
-        "requirements.txt",
-        "requirements-hfdemo.txt",
-        "assets/"
-      ],
-      "download_checks": [
-        "models/pixal3d/generate/pipeline.json",
-        "models/pixal3d/auxiliary/dinov3/config.json",
-        "models/pixal3d/auxiliary/dinov3/preprocessor_config.json",
-        "models/pixal3d/auxiliary/dinov3/model.safetensors",
-        "models/pixal3d/auxiliary/rmbg/config.json",
-        "models/pixal3d/auxiliary/rmbg/preprocessor_config.json",
-        "models/pixal3d/auxiliary/rmbg/BiRefNet_config.py",
-        "models/pixal3d/auxiliary/rmbg/birefnet.py",
-        "models/pixal3d/auxiliary/rmbg/model.safetensors",
-        "models/pixal3d/auxiliary/moge/model.pt",
-        "models/pixal3d/auxiliary/naf/naf_release.pth"
-      ],
       "params_schema": [
         {
           "id": "resolution",
@@ -55,8 +44,14 @@
           "type": "select",
           "default": 1024,
           "options": [
-            { "value": 1024, "label": "1024" },
-            { "value": 1536, "label": "1536" }
+            {
+              "value": 1024,
+              "label": "1024"
+            },
+            {
+              "value": 1536,
+              "label": "1536"
+            }
           ],
           "tooltip": "Generation resolution. Higher is slower and requires more VRAM."
         },
@@ -66,10 +61,41 @@
           "type": "select",
           "default": "low_vram",
           "options": [
-            { "value": "low_vram", "label": "Low VRAM" },
-            { "value": "standard", "label": "Standard" }
+            {
+              "value": "low_vram",
+              "label": "Low VRAM"
+            },
+            {
+              "value": "standard",
+              "label": "Standard"
+            }
           ],
           "tooltip": "Prefer low-VRAM mode for safer Pixal3D generation; Standard loads all models on GPU."
+        },
+        {
+          "id": "manual_fov",
+          "label": "Manual FOV",
+          "type": "select",
+          "default": "-1",
+          "options": [
+            {
+              "value": "-1",
+              "label": "Auto (MoGe)"
+            },
+            {
+              "value": "0.2",
+              "label": "0.2 rad"
+            },
+            {
+              "value": "0.35",
+              "label": "0.35 rad"
+            },
+            {
+              "value": "0.5",
+              "label": "0.5 rad"
+            }
+          ],
+          "tooltip": "Auto uses MoGe camera estimation. Manual values skip MoGe and can help problematic inputs, but may cause perspective changes."
         },
         {
           "id": "texture_size",
@@ -77,8 +103,14 @@
           "type": "select",
           "default": 1024,
           "options": [
-            { "value": 1024, "label": "1024" },
-            { "value": 2048, "label": "2048" }
+            {
+              "value": 1024,
+              "label": "1024"
+            },
+            {
+              "value": 2048,
+              "label": "2048"
+            }
           ],
           "tooltip": "Final GLB texture atlas size. 1024 reduces VRAM during final texturing; 2048 is higher quality and uses higher VRAM."
         },
@@ -91,75 +123,359 @@
           "max": 4294967295,
           "tooltip": "Seed for reproducibility. -1 uses a random seed."
         }
+      ],
+      "weight_groups": [
+        "pixal3d-base"
       ]
+    },
+    {
+      "id": "generate-mv",
+      "name": "Posed Views to 3D",
+      "type": "model.generate",
+      "input": "scene",
+      "output": "mesh",
+      "params_schema": [
+        {
+          "id": "resolution",
+          "label": "Resolution",
+          "type": "select",
+          "default": 1024,
+          "options": [
+            {
+              "value": 1024,
+              "label": "1024"
+            },
+            {
+              "value": 1536,
+              "label": "1536"
+            }
+          ],
+          "tooltip": "Generation resolution. Higher is slower and requires more VRAM."
+        },
+        {
+          "id": "low_vram",
+          "label": "Low VRAM",
+          "type": "select",
+          "default": "low_vram",
+          "options": [
+            {
+              "value": "low_vram",
+              "label": "Low VRAM"
+            },
+            {
+              "value": "standard",
+              "label": "Standard"
+            }
+          ],
+          "tooltip": "Prefer low-VRAM mode for safer Pixal3D generation; Standard loads all models on GPU."
+        },
+        {
+          "id": "seed",
+          "label": "Seed",
+          "type": "int",
+          "default": -1,
+          "min": -1,
+          "max": 4294967295,
+          "tooltip": "Seed for reproducibility. -1 uses a random seed."
+        },
+        {
+          "id": "num_views",
+          "label": "Views to Use",
+          "type": "int",
+          "default": 4,
+          "min": 1,
+          "max": 16,
+          "tooltip": "Use the first N posed frames from transforms.json; the first frame must be the canonical front view."
+        }
+      ],
+      "weight_groups": [
+        "pixal3d-base",
+        "pixal3d-mv"
+      ]
+    },
+    {
+      "id": "worldsculpt",
+      "name": "WorldSculpt Scene to 3D",
+      "type": "model.generate",
+      "input": "scene",
+      "output": "mesh",
+      "params_schema": [
+        {
+          "id": "face_budget",
+          "label": "Faces per Instance",
+          "type": "int",
+          "default": 1000000,
+          "min": 1000,
+          "max": 3000000,
+          "tooltip": "Maximum faces per composed instance; geometry-only GLB."
+        }
+      ],
+      "weight_groups": [
+        "pixal3d-base",
+        "worldsculpt-adapters"
+      ]
+    },
+    {
+      "id": "scene-from-estimates",
+      "name": "Prepare Scene from Estimates",
+      "type": "model.generate",
+      "input": "capture",
+      "output": "scene",
+      "params_schema": [
+        {
+          "id": "object_labels",
+          "label": "Object Labels",
+          "type": "string",
+          "default": "chair,table,sofa,bed,cabinet,lamp,plant,appliance",
+          "tooltip": "Comma-separated SAM3 text labels. Each label is tracked independently and kept through label-aware 3D deduplication."
+        },
+        {
+          "id": "max_frames",
+          "label": "Maximum Frames",
+          "type": "int",
+          "default": 16,
+          "min": 2,
+          "max": 64,
+          "tooltip": "Maximum ordered frames sent to SAM3 and DA3 Base."
+        },
+        {
+          "id": "frame_stride",
+          "label": "Frame Stride",
+          "type": "int",
+          "default": 1,
+          "min": 1,
+          "max": 120,
+          "tooltip": "Deterministically keep every Nth frame before applying Maximum Frames."
+        },
+        {
+          "id": "process_resolution",
+          "label": "DA3 Processing Resolution",
+          "type": "select",
+          "default": 504,
+          "options": [
+            {
+              "value": 392,
+              "label": "392"
+            },
+            {
+              "value": 504,
+              "label": "504"
+            },
+            {
+              "value": 630,
+              "label": "630"
+            }
+          ],
+          "tooltip": "DA3 processing bound. Intrinsics are explicitly rescaled from this processed resolution to the source frames."
+        },
+        {
+          "id": "mask_erosion",
+          "label": "Mask Erosion",
+          "type": "int",
+          "default": 1,
+          "min": 0,
+          "max": 8,
+          "tooltip": "Erode SAM3 masks before depth unprojection to reduce boundary contamination."
+        },
+        {
+          "id": "minimum_geometry_points",
+          "label": "Minimum Geometry Points",
+          "type": "int",
+          "default": 128,
+          "min": 16,
+          "max": 100000,
+          "tooltip": "Reject an instance in a frame when robust mask/depth filtering leaves fewer points."
+        },
+        {
+          "id": "confidence_percentile",
+          "label": "Depth Confidence Percentile",
+          "type": "float",
+          "default": 40,
+          "min": 0,
+          "max": 100,
+          "step": 1,
+          "tooltip": "Discard DA3 samples below this per-mask confidence percentile."
+        },
+        {
+          "id": "depth_trim_low",
+          "label": "Depth Trim Low",
+          "type": "float",
+          "default": 5,
+          "min": 0,
+          "max": 49,
+          "step": 1,
+          "tooltip": "Lower per-mask depth percentile retained for geometry."
+        },
+        {
+          "id": "depth_trim_high",
+          "label": "Depth Trim High",
+          "type": "float",
+          "default": 95,
+          "min": 51,
+          "max": 100,
+          "step": 1,
+          "tooltip": "Upper per-mask depth percentile retained for geometry."
+        },
+        {
+          "id": "aabb_percentile_low",
+          "label": "AABB Percentile Low",
+          "type": "float",
+          "default": 2,
+          "min": 0,
+          "max": 25,
+          "step": 1,
+          "tooltip": "Lower percentile used after accepted frames are merged."
+        },
+        {
+          "id": "aabb_percentile_high",
+          "label": "AABB Percentile High",
+          "type": "float",
+          "default": 98,
+          "min": 75,
+          "max": 100,
+          "step": 1,
+          "tooltip": "Upper percentile used after accepted frames are merged."
+        },
+        {
+          "id": "min_reprojection_coverage",
+          "label": "Minimum Reprojection Coverage",
+          "type": "float",
+          "default": 0.1,
+          "min": 0,
+          "max": 1,
+          "step": 0.01,
+          "tooltip": "Reject object/frame geometry that does not project back onto enough of its SAM3 mask."
+        },
+        {
+          "id": "dedup_iou_threshold",
+          "label": "3D Deduplication IoU",
+          "type": "float",
+          "default": 0.5,
+          "min": 0,
+          "max": 1,
+          "step": 0.05,
+          "tooltip": "Deduplicate only same-label AABBs above this 3D IoU."
+        },
+        {
+          "id": "camera_consistency_tolerance",
+          "label": "Camera Consistency Tolerance",
+          "type": "float",
+          "default": 0.15,
+          "min": 0.01,
+          "max": 0.5,
+          "step": 0.01,
+          "tooltip": "Reject DA3 frames whose source-resolution intrinsics drift too far from the sequence median."
+        },
+        {
+          "id": "sam_score_threshold",
+          "label": "SAM3 Score Threshold",
+          "type": "float",
+          "default": 0.5,
+          "min": 0,
+          "max": 1,
+          "step": 0.05,
+          "tooltip": "Official SAM3 detection/tracking output threshold."
+        }
+      ],
+      "weight_groups": [
+        "sam3",
+        "da3-base"
+      ]
+    },
+    {
+      "id": "normalize-annotated-scene",
+      "name": "Normalize Annotated Scene",
+      "type": "model.generate",
+      "input": "scene",
+      "output": "scene",
+      "params_schema": []
     }
   ],
   "asset_requirements": {
     "strategy": "sentinel-files",
     "required": [
-      "models/pixal3d/generate/pipeline.json",
-      "models/pixal3d/generate/ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
-      "models/pixal3d/generate/ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors",
-      "models/pixal3d/generate/ckpts/shape_dec_next_dc_f16c32_fp16.safetensors",
-      "models/pixal3d/generate/ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors",
-      "models/pixal3d/generate/ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors",
-      "models/pixal3d/generate/ckpts/tex_dec_next_dc_f16c32_fp16.safetensors",
-      "models/pixal3d/generate/ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors",
-      "models/pixal3d/auxiliary/dinov3/config.json",
-      "models/pixal3d/auxiliary/dinov3/preprocessor_config.json",
-      "models/pixal3d/auxiliary/dinov3/model.safetensors",
-      "models/pixal3d/auxiliary/rmbg/config.json",
-      "models/pixal3d/auxiliary/rmbg/preprocessor_config.json",
-      "models/pixal3d/auxiliary/rmbg/BiRefNet_config.py",
-      "models/pixal3d/auxiliary/rmbg/birefnet.py",
-      "models/pixal3d/auxiliary/rmbg/model.safetensors",
-      "models/pixal3d/auxiliary/moge/model.pt",
+      "models/pixal3d/_shared/pixal3d-base/pipeline.json",
+      "models/pixal3d/_shared/pixal3d-base/ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
+      "models/pixal3d/_shared/pixal3d-base/ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors",
+      "models/pixal3d/_shared/pixal3d-base/ckpts/shape_dec_next_dc_f16c32_fp16.safetensors",
+      "models/pixal3d/_shared/pixal3d-base/ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors",
+      "models/pixal3d/_shared/pixal3d-base/ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors",
+      "models/pixal3d/_shared/pixal3d-base/ckpts/tex_dec_next_dc_f16c32_fp16.safetensors",
+      "models/pixal3d/_shared/pixal3d-base/ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors",
+      "models/pixal3d/_shared/pixal3d-base/auxiliary/dinov3/config.json",
+      "models/pixal3d/_shared/pixal3d-base/auxiliary/dinov3/preprocessor_config.json",
+      "models/pixal3d/_shared/pixal3d-base/auxiliary/dinov3/model.safetensors",
+      "models/pixal3d/_shared/pixal3d-base/auxiliary/rmbg/config.json",
+      "models/pixal3d/_shared/pixal3d-base/auxiliary/rmbg/preprocessor_config.json",
+      "models/pixal3d/_shared/pixal3d-base/auxiliary/rmbg/BiRefNet_config.py",
+      "models/pixal3d/_shared/pixal3d-base/auxiliary/rmbg/birefnet.py",
+      "models/pixal3d/_shared/pixal3d-base/auxiliary/rmbg/model.safetensors",
+      "models/pixal3d/_shared/pixal3d-base/auxiliary/moge/model.pt",
       "models/pixal3d/auxiliary/naf/naf_release.pth",
       "models/pixal3d/readiness.json"
     ],
     "pipeline_substitutions": {
-      "strategy": "local-first-with-default-remote-fallback",
+      "strategy": "modly-shared-local-required",
       "dino": {
-        "local_root": "models/pixal3d/auxiliary/dinov3",
-        "remote_fallback": "camenduru/dinov3-vitl16-pretrain-lvd1689m"
+        "local_root": "models/pixal3d/_shared/pixal3d-base/auxiliary/dinov3"
       },
       "rmbg": {
-        "local_root": "models/pixal3d/auxiliary/rmbg",
-        "remote_fallback": "camenduru/RMBG-2.0"
+        "local_root": "models/pixal3d/_shared/pixal3d-base/auxiliary/rmbg"
       }
     },
     "runtime_local_first": {
       "moge": {
-        "local_checkpoint": "models/pixal3d/auxiliary/moge/model.pt",
-        "remote_fallback": "Ruicheng/moge-2-vitl",
+        "local_checkpoint": "models/pixal3d/_shared/pixal3d-base/auxiliary/moge/model.pt",
         "loader": "inference.load_moge_model"
       },
       "naf": {
         "local_checkpoint": "models/pixal3d/auxiliary/naf/naf_release.pth",
-        "remote_fallback": "https://github.com/valeoai/NAF/releases/download/model/naf_release.pth",
         "loader": "hubconf.naf",
-        "strict_kernel_note": "NAF checkpoint localization is separate from NATTEN/libnatten native kernel availability."
+        "strict_kernel_note": "NAF checkpoint localization is separate from NATTEN/libnatten native kernel availability.",
+        "bootstrap_source": "https://github.com/valeoai/NAF/releases/download/model/naf_release.pth"
       }
     },
     "unlocalized_runtime_dependencies": []
   },
   "platforms": [
-    { "platform": "linux-aarch64-cp312-nvidia-cuda", "status": "prepared" },
-    { "platform": "linux-x64-nvidia-cuda", "status": "wheelhouse-needed" },
-    { "platform": "windows-x64-cp311-nvidia-cuda", "status": "supported" },
-    { "platform": "windows-x64-cp312-nvidia-cuda", "status": "prepared" },
-    { "platform": "amd-rocm", "status": "unsupported" },
-    { "platform": "macos", "status": "unsupported" },
-    { "platform": "cpu-only", "status": "unsupported" }
+    {
+      "platform": "linux-aarch64-cp312-nvidia-cuda",
+      "status": "prepared"
+    },
+    {
+      "platform": "linux-x64-nvidia-cuda",
+      "status": "wheelhouse-needed"
+    },
+    {
+      "platform": "windows-x64-cp311-nvidia-cuda",
+      "status": "supported"
+    },
+    {
+      "platform": "windows-x64-cp312-nvidia-cuda",
+      "status": "prepared"
+    },
+    {
+      "platform": "amd-rocm",
+      "status": "unsupported"
+    },
+    {
+      "platform": "macos",
+      "status": "unsupported"
+    },
+    {
+      "platform": "cpu-only",
+      "status": "unsupported"
+    }
   ],
   "assets": {
     "extension_root": "extensions/pixal3d",
     "model_roots": [
       "models/pixal3d/generate",
-      "models/pixal3d/auxiliary/dinov3",
-      "models/pixal3d/auxiliary/rmbg",
-      "models/pixal3d/auxiliary/moge",
-      "models/pixal3d/auxiliary/naf"
+      "models/pixal3d/_shared/pixal3d-base/auxiliary/dinov3",
+      "models/pixal3d/_shared/pixal3d-base/auxiliary/rmbg",
+      "models/pixal3d/_shared/pixal3d-base/auxiliary/moge",
+      "models/pixal3d/auxiliary/naf",
+      "models/pixal3d/_shared/pixal3d-mv"
     ]
   },
   "entrypoints": {
@@ -176,5 +492,201 @@
       "path": "wheelhouse.manifest.json",
       "schema_version": "release-wheelhouse/v1"
     }
-  }
+  },
+  "weight_groups": [
+    {
+      "id": "pixal3d-base",
+      "model_sources": [
+        {
+          "id": "pixal3d",
+          "provider": "huggingface",
+          "repo_id": "TencentARC/Pixal3D",
+          "revision": "b0cb2e1b794cab9aa0ac38a95d794a4d9337437f",
+          "destination": ".",
+          "include_prefixes": [
+            "pipeline.json",
+            "ckpts/ss_dec_conv3d_16l8_fp16.json",
+            "ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
+            "ckpts/ss_flow_img_dit_1_3B_64_bf16.json",
+            "ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors",
+            "ckpts/shape_dec_next_dc_f16c32_fp16.json",
+            "ckpts/shape_dec_next_dc_f16c32_fp16.safetensors",
+            "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.json",
+            "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors",
+            "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.json",
+            "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors",
+            "ckpts/tex_dec_next_dc_f16c32_fp16.json",
+            "ckpts/tex_dec_next_dc_f16c32_fp16.safetensors",
+            "ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.json",
+            "ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors"
+          ],
+          "checks": [
+            "pipeline.json",
+            "ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
+            "ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors",
+            "ckpts/shape_dec_next_dc_f16c32_fp16.safetensors",
+            "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16.safetensors",
+            "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors",
+            "ckpts/tex_dec_next_dc_f16c32_fp16.safetensors",
+            "ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors"
+          ]
+        },
+        {
+          "id": "dinov3",
+          "provider": "huggingface",
+          "repo_id": "camenduru/dinov3-vitl16-pretrain-lvd1689m",
+          "revision": "3c276edd87d6f6e569ff0c4400e086807d0f3881",
+          "destination": "auxiliary/dinov3",
+          "include_prefixes": [
+            "config.json",
+            "preprocessor_config.json",
+            "model.safetensors"
+          ],
+          "checks": [
+            "config.json",
+            "preprocessor_config.json",
+            "model.safetensors"
+          ]
+        },
+        {
+          "id": "rmbg",
+          "provider": "huggingface",
+          "repo_id": "camenduru/RMBG-2.0",
+          "revision": "00e2d9a92347d951e65d1c73f44fce8e04095189",
+          "destination": "auxiliary/rmbg",
+          "include_prefixes": [
+            "config.json",
+            "preprocessor_config.json",
+            "BiRefNet_config.py",
+            "birefnet.py",
+            "model.safetensors"
+          ],
+          "checks": [
+            "config.json",
+            "preprocessor_config.json",
+            "BiRefNet_config.py",
+            "birefnet.py",
+            "model.safetensors"
+          ]
+        },
+        {
+          "id": "moge",
+          "provider": "huggingface",
+          "repo_id": "Ruicheng/moge-2-vitl",
+          "revision": "39c4d5e957afe587e04eec59dc2bcc3be5ecd968",
+          "destination": "auxiliary/moge",
+          "include_prefixes": [
+            "model.pt"
+          ],
+          "checks": [
+            "model.pt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "pixal3d-mv",
+      "model_sources": [
+        {
+          "id": "pixal3d-mv",
+          "provider": "huggingface",
+          "repo_id": "TencentARC/Pixal3D",
+          "revision": "b0cb2e1b794cab9aa0ac38a95d794a4d9337437f",
+          "destination": ".",
+          "include_prefixes": [
+            "pipeline_mv.json",
+            "ckpts/ss_flow_img_dit_1_3B_64_bf16_mv.json",
+            "ckpts/ss_flow_img_dit_1_3B_64_bf16_mv.safetensors",
+            "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16_mv.json",
+            "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16_mv.safetensors",
+            "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16_mv.json",
+            "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16_mv.safetensors",
+            "ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16_mv.json",
+            "ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16_mv.safetensors"
+          ],
+          "checks": [
+            "pipeline_mv.json",
+            "ckpts/ss_flow_img_dit_1_3B_64_bf16_mv.json",
+            "ckpts/ss_flow_img_dit_1_3B_64_bf16_mv.safetensors",
+            "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16_mv.json",
+            "ckpts/slat_flow_img2shape_dit_1_3B_512_bf16_mv.safetensors",
+            "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16_mv.json",
+            "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16_mv.safetensors",
+            "ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16_mv.json",
+            "ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16_mv.safetensors"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "worldsculpt-adapters",
+      "model_sources": [
+        {
+          "id": "worldsculpt-adapters",
+          "provider": "huggingface",
+          "repo_id": "AlayaLab/WorldSculpt",
+          "revision": "8cb81056d803c61371dd84ef18a14142a738610e",
+          "destination": ".",
+          "include_prefixes": [
+            "ss_ft64_mv_lora_ibr_texverse/config.json",
+            "ss_ft64_mv_lora_ibr_texverse/ckpts/denoiser_step0015000.pt",
+            "ss_ft64_mv_lora_ibr_texverse/ckpts/mv_aggregator_step0015000.pt",
+            "shape_ft1024_mv_lora_ibr_texverse_fixedmem05/config.json",
+            "shape_ft1024_mv_lora_ibr_texverse_fixedmem05/ckpts/denoiser_step0015000.pt",
+            "shape_ft1024_mv_lora_ibr_texverse_fixedmem05/ckpts/mv_aggregator_step0015000.pt"
+          ],
+          "checks": [
+            "ss_ft64_mv_lora_ibr_texverse/config.json",
+            "ss_ft64_mv_lora_ibr_texverse/ckpts/denoiser_step0015000.pt",
+            "ss_ft64_mv_lora_ibr_texverse/ckpts/mv_aggregator_step0015000.pt",
+            "shape_ft1024_mv_lora_ibr_texverse_fixedmem05/config.json",
+            "shape_ft1024_mv_lora_ibr_texverse_fixedmem05/ckpts/denoiser_step0015000.pt",
+            "shape_ft1024_mv_lora_ibr_texverse_fixedmem05/ckpts/mv_aggregator_step0015000.pt"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sam3",
+      "model_sources": [
+        {
+          "id": "sam3",
+          "provider": "huggingface",
+          "repo_id": "facebook/sam3",
+          "revision": "3c879f39826c281e95690f02c7821c4de09afae7",
+          "destination": ".",
+          "include_prefixes": [
+            "config.json",
+            "sam3.pt",
+            "LICENSE"
+          ],
+          "checks": [
+            "config.json",
+            "sam3.pt",
+            "LICENSE"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "da3-base",
+      "model_sources": [
+        {
+          "id": "da3-base",
+          "provider": "huggingface",
+          "repo_id": "depth-anything/DA3-BASE",
+          "revision": "f4a6c9b3c95e41c82048423d3493a81ec3fa810e",
+          "destination": ".",
+          "include_prefixes": [
+            "config.json",
+            "model.safetensors"
+          ],
+          "checks": [
+            "config.json",
+            "model.safetensors"
+          ]
+        }
+      ]
+    }
+  ]
 }
