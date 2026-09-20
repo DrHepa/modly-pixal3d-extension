@@ -2623,9 +2623,378 @@ test('Blackwell Windows wheelhouse candidate is exact-stack and artifact-only', 
   assert.match(docs, /interpreted PowerShell backtick-`t` as a tab/)
   assert.match(docs, /`\$\{CudaTag\}torch\$\{TorchMinor\}-\.\.\.`/)
   assert.match(docs, /must not update `wheelhouse\.manifest\.json`/)
+  assert.match(docs, /`cuda_version` and `gpu_sm`/)
+  assert.match(docs, /`12\.8`.*`120`.*`cuda128-blackwell`/s)
+  assert.match(docs, /hard gate.*before.*download.*install/i)
+  assert.match(docs, /torch `2\.7\.1\+cu128`.*torchvision `0\.22\.1\+cu128`.*NATTEN `0\.21\.6`/s)
+  assert.match(docs, /RTX 50-series.*Low VRAM.*valid GLB/s)
   assert.match(recipe, /wheelhouse-windows-x64-cp311-cuda128-blackwell-candidate\.yml/)
   assert.match(recipe, /candidate-only/)
+  assert.match(recipe, /payload.*`cuda_version`.*`gpu_sm`/s)
+  assert.match(recipe, /not present in `wheelhouse\.manifest\.json`.*fail.*`unsupported_lane`/s)
   assert.ok(!manifest.includes('windows-x64-cp311-cuda128-blackwell'))
+})
+
+test('Blackwell runtime lane selection is driven by CUDA and SM payload without activating the official manifest', () => {
+  const result = runPython(`
+import json
+from pathlib import Path
+from modly_wheelhouse import WheelhouseError, detect_runtime_lane, load_manifest, select_asset
+
+payload = {'cuda_version': '12.8.1', 'gpu_sm': 'sm_120'}
+runtime = detect_runtime_lane(payload, system='Windows', machine='AMD64', python_tag='cp311')
+manifest = load_manifest(Path('wheelhouse.manifest.json'))
+official_error = None
+try:
+    select_asset(manifest, runtime)
+except WheelhouseError as exc:
+    official_error = exc.code
+
+candidate_manifest = json.loads(json.dumps(manifest))
+candidate_manifest['assets'].append({
+    'id': 'windows-x64-cp311-cuda128-blackwell',
+    'filename': 'candidate.zip',
+    'size_bytes': 1,
+    'sha256': '0' * 64,
+    'compression': 'zip',
+    'selectors': {
+        'os': 'windows',
+        'arch': 'x64',
+        'python_tag': 'cp311',
+        'accelerator_lane': 'cuda128-blackwell',
+    },
+})
+selected = select_asset(candidate_manifest, runtime)
+print(json.dumps({
+    'runtime': runtime,
+    'official_error': official_error,
+    'selected': selected['id'],
+    'official_has_candidate': any(asset['id'] == selected['id'] for asset in manifest['assets']),
+}, sort_keys=True))
+`)
+
+  assert.deepEqual(result.runtime, {
+    accelerator_lane: 'cuda128-blackwell',
+    arch: 'x64',
+    cuda_version: '12.8',
+    gpu_sm: '120',
+    os: 'windows',
+    python_tag: 'cp311',
+  })
+  assert.equal(result.official_error, 'unsupported_lane')
+  assert.equal(result.selected, 'windows-x64-cp311-cuda128-blackwell')
+  assert.equal(result.official_has_candidate, false)
+})
+
+test('setup hard-gates explicit Blackwell payload before filesystem preparation or network access', () => {
+  const result = runPython(`
+import json, shutil, tempfile
+from pathlib import Path
+import setup
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp) / 'pixal3d'
+    root.mkdir()
+    shutil.copy2('wheelhouse.manifest.json', root / 'wheelhouse.manifest.json')
+    calls = []
+    setup._create_prepare_paths = lambda _layout: calls.append('create') or (_ for _ in ()).throw(AssertionError('must gate before path creation'))
+    setup.prepare_wheelhouse = lambda *_args, **_kwargs: calls.append('download') or (_ for _ in ()).throw(AssertionError('must gate before download'))
+    payload = json.dumps({'ext_dir': str(root), 'cuda_version': '12.8.1', 'gpu_sm': '12.0'})
+    outcome = setup.run_setup(['--payload-json', payload, '--json'])
+    print(json.dumps({'outcome': outcome, 'calls': calls}, sort_keys=True))
+`)
+
+  assert.equal(result.outcome.status, 'failed')
+  assert.equal(result.outcome.failure_code, 'unsupported_lane')
+  assert.equal(result.outcome.downloads_started, false)
+  assert.equal(result.outcome.installs_started, false)
+  assert.equal(result.outcome.runtime_evidence.accelerator_lane, 'cuda128-blackwell')
+  assert.deepEqual(result.calls, [])
+})
+
+test('setup rejects malformed non-object and ambiguous payloads before any side effects', () => {
+  const result = runPython(`
+import json
+import setup
+
+cases = {
+    'array': ['--payload-json', '[]', '--json'],
+    'boolean': ['--payload-json', 'true', '--json'],
+    'null': ['--payload-json', 'null', '--json'],
+    'empty_string': ['--payload-json', '', '--json'],
+    'invalid_json': ['--payload-json', '{not-json', '--json'],
+    'empty_object': ['--payload-json', '{}', '--json'],
+    'explicit_and_positional': [
+        '--payload-json',
+        json.dumps({'ext_dir': '/tmp/explicit', 'cuda_version': 124, 'gpu_sm': 89}),
+        json.dumps({'ext_dir': '/tmp/positional', 'cuda_version': 124, 'gpu_sm': 89}),
+        '--json',
+    ],
+    'repeated_explicit': [
+        '--payload-json',
+        json.dumps({'ext_dir': '/tmp/first', 'cuda_version': 124, 'gpu_sm': 89}),
+        '--payload-json',
+        json.dumps({'ext_dir': '/tmp/second', 'cuda_version': 124, 'gpu_sm': 89}),
+        '--json',
+    ],
+}
+
+calls = []
+setup.resolve_modly_layout = lambda *_args, **_kwargs: calls.append('resolve') or (_ for _ in ()).throw(AssertionError('must reject before layout resolution'))
+setup._create_prepare_paths = lambda *_args, **_kwargs: calls.append('create') or (_ for _ in ()).throw(AssertionError('must reject before path creation'))
+setup.prepare_wheelhouse = lambda *_args, **_kwargs: calls.append('download') or (_ for _ in ()).throw(AssertionError('must reject before download'))
+
+outcomes = {name: setup.run_setup(argv) for name, argv in cases.items()}
+print(json.dumps({'outcomes': outcomes, 'calls': calls}, sort_keys=True))
+`)
+
+  for (const [name, outcome] of Object.entries(result.outcomes)) {
+    assert.equal(outcome.status, 'failed', name)
+    assert.equal(outcome.failure_code, 'invalid_runtime_evidence', name)
+    assert.equal(outcome.downloads_started, false, name)
+    assert.equal(outcome.installs_started, false, name)
+    assert.match(outcome.message, /exactly one non-empty JSON object/i, name)
+  }
+  assert.deepEqual(result.calls, [])
+})
+
+test('setup preserves the real Modly payload object contract', () => {
+  const result = runPython(`
+import json
+import setup
+
+payload = {
+    'python_exe': '/host/python',
+    'ext_dir': '/extensions/pixal3d',
+    'gpu_sm': 89,
+    'cuda_version': 124,
+    'accelerator': 'cuda',
+    'platform': 'win32',
+    'arch': 'x64',
+}
+loaded = setup._load_payload(json.dumps(payload))
+print(json.dumps(loaded, sort_keys=True))
+`)
+
+  assert.deepEqual(result, {
+    cuda_version: 124,
+    ext_dir: '/extensions/pixal3d',
+    gpu_sm: 89,
+  })
+})
+
+test('runtime evidence accepts Modly numeric CUDA encodings and canonical dotted forms', () => {
+  const result = runPython(`
+import json
+from modly_wheelhouse import detect_runtime_lane
+
+cases = [
+    {'cuda_version': 128, 'gpu_sm': 120},
+    {'cuda_version': 126, 'gpu_sm': 'sm_89'},
+    {'cuda_version': 124, 'gpu_sm': 89},
+    {'cuda_version': '12.8', 'gpu_sm': '12.0'},
+    {'cuda_version': '12.8.1', 'gpu_sm': 'compute_120'},
+    {'cuda_version': 12.8, 'gpu_sm': 12.0},
+]
+print(json.dumps([
+    detect_runtime_lane(case, system='Windows', machine='AMD64', python_tag='cp311')
+    for case in cases
+], sort_keys=True))
+`)
+
+  assert.deepEqual(result.map(({ cuda_version, gpu_sm, accelerator_lane }) => ({ cuda_version, gpu_sm, accelerator_lane })), [
+    { cuda_version: '12.8', gpu_sm: '120', accelerator_lane: 'cuda128-blackwell' },
+    { cuda_version: '12.6', gpu_sm: '89', accelerator_lane: 'cuda126' },
+    { cuda_version: '12.4', gpu_sm: '89', accelerator_lane: 'cuda124' },
+    { cuda_version: '12.8', gpu_sm: '120', accelerator_lane: 'cuda128-blackwell' },
+    { cuda_version: '12.8', gpu_sm: '120', accelerator_lane: 'cuda128-blackwell' },
+    { cuda_version: '12.8', gpu_sm: '120', accelerator_lane: 'cuda128-blackwell' },
+  ])
+})
+
+test('runtime evidence rejects booleans malformed values and out-of-range encodings', () => {
+  const result = runPython(`
+import json
+from modly_wheelhouse import WheelhouseError, detect_runtime_lane
+
+cases = [
+    {'cuda_version': True, 'gpu_sm': 120},
+    {'cuda_version': 128, 'gpu_sm': False},
+    {'cuda_version': '12.x', 'gpu_sm': 120},
+    {'cuda_version': 12, 'gpu_sm': 120},
+    {'cuda_version': 1000, 'gpu_sm': 120},
+    {'cuda_version': '0.0', 'gpu_sm': 120},
+    {'cuda_version': 128, 'gpu_sm': 0},
+    {'cuda_version': 128, 'gpu_sm': 1000},
+    {'cuda_version': 128, 'gpu_sm': '12.10'},
+]
+out = []
+for payload in cases:
+    try:
+        detect_runtime_lane(payload, system='Windows', machine='AMD64', python_tag='cp311')
+    except WheelhouseError as exc:
+        out.append(exc.code)
+    else:
+        out.append('accepted')
+print(json.dumps(out))
+`)
+
+  assert.deepEqual(result, Array(9).fill('invalid_runtime_evidence'))
+})
+
+test('setup hard-gates the real numeric Modly Blackwell payload before side effects', () => {
+  const result = runPython(`
+import json, shutil, tempfile
+from pathlib import Path
+import setup
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp) / 'pixal3d'
+    root.mkdir()
+    shutil.copy2('wheelhouse.manifest.json', root / 'wheelhouse.manifest.json')
+    calls = []
+    setup._create_prepare_paths = lambda _layout: calls.append('create') or (_ for _ in ()).throw(AssertionError('must gate before path creation'))
+    setup.prepare_wheelhouse = lambda *_args, **_kwargs: calls.append('download') or (_ for _ in ()).throw(AssertionError('must gate before download'))
+    payload = json.dumps({'ext_dir': str(root), 'cuda_version': 128, 'gpu_sm': 120})
+    outcome = setup.run_setup(['--payload-json', payload, '--json'])
+    print(json.dumps({'outcome': outcome, 'calls': calls}, sort_keys=True))
+`)
+
+  assert.equal(result.outcome.status, 'failed')
+  assert.equal(result.outcome.failure_code, 'unsupported_lane')
+  assert.equal(result.outcome.runtime_evidence.cuda_version, '12.8')
+  assert.equal(result.outcome.runtime_evidence.gpu_sm, '120')
+  assert.deepEqual(result.calls, [])
+})
+
+test('legacy positional Blackwell evidence reaches the same fail-closed preflight before side effects', () => {
+  const result = runPython(`
+import json, shutil, tempfile
+from pathlib import Path
+import setup
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp) / 'pixal3d'
+    root.mkdir()
+    shutil.copy2('wheelhouse.manifest.json', root / 'wheelhouse.manifest.json')
+    calls = []
+    setup._create_prepare_paths = lambda _layout: calls.append('create') or (_ for _ in ()).throw(AssertionError('must gate before path creation'))
+    setup.prepare_wheelhouse = lambda *_args, **_kwargs: calls.append('download') or (_ for _ in ()).throw(AssertionError('must gate before download'))
+    outcome = setup.run_setup(['/host/python.exe', str(root), '120', '128'])
+    print(json.dumps({'outcome': outcome, 'calls': calls}, sort_keys=True))
+`)
+
+  assert.equal(result.outcome.status, 'failed')
+  assert.equal(result.outcome.failure_code, 'unsupported_lane')
+  assert.equal(result.outcome.runtime_evidence.cuda_version, '12.8')
+  assert.equal(result.outcome.runtime_evidence.gpu_sm, '120')
+  assert.deepEqual(result.calls, [])
+})
+
+test('legacy positional CUDA 12.4 lane remains a normal preparation path', () => {
+  const result = runPython(`
+import json, shutil, tempfile
+from pathlib import Path
+import setup
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp) / 'pixal3d'
+    root.mkdir()
+    shutil.copy2('wheelhouse.manifest.json', root / 'wheelhouse.manifest.json')
+    calls = []
+    setup._create_prepare_paths = lambda _layout: calls.append('create') or ([], [])
+    outcome = setup.run_setup(['/host/python.exe', str(root), '89', '124', '--skip-install'])
+    print(json.dumps({'outcome': outcome, 'calls': calls}, sort_keys=True))
+`)
+
+  assert.equal(result.outcome.status, 'prepared')
+  assert.equal(result.outcome.runtime_evidence.cuda_version, '12.4')
+  assert.equal(result.outcome.runtime_evidence.gpu_sm, '89')
+  assert.equal(result.outcome.runtime_evidence.accelerator_lane, 'cuda124')
+  assert.equal(result.outcome.runtime_lane_preflight.status, 'matched')
+  assert.deepEqual(result.calls, ['create'])
+})
+
+test('Blackwell candidate install plan pins torch cu128, torchvision cu128, and NATTEN 0.21.6', () => {
+  const result = runPython(`
+import json, tempfile
+from pathlib import Path
+import setup
+
+runtime = {
+    'os': 'windows',
+    'arch': 'x64',
+    'python_tag': 'cp311',
+    'accelerator_lane': 'cuda128-blackwell',
+    'cuda_version': '12.8',
+    'gpu_sm': '120',
+}
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    python = root / 'venv' / 'Scripts' / 'python.exe'
+    python.parent.mkdir(parents=True)
+    python.write_text('', encoding='utf-8')
+    wheelhouse = root / 'windows-x64-cp311-cuda128-blackwell'
+    wheelhouse.mkdir()
+    (wheelhouse / 'flex_gemm_ap-1.0.0+cu128torch2.7-cp311-cp311-win_amd64.whl').write_text('', encoding='utf-8')
+    (wheelhouse / 'natten-0.21.6-cp311-cp311-win_amd64.whl').write_text('', encoding='utf-8')
+    plan = setup._dependency_install_plan(root, wheelhouse, runtime)
+    policy = setup._dependency_policy(runtime)
+    print(json.dumps({'plan': plan, 'policy': policy}, sort_keys=True))
+`)
+
+  assert.equal(result.policy.torch, '2.7.1+cu128')
+  assert.equal(result.policy.torchvision, '0.22.1+cu128')
+  assert.equal(result.policy.natten, '0.21.6')
+  assert.equal(result.policy.expected_torch_cuda, '12.8')
+  assert.equal(result.policy.required_gpu_sm, '120')
+  assert.equal(result.policy.require_libnatten, true)
+  assert.ok(result.plan.torch_command.includes('https://download.pytorch.org/whl/cu128'))
+  assert.ok(result.plan.torch_command.includes('torch==2.7.1+cu128'))
+  assert.ok(result.plan.torch_command.includes('torchvision==0.22.1+cu128'))
+  assert.ok(result.plan.natten_command.includes('natten==0.21.6'))
+})
+
+test('Blackwell candidate runtime validation requires exact CUDA, SM120, imports, and native NATTEN', () => {
+  const result = runPython(`
+import copy, json
+import setup
+
+runtime = {
+    'os': 'windows', 'arch': 'x64', 'python_tag': 'cp311',
+    'accelerator_lane': 'cuda128-blackwell', 'cuda_version': '12.8', 'gpu_sm': '120',
+}
+policy = setup._dependency_policy(runtime)
+base = {
+    'ok': True,
+    'torch_version': '2.7.1+cu128',
+    'torchvision_version': '0.22.1+cu128',
+    'torch_cuda_version': '12.8',
+    'torch_cuda_available': True,
+    'gpu_sm': '120',
+    'natten_version': '0.21.6',
+    'natten_has_libnatten': True,
+    'imports': ['cumesh_vb', 'flex_gemm_ap', 'o_voxel_vb_ap', 'nvdiffrast', 'nvdiffrec_render', 'natten'],
+    'upstream_imports': ['cumesh', 'flex_gemm', 'o_voxel'],
+}
+cases = {'valid': base}
+for name, key, value in [
+    ('cuda_mismatch', 'torch_cuda_version', '12.6'),
+    ('sm_mismatch', 'gpu_sm', '89'),
+    ('natten_fallback', 'natten_has_libnatten', False),
+    ('missing_import', 'imports', ['cumesh_vb']),
+]:
+    candidate = copy.deepcopy(base)
+    candidate[key] = value
+    cases[name] = candidate
+print(json.dumps({name: setup._validate_runtime_probe(probe, policy) for name, probe in cases.items()}, sort_keys=True))
+`)
+
+  assert.equal(result.valid.ok, true)
+  for (const name of ['cuda_mismatch', 'sm_mismatch', 'natten_fallback', 'missing_import']) {
+    assert.equal(result[name].ok, false, `${name} should fail closed`)
+    assert.ok(result[name].validation_errors.length > 0)
+  }
 })
 
 test('linux x64 native source refs are immutable and confidence-documented', () => {
@@ -3485,10 +3854,10 @@ with tempfile.TemporaryDirectory() as tmp:
     verified.mkdir(parents=True)
     calls = []
     setup._create_prepare_paths = lambda _layout: ([], [])
-    def fake_prepare(workspace_root):
+    def fake_prepare(workspace_root, *, runtime_evidence=None):
         calls.append({'step': 'prepare_wheelhouse', 'workspace_root': str(workspace_root)})
         return {'status': 'ready', 'wheelhouse_path': str(verified), 'downloads_started': False, 'installs_started': False, 'selected_asset': 'linux-aarch64-cp312-cuda124'}
-    def fake_install(workspace_root, *, wheelhouse_path=None):
+    def fake_install(workspace_root, *, wheelhouse_path=None, runtime_evidence=None):
         calls.append({'step': 'install', 'wheelhouse_path': str(wheelhouse_path)})
         return {'status': 'installed', 'code': 'dependencies_installed', 'wheelhouse': str(wheelhouse_path), 'commands': []}
     setup._prepare_wheelhouse_for_setup = fake_prepare
@@ -3516,7 +3885,7 @@ with tempfile.TemporaryDirectory() as tmp:
     verified = root / '.modly' / 'cache' / 'wheelhouse' / 'pixal3d' / '0.1.0' / 'linux-aarch64-cp312-cuda124' / 'extracted'
     verified.mkdir(parents=True)
     setup._create_prepare_paths = lambda _layout: ([], [])
-    setup._prepare_wheelhouse_for_setup = lambda _workspace_root: {'status': 'ready', 'wheelhouse_path': str(verified), 'selected_asset': 'linux-aarch64-cp312-cuda124'}
+    setup._prepare_wheelhouse_for_setup = lambda _workspace_root, **_kwargs: {'status': 'ready', 'wheelhouse_path': str(verified), 'selected_asset': 'linux-aarch64-cp312-cuda124'}
     setup._install_prepare_dependencies = lambda *_args, **_kwargs: {'status': 'failed', 'code': 'dependency_install_failed', 'commands': [{'ok': False}]}
     result = setup.run_setup(['--workspace-root', str(root), '--prepare', '--json'])
     print(json.dumps({'status': result['status'], 'dependency_code': result['dependency_install']['code'], 'next_steps': result['next_steps']}, sort_keys=True))
@@ -3540,7 +3909,7 @@ with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
     calls = []
     setup._create_prepare_paths = lambda _layout: ([], [])
-    def fake_prepare(_workspace_root):
+    def fake_prepare(_workspace_root, **_kwargs):
         raise WheelhouseError('checksum_mismatch', 'sha256 verification failed')
     def forbidden_install(*_args, **_kwargs):
         calls.append('install')

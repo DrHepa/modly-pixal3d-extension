@@ -5,6 +5,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
+from pixal3d_extension.assets import bootstrap_auxiliary_assets
+from pixal3d_extension.naf_checkpoint import verify_naf_checkpoint
 from pixal3d_extension.paths import derive_modly_home, shared_base_root
 
 
@@ -98,6 +100,106 @@ class Pixal3DGenerator:
         from pixal3d_extension.readiness import single_view_transformers_compatibility
 
         return single_view_transformers_compatibility()
+
+    def _modly_home(self) -> Path:
+        modly_home = derive_modly_home(model_dir=self.model_dir, workspace_dir=self.workspace_dir)
+        if modly_home is None:
+            raise RuntimeError("Modly home could not be derived for the local NAF checkpoint")
+        return modly_home
+
+    def _naf_checkpoint_path(self) -> Path:
+        modly_home = self._modly_home()
+        return modly_home / "models/pixal3d/auxiliary/naf/naf_release.pth"
+
+    def _preflight_non_naf_shared_assets(self) -> None:
+        """Validate every host-managed shared asset before any NAF download."""
+
+        node_id = self._effective_node_id()
+        if node_id == "generate-mv":
+            from pixal3d_extension.multiview import validate_mv_pipeline_config
+
+            try:
+                validate_mv_pipeline_config(self._model_source(), self._base_source())
+            except (OSError, UnicodeError, ValueError, RuntimeError) as exc:
+                raise RuntimeError(
+                    "mv_assets_missing: download or repair the Pixal3D base and MV shared groups in Modly Models UI: "
+                    f"{exc}"
+                ) from exc
+            return
+        if node_id == "worldsculpt":
+            from pixal3d_extension.worldsculpt import validate_base
+            from pixal3d_extension.worldsculpt_contract import validate_adapters
+
+            try:
+                validate_adapters(self._model_source())
+                validate_base(self._base_source(), None)
+            except (OSError, ValueError, RuntimeError) as exc:
+                raise RuntimeError(
+                    "worldsculpt_assets_missing: download or repair the Pixal3D base and WorldSculpt adapter "
+                    f"shared groups in Modly Models UI: {exc}"
+                ) from exc
+
+    def _raise_if_generation_cancelled(self, cancel_evt: Any | None) -> None:
+        if cancel_evt is not None and cancel_evt.is_set():
+            label = "WorldSculpt" if self._effective_node_id() == "worldsculpt" else "Pixal3D MV generation"
+            raise RuntimeError(f"{label} cancelled")
+
+    def _prepare_generation_assets(self, cancel_evt: Any | None = None) -> Path:
+        """Preflight shared assets, then bootstrap only the remaining NAF deficiency."""
+
+        self._raise_if_generation_cancelled(cancel_evt)
+        self._preflight_non_naf_shared_assets()
+        self._raise_if_generation_cancelled(cancel_evt)
+        checkpoint = self._ensure_naf_checkpoint()
+        self._raise_if_generation_cancelled(cancel_evt)
+        return checkpoint
+
+    def _ensure_naf_checkpoint(self) -> Path:
+        """Return the verified local NAF checkpoint, bootstrapping only when absent."""
+
+        extension_dir = Path(__file__).resolve().parent
+        manual = (
+            "python3 setup.py --bootstrap-auxiliary-assets --force-auxiliary-assets "
+            f"--workspace-root {extension_dir} --json"
+        )
+        try:
+            modly_home = self._modly_home()
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "naf_bootstrap_failed: Modly home could not be derived for the local NAF checkpoint; "
+                f"run {manual}"
+            ) from exc
+        checkpoint = modly_home / "models/pixal3d/auxiliary/naf/naf_release.pth"
+        if checkpoint.is_file():
+            try:
+                verify_naf_checkpoint(checkpoint)
+            except (OSError, RuntimeError) as exc:
+                raise RuntimeError(
+                    "naf_bootstrap_failed: the local NAF checkpoint is corrupt; automatic replacement is disabled; "
+                    f"run {manual} ({type(exc).__name__}: {exc})"
+                ) from exc
+            return checkpoint
+
+        try:
+            result = bootstrap_auxiliary_assets(modly_home)
+        except Exception as exc:
+            raise RuntimeError(
+                "naf_bootstrap_failed: NAF checkpoint download failed; "
+                f"run {manual} ({type(exc).__name__}: {exc})"
+            ) from exc
+        if result.get("status") != "ready":
+            detail = result.get("error") or result.get("message") or result.get("code") or "unknown bootstrap failure"
+            raise RuntimeError(
+                f"naf_bootstrap_failed: NAF checkpoint download failed: {detail}; run {manual}"
+            )
+        try:
+            verify_naf_checkpoint(checkpoint)
+        except (OSError, RuntimeError) as exc:
+            raise RuntimeError(
+                "naf_bootstrap_failed: NAF bootstrap returned without a valid checkpoint; "
+                f"run {manual} ({type(exc).__name__}: {exc})"
+            ) from exc
+        return checkpoint
 
     def params_schema(self) -> list[dict[str, Any]]:
         if self._effective_node_id() in {SCENE_ESTIMATE_NODE, SCENE_NORMALIZE_NODE}:
@@ -262,6 +364,7 @@ class Pixal3DGenerator:
             self._loaded = True
             return self
         if self._effective_node_id() == "worldsculpt":
+            self._prepare_generation_assets()
             readiness = self.readiness_status()
             if not readiness["ok"]:
                 raise RuntimeError(f"{readiness['machine_code']}: {readiness['reason']}")
@@ -269,6 +372,7 @@ class Pixal3DGenerator:
             return self
         model_source = self._model_source()
         if self._effective_node_id() == "generate-mv":
+            self._prepare_generation_assets()
             readiness = self.readiness_status()
             if not readiness["ok"]:
                 raise RuntimeError(f"{readiness['machine_code']}: {readiness['reason']}")
@@ -340,14 +444,19 @@ class Pixal3DGenerator:
                 raise ValueError("WorldSculpt requires scene_manifest_path from Modly /from-scene")
             if self.workspace_dir is None:
                 raise RuntimeError("WorldSculpt requires the Modly workspace directory")
-            modly_home = derive_modly_home(model_dir=self.model_dir, workspace_dir=self.workspace_dir)
-            if modly_home is None:
-                raise RuntimeError("WorldSculpt requires the Modly home for NAF")
+            self._raise_if_generation_cancelled(cancel_evt)
+            # Reject an untrusted scene envelope before shared-asset checks or
+            # first-run NAF bootstrap can mutate local state. The later resolve
+            # remains intentional defense in depth at the runner boundary.
+            resolve_scene_manifest(params["scene_manifest_path"], self.workspace_dir)
+            adapter_root = self._model_source()
+            base_root = self._base_source()
+            naf_path = self._prepare_generation_assets(cancel_evt)
             output_dir = getattr(self, "outputs_dir", None) or self.workspace_dir / "Workflows"
             return run_worldsculpt(
                 scene_dir=resolve_scene_manifest(params["scene_manifest_path"], self.workspace_dir),
-                adapter_root=self._model_source(), base_root=self._base_source(),
-                naf_path=modly_home / "models/pixal3d/auxiliary/naf/naf_release.pth",
+                adapter_root=adapter_root, base_root=base_root,
+                naf_path=naf_path,
                 output_dir=output_dir, workspace_dir=self.workspace_dir,
                 face_budget=params.get("face_budget", 1000000),
                 progress_cb=progress_cb, cancel_event=cancel_evt)
@@ -366,13 +475,20 @@ class Pixal3DGenerator:
                 raise ValueError("Pixal3D MV requires capture-manifest.json; migrate legacy posed scenes to calibrated captures")
             if self.workspace_dir is None:
                 raise RuntimeError("Modly workspace directory is required for capture input")
-            modly_home = derive_modly_home(model_dir=self.model_dir, workspace_dir=self.workspace_dir)
-            if modly_home is None:
-                raise RuntimeError("Modly home is required to locate the NAF checkpoint")
+            self._raise_if_generation_cancelled(cancel_evt)
+            # Match run_multiview's parameter normalization, then validate the
+            # complete capture without creating outputs before any bootstrap.
+            from pixal3d_extension.multiview_capture import validate_mv_capture
+
+            num_views = int((params or {}).get("num_views", 4))
+            validate_mv_capture(capture_path, self.workspace_dir, num_views)
+            mv_root = self._model_source()
+            base_root = self._base_source()
+            naf_path = self._prepare_generation_assets(cancel_evt)
             output_dir = getattr(self, "outputs_dir", None) or self.workspace_dir / "Workflows"
             return run_multiview(capture_manifest_path=capture_path, workspace_dir=self.workspace_dir,
-                                 mv_root=self._model_source(), base_root=self._base_source(),
-                                 naf_path=modly_home / "models/pixal3d/auxiliary/naf/naf_release.pth",
+                                 mv_root=mv_root, base_root=base_root,
+                                 naf_path=naf_path,
                                  output_dir=output_dir, params=params or {},
                                  progress_cb=progress_cb, cancel_event=cancel_evt)
         compatibility_error = self._single_view_compatibility_error()

@@ -75,7 +75,7 @@ def _under(root: Path, path: Path, label: str) -> Path:
     return resolved
 
 
-def validate_base(base_root: Path, naf_path: Path) -> None:
+def validate_base(base_root: Path, naf_path: Path | None) -> None:
     base = Path(base_root).resolve(strict=True)
     data = json.loads(_regular(_under(base, base / "pipeline.json", "base pipeline"), "base pipeline").read_text())
     if data.get("name") not in {"Trellis2ImageTo3DPipeline", "Pixal3DImageTo3DPipeline"}:
@@ -91,12 +91,13 @@ def validate_base(base_root: Path, naf_path: Path) -> None:
         for relative in files:
             _regular(_under(base, base / "auxiliary" / auxiliary / relative,
                             f"{auxiliary} {relative}"), f"{auxiliary} {relative}")
-    verify_naf_checkpoint(_regular(Path(naf_path), "NAF checkpoint"))
     for value in models.values():
         if not isinstance(value, str) or not value.startswith("ckpts/") or ".." in Path(value).parts:
             raise ValueError("WorldSculpt base pipeline contains a nonlocal model reference")
         _regular(_under(base, base / f"{value}.json", f"base {value}"), f"base {value}")
         _regular(_under(base, base / f"{value}.safetensors", f"base {value}"), f"base {value}")
+    if naf_path is not None:
+        verify_naf_checkpoint(_regular(Path(naf_path), "NAF checkpoint"))
 
 
 def _private_overlay(root: Path, base: Path) -> Path:

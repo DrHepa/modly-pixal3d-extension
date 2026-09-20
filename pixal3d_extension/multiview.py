@@ -283,19 +283,59 @@ def missing_mv_assets(mv_root: str | Path, base_root: str | Path, naf_path: str 
     return missing
 
 
-def prepare_mv_pipeline_config(mv_root: str | Path, base_root: str | Path, private_config: str | Path) -> Path:
-    """Write a private local config without mutating Modly-downloaded weights."""
+def _require_custodied_file(root: Path, relative: str, group: str) -> Path:
+    """Require a regular, non-symlink file owned by the supplied weight root."""
+
+    candidate = root / relative
+    current = root
+    for part in PurePosixPath(relative).parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(f"{group}/{relative} must not traverse a symlink")
+    if not candidate.is_file():
+        raise ValueError(f"{group}/{relative} is missing or is not a regular file")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"{group}/{relative} cannot be safely resolved") from exc
+    if not _within(root, resolved):
+        raise ValueError(f"{group}/{relative} escapes its shared weight group")
+    return candidate
+
+
+def validate_mv_pipeline_config(mv_root: str | Path, base_root: str | Path) -> dict[str, Any]:
+    """Validate all non-NAF MV assets and return a locally rewritten config.
+
+    This boundary is intentionally read-only: callers may safely use it before
+    deciding whether an absent NAF checkpoint can be bootstrapped.
+    """
 
     root = Path(mv_root).resolve()
     base = Path(base_root).resolve()
-    target = Path(private_config).resolve()
-    if _within(root, target) or _within(base, target):
-        raise ValueError("MV runtime config must not be written into a shared weight group")
+    if not root.is_dir() or not base.is_dir():
+        raise ValueError("Pixal3D MV and base shared weight groups must be directories")
+
+    for relative in MV_WEIGHT_FILES:
+        _require_custodied_file(root, relative, MV_GROUP_ID)
+    base_files = tuple(
+        f"ckpts/{model}.{extension}"
+        for model in BASE_DECODER_FILES
+        for extension in ("json", "safetensors")
+    )
+    for relative in (*base_files, *AUXILIARY_FILES):
+        _require_custodied_file(base, relative, "pixal3d-base")
+
     config = root / "pipeline_mv.json"
-    data = json.loads(config.read_text(encoding="utf-8"))
-    if data.get("name") != "Pixal3DMVImageTo3DPipeline":
+    try:
+        data = json.loads(config.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("pipeline_mv.json is not readable JSON") from exc
+    if not isinstance(data, dict) or data.get("name") != "Pixal3DMVImageTo3DPipeline":
         raise ValueError("pipeline_mv.json is not the Pixal3D multi-view pipeline")
-    models = data.get("args", {}).get("models", {})
+    args = data.get("args")
+    if not isinstance(args, dict):
+        raise ValueError("pipeline_mv.json requires an args object")
+    models = args.get("models")
     if not isinstance(models, dict) or set(models) != set(EXPECTED_MODEL_FILES) or any(
         not isinstance(value, str) or PurePosixPath(value.replace("\\", "/")).name != EXPECTED_MODEL_FILES[key]
         for key, value in models.items()
@@ -307,18 +347,33 @@ def prepare_mv_pipeline_config(mv_root: str | Path, base_root: str | Path, priva
             local = str(base / "ckpts" / model_name)
             if value not in {f"ckpts/{model_name}", local} and not _is_previous_local_ref(value, ("ckpts", model_name)):
                 raise ValueError(f"unexpected decoder path: {key}")
-            if value != local:
-                models[key] = local
+            models[key] = local
         elif value != f"ckpts/{model_name}":
             raise ValueError(f"unexpected multi-view checkpoint path: {key}")
-    rembg = data["args"]["rembg_model"]["args"]
+
+    rembg_model = args.get("rembg_model")
+    rembg_args = rembg_model.get("args") if isinstance(rembg_model, dict) else None
+    if not isinstance(rembg_args, dict):
+        raise ValueError("pipeline_mv.json requires rembg_model.args")
     local = str(base / "auxiliary" / "rmbg")
-    rembg_ref = rembg.get("model_name")
+    rembg_ref = rembg_args.get("model_name")
     if rembg_ref not in {"briaai/RMBG-2.0", "camenduru/RMBG-2.0", local} and not (
         isinstance(rembg_ref, str) and _is_previous_local_ref(rembg_ref, ("auxiliary", "rmbg"))
     ):
         raise ValueError("pipeline_mv.json references an unexpected matting model")
-    rembg["model_name"] = local
+    rembg_args["model_name"] = local
+    return data
+
+
+def prepare_mv_pipeline_config(mv_root: str | Path, base_root: str | Path, private_config: str | Path) -> Path:
+    """Write a private local config without mutating Modly-downloaded weights."""
+
+    root = Path(mv_root).resolve()
+    base = Path(base_root).resolve()
+    target = Path(private_config).resolve()
+    if _within(root, target) or _within(base, target):
+        raise ValueError("MV runtime config must not be written into a shared weight group")
+    data = validate_mv_pipeline_config(root, base)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return target

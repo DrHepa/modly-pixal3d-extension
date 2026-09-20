@@ -30,6 +30,7 @@ from modly_wheelhouse import (
     load_manifest,
     prepare_wheelhouse,
     resolve_verified_fallback,
+    select_asset,
     validate_manifest,
 )
 
@@ -78,6 +79,9 @@ PYTORCH_PIP_FLAGS = ["--no-cache-dir", "--retries", "5", "--timeout", "60"]
 PYTORCH_DIRECT_PIP_FLAGS = [*PYTORCH_PIP_FLAGS, "--no-deps"]
 PYTORCH_CUDA_PACKAGES = ["torch==2.6.0+cu124", "torchvision==0.21.0+cu124"]
 PYTORCH_AARCH64_PACKAGES = ["torch==2.12.0", "torchvision==0.27.0"]
+BLACKWELL_RUNTIME_LANE = "windows-x64-cp311-cuda128-blackwell"
+BLACKWELL_REQUIRED_IMPORTS = ["cumesh_vb", "flex_gemm_ap", "o_voxel_vb_ap", "nvdiffrast", "nvdiffrec_render", "natten"]
+BLACKWELL_REQUIRED_UPSTREAM_IMPORTS = ["cumesh", "flex_gemm", "o_voxel"]
 PIP_BOOTSTRAP_PACKAGE = "https://files.pythonhosted.org/packages/44/3c/d717024885424591d5376220b5e836c2d5293ce2011523c9de23ff7bf068/pip-25.3-py3-none-any.whl#sha256=9655943313a94722b7774661c21049070f6bbb0a1516bf02f7c8d5d9201514cd"
 
 RUNTIME_DIRS = [
@@ -105,6 +109,30 @@ class SetupPathConflict(RuntimeError):
             "expected": self.expected,
             "actual": "file-or-non-directory",
             "message": f"Expected {self.expected}, but a file or non-directory already exists at {self.path}.",
+        }
+
+
+class SetupPayloadError(ValueError):
+    code = "invalid_runtime_evidence"
+
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+        super().__init__(
+            "Setup payload must be exactly one non-empty JSON object; pass it once via "
+            "--payload-json or as Modly's single positional JSON argument. "
+            f"{detail}"
+        )
+
+    @property
+    def observation(self) -> dict[str, Any]:
+        return {
+            "extension_id": EXTENSION_ID,
+            "entrypoint": "setup.py",
+            "status": "failed",
+            "failure_code": self.code,
+            "downloads_started": False,
+            "installs_started": False,
+            "message": str(self),
         }
 
 
@@ -247,7 +275,88 @@ def _looks_like_pip_json_decode_failure(stderr: str) -> bool:
     return "json.decoder.JSONDecodeError" in stderr and "pip/_internal/index" in stderr
 
 
-def _install_prepare_dependencies(workspace_root: Path, *, wheelhouse_path: Path | None = None) -> dict[str, Any]:
+def _runtime_evidence_for_wheelhouse(wheelhouse: Path) -> dict[str, str]:
+    text = str(wheelhouse).replace("\\", "/").lower()
+    if "windows-x64-cp311-cuda128-blackwell" in text:
+        return {
+            "os": "windows",
+            "arch": "x64",
+            "python_tag": "cp311",
+            "accelerator_lane": "cuda128-blackwell",
+            "cuda_version": "12.8",
+            "gpu_sm": "120",
+        }
+    if any(wheelhouse.glob("*win_amd64.whl")):
+        python_tag = "cp311" if any(wheelhouse.glob("*-cp311-cp311-win_amd64.whl")) else "cp312"
+        return {"os": "windows", "arch": "x64", "python_tag": python_tag, "accelerator_lane": "cuda124"}
+    if "linux-x64" in text:
+        return {"os": "linux", "arch": "x64", "python_tag": "cp312", "accelerator_lane": "cuda124"}
+    return {"os": "linux", "arch": "aarch64", "python_tag": "cp312", "accelerator_lane": "cuda124"}
+
+
+def _dependency_policy(runtime_evidence: dict[str, str]) -> dict[str, Any]:
+    lane = "{os}-{arch}-{python_tag}-{accelerator_lane}".format(**runtime_evidence)
+    if lane == BLACKWELL_RUNTIME_LANE:
+        return {
+            "lane": lane,
+            "torch": "2.7.1+cu128",
+            "torchvision": "0.22.1+cu128",
+            "torch_index_url": "https://download.pytorch.org/whl/cu128",
+            "natten": "0.21.6",
+            "expected_torch_cuda": "12.8",
+            "required_gpu_sm": "120",
+            "require_libnatten": True,
+            "strict_validation": True,
+            "required_imports": list(BLACKWELL_REQUIRED_IMPORTS),
+            "required_upstream_imports": list(BLACKWELL_REQUIRED_UPSTREAM_IMPORTS),
+        }
+    if runtime_evidence.get("os") == "linux" and runtime_evidence.get("arch") == "aarch64":
+        return {
+            "lane": lane,
+            "torch": "2.12.0",
+            "torchvision": "0.27.0",
+            "torch_index_url": None,
+            "natten": "0.21.0",
+            "strict_validation": False,
+        }
+    return {
+        "lane": lane,
+        "torch": "2.6.0+cu124",
+        "torchvision": "0.21.0+cu124",
+        "torch_index_url": PYTORCH_CUDA_INDEX_URL,
+        "natten": "0.21.0",
+        "strict_validation": False,
+    }
+
+
+def _dependency_install_plan(workspace_root: Path, wheelhouse: Path, runtime_evidence: dict[str, str]) -> dict[str, Any]:
+    venv_python = _venv_python_path(workspace_root)
+    policy = _dependency_policy(runtime_evidence)
+    torch_command = [str(venv_python), "-m", "pip", "install", *PYTORCH_PIP_FLAGS]
+    if policy["torch_index_url"]:
+        torch_command.extend(["--index-url", policy["torch_index_url"]])
+    torch_command.extend([f"torch=={policy['torch']}", f"torchvision=={policy['torchvision']}"])
+    natten_command = None
+    if _wheelhouse_contains_natten(wheelhouse):
+        natten_command = [
+            str(venv_python), "-m", "pip", "install", "--no-index", "--no-deps", "--find-links", str(wheelhouse),
+            f"natten=={policy['natten']}",
+        ]
+    return {
+        "policy": policy,
+        "torch_command": torch_command,
+        "natten_command": natten_command,
+        "local_wheel_packages": _local_wheel_packages_for_wheelhouse(wheelhouse),
+        "metadata_packages": _metadata_dependency_packages_for_wheelhouse(wheelhouse),
+    }
+
+
+def _install_prepare_dependencies(
+    workspace_root: Path,
+    *,
+    wheelhouse_path: Path | None = None,
+    runtime_evidence: dict[str, str] | None = None,
+) -> dict[str, Any]:
     venv_python = _venv_python_path(workspace_root)
     wheelhouse = wheelhouse_path or (workspace_root / WHEELHOUSE_DIR)
     if not venv_python.exists():
@@ -258,18 +367,20 @@ def _install_prepare_dependencies(workspace_root: Path, *, wheelhouse_path: Path
     if not mv_wheel.is_file() or hashlib.sha256(mv_wheel.read_bytes()).hexdigest() != MV_CORE_WHEEL_SHA256:
         return {"status": "failed", "code": "mv_core_wheel_missing_or_invalid", "wheel": str(mv_wheel), "commands": []}
 
-    local_wheel_packages = _local_wheel_packages_for_wheelhouse(wheelhouse)
-    torch_install_command = _torch_install_command_for_wheelhouse(venv_python, wheelhouse)
+    runtime_evidence = runtime_evidence or _runtime_evidence_for_wheelhouse(wheelhouse)
+    plan = _dependency_install_plan(workspace_root, wheelhouse, runtime_evidence)
+    local_wheel_packages = plan["local_wheel_packages"]
+    torch_install_command = plan["torch_command"]
     commands = [
         [str(venv_python), "-m", "pip", "install", "--no-deps", PIP_BOOTSTRAP_PACKAGE],
         torch_install_command,
         [str(venv_python), "-m", "pip", "install", *PYTORCH_PIP_FLAGS, "-r", "requirements.txt"],
-        [str(venv_python), "-m", "pip", "install", *PYTORCH_PIP_FLAGS, *_metadata_dependency_packages_for_wheelhouse(wheelhouse)],
+        [str(venv_python), "-m", "pip", "install", *PYTORCH_PIP_FLAGS, *plan["metadata_packages"]],
         [str(venv_python), "-m", "pip", "install", "--no-index", "--no-deps", "--find-links", str(wheelhouse), *local_wheel_packages],
         [str(venv_python), "-m", "pip", "install", "--no-index", "--no-deps", "--force-reinstall", str(mv_wheel)],
     ]
-    if _wheelhouse_contains_natten(wheelhouse):
-        commands.append([str(venv_python), "-m", "pip", "install", "--no-index", "--no-deps", "--find-links", str(wheelhouse), *OPTIONAL_NATTEN_PACKAGES])
+    if plan["natten_command"] is not None:
+        commands.append(plan["natten_command"])
     results: list[dict[str, Any]] = []
     for command in commands:
         result = _run_setup_command(command, cwd=workspace_root)
@@ -277,7 +388,7 @@ def _install_prepare_dependencies(workspace_root: Path, *, wheelhouse_path: Path
         if not result["ok"]:
             return {"status": "failed", "code": "dependency_install_failed", "failed_command": command, "commands": results}
     pip_check = _run_setup_command([str(venv_python), "-m", "pip", "check"], cwd=workspace_root)
-    runtime_check = _runtime_cuda_check(venv_python, workspace_root, wheelhouse)
+    runtime_check = _runtime_cuda_check(venv_python, workspace_root, wheelhouse, runtime_evidence)
     pip_check_acceptable = pip_check["ok"] or _is_known_aarch64_nvidia_platform_check_false_positive(pip_check, wheelhouse)
     if not pip_check_acceptable or not runtime_check["ok"]:
         return {
@@ -294,7 +405,9 @@ def _install_prepare_dependencies(workspace_root: Path, *, wheelhouse_path: Path
         "venv_python": str(venv_python),
         "wheelhouse": str(wheelhouse),
         "local_wheel_packages": local_wheel_packages,
-        "optional_natten_packages": OPTIONAL_NATTEN_PACKAGES,
+        "optional_natten_packages": [f"natten=={plan['policy']['natten']}"],
+        "runtime_evidence": runtime_evidence,
+        "dependency_policy": plan["policy"],
         "natten_runtime": _natten_runtime_status(venv_python, workspace_root),
         "pip_check": pip_check,
         "runtime_check": runtime_check,
@@ -310,7 +423,40 @@ def _is_known_aarch64_nvidia_platform_check_false_positive(pip_check: dict[str, 
     return lines == ["nvidia-cusparselt-cu13 0.8.1 is not supported on this platform"]
 
 
-def _runtime_cuda_check(venv_python: Path, workspace_root: Path, wheelhouse: Path) -> dict[str, Any]:
+def _validate_runtime_probe(probe: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+    errors: list[str] = []
+    if not probe.get("ok"):
+        errors.append(str(probe.get("error") or "runtime probe failed"))
+    if policy.get("strict_validation"):
+        expected = {
+            "torch_version": policy["torch"],
+            "torchvision_version": policy["torchvision"],
+            "torch_cuda_version": policy["expected_torch_cuda"],
+            "gpu_sm": policy["required_gpu_sm"],
+            "natten_version": policy["natten"],
+        }
+        for key, expected_value in expected.items():
+            if str(probe.get(key)) != str(expected_value):
+                errors.append(f"{key} must be {expected_value}; found {probe.get(key)!r}")
+        if probe.get("torch_cuda_available") is not True:
+            errors.append("torch CUDA must be available")
+        if policy.get("require_libnatten") and probe.get("natten_has_libnatten") is not True:
+            errors.append("natten.HAS_LIBNATTEN must be True")
+        for key, policy_key in (("imports", "required_imports"), ("upstream_imports", "required_upstream_imports")):
+            missing = sorted(set(policy.get(policy_key, [])) - set(probe.get(key, [])))
+            if missing:
+                errors.append(f"missing {key}: {', '.join(missing)}")
+    return {**probe, "ok": not errors, "validation_errors": errors}
+
+
+def _runtime_cuda_check(
+    venv_python: Path,
+    workspace_root: Path,
+    wheelhouse: Path,
+    runtime_evidence: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    runtime_evidence = runtime_evidence or _runtime_evidence_for_wheelhouse(wheelhouse)
+    policy = _dependency_policy(runtime_evidence)
     native_imports = _native_import_modules_for_wheelhouse(wheelhouse)
     upstream_imports = _upstream_import_modules_for_wheelhouse(wheelhouse)
     if _wheelhouse_contains_natten(wheelhouse):
@@ -341,8 +487,12 @@ def _runtime_cuda_check(venv_python: Path, workspace_root: Path, wheelhouse: Pat
         f"    if payload['transformers_version'] != {TRANSFORMERS_VERSION!r}:\n"
         f"        raise RuntimeError('Pixal3D requires transformers=={TRANSFORMERS_VERSION}')\n"
         "    payload['torch_version'] = torch.__version__\n"
+        "    payload['torchvision_version'] = version('torchvision')\n"
         "    payload['torch_cuda_version'] = torch.version.cuda\n"
         "    payload['torch_cuda_available'] = bool(torch.cuda.is_available())\n"
+        "    if payload['torch_cuda_available']:\n"
+        "        major, minor = torch.cuda.get_device_capability()\n"
+        "        payload['gpu_sm'] = f'{major}{minor}'\n"
         f"    imports = {native_imports!r}\n"
         "    for name in imports:\n"
         "        import_with_torch_compile_disabled(name)\n"
@@ -354,6 +504,10 @@ def _runtime_cuda_check(venv_python: Path, workspace_root: Path, wheelhouse: Pat
         "        importlib.import_module(name)\n"
         "    payload['imports'] = imports\n"
         "    payload['upstream_imports'] = upstream_imports\n"
+        "    if 'natten' in imports:\n"
+        "        natten = sys.modules.get('natten') or importlib.import_module('natten')\n"
+        "        payload['natten_version'] = version('natten')\n"
+        "        payload['natten_has_libnatten'] = bool(getattr(natten, 'HAS_LIBNATTEN', False))\n"
         "    payload['ok'] = bool(torch.version.cuda and torch.cuda.is_available())\n"
         "except Exception as exc:\n"
         "    payload['error'] = f'{type(exc).__name__}: {exc}'\n"
@@ -364,11 +518,12 @@ def _runtime_cuda_check(venv_python: Path, workspace_root: Path, wheelhouse: Pat
         payload = json.loads(result.get("stdout_tail", "").strip().splitlines()[-1])
     except Exception:
         payload = {"ok": False, "error": "runtime CUDA probe did not return JSON"}
-    return {
+    combined = {
         **result,
         **payload,
         "ok": bool(result.get("ok") and payload.get("ok") and payload.get("transformers_version") == TRANSFORMERS_VERSION),
     }
+    return _validate_runtime_probe(combined, policy)
 
 
 def _native_import_modules_for_wheelhouse(wheelhouse: Path) -> list[str]:
@@ -467,9 +622,13 @@ def _venv_python_path(workspace_root: Path) -> Path:
     return candidates[0]
 
 
-def _prepare_wheelhouse_for_setup(workspace_root: Path) -> dict[str, Any]:
+def _prepare_wheelhouse_for_setup(
+    workspace_root: Path,
+    *,
+    runtime_evidence: dict[str, str] | None = None,
+) -> dict[str, Any]:
     manifest = load_manifest(workspace_root / WHEELHOUSE_MANIFEST)
-    runtime_evidence = detect_runtime_lane()
+    runtime_evidence = runtime_evidence or detect_runtime_lane()
     try:
         return prepare_wheelhouse(manifest, runtime_evidence, workspace_root)
     except WheelhouseError as exc:
@@ -510,16 +669,23 @@ def _wheelhouse_manifest_observation(workspace_root: Path) -> dict[str, Any]:
 
 
 def _load_payload(raw_payload: str | None) -> dict[str, Any]:
-    if not raw_payload:
+    if raw_payload is None:
         return {}
-    payload = json.loads(raw_payload)
-    return {key: payload[key] for key in {"ext_dir"} if key in payload}
+    try:
+        payload = json.loads(raw_payload)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise SetupPayloadError("The supplied value is not valid JSON.") from exc
+    if not isinstance(payload, dict):
+        raise SetupPayloadError("JSON arrays, scalars, booleans, and null are not valid setup payloads.")
+    if not payload:
+        raise SetupPayloadError("The object is empty and does not contain Modly runtime evidence.")
+    return {key: payload[key] for key in {"ext_dir", "cuda_version", "gpu_sm"} if key in payload}
 
 
 def _coerce_payload_arg(explicit_payload: str | None, positional_payload: str | None, unknown_args: list[str]) -> str | None:
-    if explicit_payload:
+    if explicit_payload is not None:
         return explicit_payload
-    if positional_payload:
+    if positional_payload is not None:
         return positional_payload
     if unknown_args and unknown_args[0].lstrip().startswith("{"):
         return " ".join(unknown_args)
@@ -527,6 +693,11 @@ def _coerce_payload_arg(explicit_payload: str | None, positional_payload: str | 
 
 
 def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    payload_flag_count = sum(
+        argument == "--payload-json" or argument.startswith("--payload-json=")
+        for argument in argv
+    )
     parser = argparse.ArgumentParser(description="Prepare the Pixal3D Modly extension.")
     parser.add_argument("--workspace-root", default=".")
     parser.add_argument("--prepare", action="store_true")
@@ -548,14 +719,46 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
     parser.add_argument("positional_payload_json", nargs="?", help="Modly install payload JSON. Modly may pass this as a positional argument.")
     args, unknown_args = parser.parse_known_args(argv)
 
-    # Modly's Repair invokes setup.py with legacy positional interpreter/ext-dir/SM,
+    # Modly's Repair invokes setup.py with legacy positional interpreter/ext-dir/SM/CUDA,
     # while newer hosts send a JSON payload. Both are ordinary preparation paths.
-    legacy_repair = bool(args.positional_payload_json and not args.positional_payload_json.lstrip().startswith("{") and len(unknown_args) >= 2)
-    raw_payload = None if legacy_repair else _coerce_payload_arg(args.payload_json, args.positional_payload_json, unknown_args)
-    setup_inputs = _load_payload(raw_payload)
-    layout = resolve_modly_layout(args.workspace_root, ext_dir=unknown_args[0] if legacy_repair else setup_inputs.get("ext_dir"))
+    legacy_repair = bool(
+        payload_flag_count == 0
+        and args.positional_payload_json
+        and not args.positional_payload_json.lstrip().startswith("{")
+        and len(unknown_args) >= 2
+    )
+    try:
+        if payload_flag_count > 1:
+            raise SetupPayloadError("--payload-json was supplied more than once.")
+        if args.payload_json is not None and args.positional_payload_json is not None:
+            raise SetupPayloadError("Both explicit and positional payload forms were supplied.")
+        if not legacy_repair and unknown_args:
+            raise SetupPayloadError("Unexpected extra arguments make the payload ambiguous.")
+        raw_payload = None if legacy_repair else _coerce_payload_arg(args.payload_json, args.positional_payload_json, unknown_args)
+        setup_inputs = _load_payload(raw_payload)
+    except SetupPayloadError as exc:
+        return exc.observation
+    if legacy_repair:
+        # Older three-argument invocations still retain their ext-dir behavior;
+        # the current four-argument contract additionally supplies complete lane evidence.
+        setup_inputs = {"ext_dir": unknown_args[0]}
+        if len(unknown_args) >= 3:
+            setup_inputs.update({"gpu_sm": unknown_args[1], "cuda_version": unknown_args[2]})
+    layout = resolve_modly_layout(args.workspace_root, ext_dir=setup_inputs.get("ext_dir"))
     workspace_root = layout.ext_dir
     prepare_requested = args.prepare or bool(raw_payload) or legacy_repair
+
+    try:
+        runtime_evidence = detect_runtime_lane(setup_inputs)
+    except WheelhouseError as exc:
+        return {
+            "extension_id": EXTENSION_ID,
+            "entrypoint": "setup.py",
+            "workspace_root": str(workspace_root),
+            "resolved_paths": layout.as_dict(),
+            **exc.observation,
+            "message": str(exc),
+        }
 
     result: dict[str, Any] = {
         "extension_id": EXTENSION_ID,
@@ -570,7 +773,32 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
         "auxiliary_assets": _auxiliary_asset_bootstrap_plan(),
         "localizable_runtime_dependencies": list(LOCALIZABLE_RUNTIME_DEPENDENCIES),
         "runtime_dependencies": list(UNLOCALIZED_RUNTIME_DEPENDENCIES),
+        "runtime_evidence": runtime_evidence,
     }
+
+    if prepare_requested and ("cuda_version" in setup_inputs or "gpu_sm" in setup_inputs):
+        try:
+            manifest = load_manifest(workspace_root / WHEELHOUSE_MANIFEST)
+            validate_manifest(manifest)
+            selected = select_asset(manifest, runtime_evidence)
+        except (OSError, json.JSONDecodeError, WheelhouseError) as exc:
+            code = getattr(exc, "code", "invalid_manifest")
+            observation = getattr(
+                exc,
+                "observation",
+                {"status": "failed", "failure_code": code, "downloads_started": False, "installs_started": False},
+            )
+            return {
+                **result,
+                **observation,
+                "message": str(exc),
+                "runtime_lane_preflight": {"status": "failed", "failure_code": code, "runtime_evidence": runtime_evidence},
+            }
+        result["runtime_lane_preflight"] = {
+            "status": "matched",
+            "selected_asset": selected["id"],
+            "runtime_evidence": runtime_evidence,
+        }
 
     if args.repair_worldsculpt:
         if args.skip_install:
@@ -634,10 +862,11 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
         dependency_install = None
         if not args.skip_install:
             try:
-                wheelhouse_prepare = _prepare_wheelhouse_for_setup(workspace_root)
+                wheelhouse_prepare = _prepare_wheelhouse_for_setup(workspace_root, runtime_evidence=runtime_evidence)
                 dependency_install = _install_prepare_dependencies(
                     workspace_root,
                     wheelhouse_path=_prepared_wheelhouse_path(wheelhouse_prepare),
+                    runtime_evidence=runtime_evidence,
                 )
             except (OSError, json.JSONDecodeError, WheelhouseError) as exc:
                 code = getattr(exc, "code", "wheelhouse_prepare_failed")

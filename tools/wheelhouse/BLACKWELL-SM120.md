@@ -62,6 +62,12 @@ The workflow builds a NATTEN `v0.21.6` Windows wheel with Blackwell `sm_120` cov
 
 The candidate archive includes `WINDOWS-BLACKWELL-CANDIDATE.json` with downloaded wheel checksums and validation requirements. This workflow uploads a GitHub Actions artifact only. It must not update `wheelhouse.manifest.json`, upload release assets, or mark RTX 5090 as supported.
 
+## Prepared setup contract (inactive)
+
+The setup boundary now accepts `cuda_version` and `gpu_sm` in the Modly JSON payload. It normalizes `12.8`/`12.8.1` plus `120`/`12.0`/`sm_120` to the candidate selector `cuda128-blackwell`. This is a hard gate before any wheelhouse download or dependency install: because the candidate asset is intentionally absent from `wheelhouse.manifest.json`, an RTX 50-series payload currently fails with `unsupported_lane` and performs no download or install.
+
+For a future checksum-pinned asset, the prepared lane policy is exact: torch `2.7.1+cu128`, torchvision `0.22.1+cu128`, NATTEN `0.21.6`, torch CUDA `12.8`, compute capability `120`, every Windows native/upstream compatibility import, and `natten.HAS_LIBNATTEN == True` must all validate. A mismatched field fails readiness rather than falling back to the CUDA 12.4 policy. This code path is covered with synthetic selection and install-plan tests only; it does not activate the lane or prove hardware support.
+
 This candidate can still fail in CI because NATTEN/CUTLASS/MSVC/CUDA 12.8 compatibility is unproven for this exact stack. A successful CI build is also not enough for publication: it must be installed and generation-tested on real RTX 50-series hardware.
 
 First-run evidence from GitHub Actions run `27070460013` confirmed CUDA 12.8 generated `compute_120` / `sm_120` for NATTEN (`120-real`), but failed before producing a wheel because upstream NATTEN/CMake passed GCC-only flags such as `-Wconversion`, `-fno-strict-aliasing`, and `-Wall` through `nvcc -Xcompiler` to MSVC. The workflow therefore enables Git long paths for CUTLASS checkout and removes those GCC-only flags recursively before building.

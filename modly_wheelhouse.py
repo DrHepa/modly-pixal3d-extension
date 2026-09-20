@@ -412,9 +412,52 @@ def resolve_verified_fallback(manifest: dict[str, Any], workspace_root: Path, ru
     }
 
 
-def detect_runtime_lane() -> dict[str, str]:
-    system = platform.system().lower()
-    machine = platform.machine().lower()
+def _normalize_cuda_version(value: Any) -> tuple[str, str]:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise WheelhouseError("invalid_runtime_evidence", "cuda_version must be a compact CUDA encoding or dotted version")
+    text = str(value).strip()
+    compact = re.fullmatch(r"\d{3}", text)
+    if compact is not None:
+        encoded = int(text)
+        major, minor = divmod(encoded, 10)
+    else:
+        match = re.fullmatch(r"(\d{1,2})\.(\d)(?:\.\d+)?", text)
+        if match is None:
+            raise WheelhouseError(
+                "invalid_runtime_evidence",
+                "cuda_version must use a three-digit encoding such as 128 or a dotted version such as 12.8",
+            )
+        major, minor = (int(match.group(1)), int(match.group(2)))
+    if not 10 <= major <= 99:
+        raise WheelhouseError("invalid_runtime_evidence", "cuda_version major must be between 10 and 99")
+    return f"{major}.{minor}", f"cuda{major}{minor}"
+
+
+def _normalize_gpu_sm(value: Any) -> str:
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        raise WheelhouseError("invalid_runtime_evidence", "gpu_sm must be a numeric compute capability")
+    text = str(value).strip().lower().replace("compute_", "").replace("sm_", "")
+    if re.fullmatch(r"\d{1,2}\.\d", text):
+        major, minor = text.split(".", 1)
+        text = f"{int(major)}{int(minor)}"
+    if not re.fullmatch(r"\d{2,3}", text):
+        raise WheelhouseError("invalid_runtime_evidence", "gpu_sm must be a compute capability such as 12.0, sm_120, or 120")
+    gpu_sm = int(text)
+    if not 10 <= gpu_sm <= 999:
+        raise WheelhouseError("invalid_runtime_evidence", "gpu_sm must be between 10 and 999")
+    return str(gpu_sm)
+
+
+def detect_runtime_lane(
+    payload: dict[str, Any] | None = None,
+    *,
+    system: str | None = None,
+    machine: str | None = None,
+    python_tag: str | None = None,
+) -> dict[str, str]:
+    payload = payload or {}
+    system = (system or platform.system()).lower()
+    machine = (machine or platform.machine()).lower()
     if system == "linux":
         os_name = "linux"
     elif system.startswith("win"):
@@ -425,5 +468,27 @@ def detect_runtime_lane() -> dict[str, str]:
         os_name = system
 
     arch = {"x86_64": "x64", "amd64": "x64", "aarch64": "aarch64", "arm64": "aarch64"}.get(machine, machine)
-    python_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
-    return {"os": os_name, "arch": arch, "python_tag": python_tag, "accelerator_lane": "cuda124"}
+    python_tag = python_tag or f"cp{sys.version_info.major}{sys.version_info.minor}"
+
+    cuda_value = payload.get("cuda_version")
+    gpu_sm_value = payload.get("gpu_sm")
+    if (cuda_value is None) != (gpu_sm_value is None):
+        raise WheelhouseError(
+            "incomplete_runtime_evidence",
+            "cuda_version and gpu_sm must be supplied together so setup cannot select an ABI lane from partial GPU evidence",
+        )
+
+    evidence = {"os": os_name, "arch": arch, "python_tag": python_tag, "accelerator_lane": "cuda124"}
+    if cuda_value is None:
+        return evidence
+
+    cuda_version, accelerator_lane = _normalize_cuda_version(cuda_value)
+    gpu_sm = _normalize_gpu_sm(gpu_sm_value)
+    if accelerator_lane == "cuda128" and gpu_sm == "120":
+        accelerator_lane = "cuda128-blackwell"
+    return {
+        **evidence,
+        "accelerator_lane": accelerator_lane,
+        "cuda_version": cuda_version,
+        "gpu_sm": gpu_sm,
+    }

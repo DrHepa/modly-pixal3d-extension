@@ -68,6 +68,8 @@ RTX 50-series / Blackwell support is tracked separately in `BLACKWELL-SM120.md`.
 
 The experimental Blackwell candidate workflow is `.github/workflows/wheelhouse-windows-x64-cp311-cuda128-blackwell-candidate.yml`. It targets `windows-x64-cp311-cuda128-blackwell`, builds NATTEN against `torch==2.7.1+cu128` with `TORCH_CUDA_ARCH_LIST=12.0`, and packages exact-stack `cu128torch2.7` Windows native wheels. It is candidate-only and must remain outside `wheelhouse.manifest.json` until real RTX 50-series validation succeeds.
 
+Setup has a prepared but inactive payload route for this candidate. A payload containing `cuda_version` and `gpu_sm` is normalized before wheelhouse selection; CUDA 12.8 plus SM120 selects `cuda128-blackwell`. While that asset is not present in `wheelhouse.manifest.json`, setup must fail closed with `unsupported_lane` before filesystem preparation, download, or install. Do not use the prepared dependency policy as a support claim: publication still requires the exact RTX 50-series hardware checks in `BLACKWELL-SM120.md` and a newly checksum-pinned stable release asset.
+
 ## Windows NATTEN candidate workflow
 
 `.github/workflows/natten-windows-x64-cp311-cuda124-candidate.yml` is a manual GitHub Actions probe for building a native Windows `win_amd64` NATTEN wheel from `SHI-Labs/NATTEN` tag `v0.21.0` against Python `3.11`, torch `2.6.0+cu124`, torchvision `0.21.0+cu124`, and CUDA `12.4.1`. This candidate is the closest Windows port to upstream `requirements_th26_cu124.txt`.

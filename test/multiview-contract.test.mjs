@@ -169,7 +169,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
 test('MV config redirects shared decoders and RMBG; missing weights fail before inference', () => {
   const result = python(`
-import json, tempfile
+import json, shutil, tempfile
 from pathlib import Path
 from pixal3d_extension.multiview import BASE_DECODER_FILES, MV_MODEL_FILES, MV_WEIGHT_FILES, AUXILIARY_FILES, EXPECTED_MODEL_FILES, missing_mv_assets, prepare_mv_pipeline_config, run_multiview
 with tempfile.TemporaryDirectory() as tmp:
@@ -196,12 +196,13 @@ with tempfile.TemporaryDirectory() as tmp:
     blocked=''
     try: run_multiview(scene_manifest_path=scene,workspace_dir=workspace,mv_root=mv,base_root=base,naf_path=naf,output_dir=workspace/'out',params={'num_views':1},inference_runner=runner)
     except RuntimeError as exc: blocked=str(exc)
+    (mv/'ckpts'/f'{MV_MODEL_FILES[0]}.safetensors').write_bytes(b'weight')
     # Simulate an older install that patched absolute paths in shared config.
     for key,value in patched['args']['models'].items():
         if value.rsplit('/',1)[-1] in BASE_DECODER_FILES: patched['args']['models'][key]='C:\\\\old\\\\ckpts\\\\'+value.rsplit('/',1)[-1]
     patched['args']['rembg_model']['args']['model_name']='C:\\\\old\\\\auxiliary\\\\rmbg'
     (mv/'pipeline_mv.json').write_text(json.dumps(patched))
-    moved=home/'moved-base';moved.mkdir()
+    moved=home/'moved-base';shutil.copytree(base,moved)
     private=prepare_mv_pipeline_config(mv,moved,home/'private'/'pipeline_mv.local.json')
     repatched=json.loads(private.read_text())
     print(json.dumps({'missing':missing_before,'output':output.is_file(),'calls':calls,'source_untouched':untouched,'private_removed':not Path(calls[0]['config_file']).exists(),'models':list(repatched['args']['models'].values()),'rmbg':repatched['args']['rembg_model']['args']['model_name'],'blocked':blocked}))
@@ -354,7 +355,7 @@ events=[];cancel=threading.Event()
 callback=events.append
 gen=Pixal3DGenerator('/tmp/models/pixal3d/generate-mv','/tmp/Workspace');gen.MODEL_NODE_ID='generate-mv'
 gen.shared_model_dirs={'pixal3d-base':'/tmp/base','pixal3d-mv':'/tmp/mv'}
-with patch('pixal3d_extension.multiview.run_multiview',return_value=Path('/tmp/result.glb')) as mock:
+with patch.object(gen,'_prepare_generation_assets',return_value=Path('/tmp/models/pixal3d/auxiliary/naf/naf_release.pth')), patch('pixal3d_extension.multiview_capture.validate_mv_capture'), patch('pixal3d_extension.multiview.run_multiview',return_value=Path('/tmp/result.glb')) as mock:
     gen.generate(Path('/tmp/Workspace/capture-manifest.json'),{},callback,cancel)
     forwarded=mock.call_args.kwargs['cancel_event'] is cancel and mock.call_args.kwargs['progress_cb'] is callback
 with tempfile.TemporaryDirectory() as tmp:

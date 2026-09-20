@@ -52,8 +52,11 @@ class MultiviewCaptureTests(unittest.TestCase):
         gen.shared_model_dirs = {"pixal3d-base": "/tmp/base", "pixal3d-mv": "/tmp/mv"}
         incoming = SimpleNamespace(kind="capture", path=Path("/tmp/modly/workspace/input/capture-manifest.json"))
         cancel = threading.Event()
-        with patch("pixal3d_extension.multiview.run_multiview", return_value=Path("/tmp/result.glb")) as run:
+        with patch.object(gen, "_prepare_generation_assets", return_value=Path("/tmp/modly/models/pixal3d/auxiliary/naf/naf_release.pth")), \
+             patch("pixal3d_extension.multiview_capture.validate_mv_capture") as preflight, \
+             patch("pixal3d_extension.multiview.run_multiview", return_value=Path("/tmp/result.glb")) as run:
             gen.generate(incoming, {"capture_manifest_path": "/foreign.json", "scene_manifest_path": "/scene.json"}, None, cancel)
+        preflight.assert_called_once_with(incoming.path, gen.workspace_dir, 4)
         self.assertEqual(run.call_args.kwargs["capture_manifest_path"], incoming.path)
         self.assertIs(run.call_args.kwargs["cancel_event"], cancel)
         self.assertNotIn("scene_manifest_path", run.call_args.kwargs)
