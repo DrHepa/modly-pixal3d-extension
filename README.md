@@ -99,12 +99,13 @@ extension and file signature, then snapshots the video. The isolated Python 3.12
 lane fully decodes it to verify dimensions and frame count. `frame_stride` and
 `max_frames` deterministically select frames in decode order.
 
-The exact future host payload is `{ "kind": "video", "path":
+The exact host payload is `{ "kind": "video", "path":
 "<workspace-relative-or-native-workspace-path>" }` (an object exposing the same
 `kind` and `path` attributes is also accepted). Parsing lives only in
-`pixal3d_extension/scene_video_input.py`. **The corresponding Modly host video
-transport is not merged yet**, so the manifest/runtime contract is prepared but
-end-to-end workflow dispatch remains blocked on that host change.
+`pixal3d_extension/scene_video_input.py`. Modly PR #358 implements this typed
+video transport on top of scene-artifact PR #357. A real private-Modly run
+completed video -> scene -> WorldSculpt -> GLB through that host route; upstream
+main support remains pending until those PRs merge.
 
 Both nodes run the official SAM3 video predictor for text-guided instance
 tracking and the official DA3 Base multiview model for depth, confidence, intrinsics, and
@@ -191,10 +192,10 @@ inference on other platforms remain **UNTESTED**.
 The manifest, contract, geometry, setup isolation, and subprocess adapter have
 focused automated coverage. On Linux ARM64 / GB10, a real three-view SAM3 +
 DA3 run produced a validated canonical scene with three cameras, three nonempty
-masks, relative-scale provenance, and an object AABB. Exact Electron 42 routing
-of private capture inputs was also validated. The new public image/video adapters
-have automated contract coverage, but a complete public-node UI run and the host
-video envelope transport remain **UNTESTED**.
+masks, relative-scale provenance, and an object AABB. Real installed runs also
+completed the public ordered-image route and the typed-video route through scene
+creation and WorldSculpt GLB generation. Perceptual viewport validation remains
+**PARTIAL** because WebGL2 was unavailable under Xvfb.
 
 Licensing and clean-room attribution are documented in
 `THIRD_PARTY_NOTICES.md`. The unlicensed community
@@ -204,8 +205,8 @@ copied or vendored here.
 ## Usage
 
 Connect two to eight image-producing nodes to **Prepare Scene from Images**, or
-connect a host video node to **Prepare Scene from Video** once Modly lands the
-typed video transport. Existing datasets can use **Normalize Annotated Scene**.
+connect a host video node to **Prepare Scene from Video** on a Modly build that
+includes typed-video PR #358. Existing datasets can use **Normalize Annotated Scene**.
 Connect any scene output to **WorldSculpt**. For Pixal3D MV, connect two to four
 image-producing nodes to **Multi-Image to 3D** in declared port order. The first
 connected port is the primary view. Modly forwards it as image bytes and forwards
@@ -320,7 +321,7 @@ capture adapter remain available for internal/backward-compatible callers with
 real poses. Neither is exposed as the public workflow input and neither can
 override the multiple-image transport fields.
 
-**Runtime boundary:** the published native wheelhouse still contains the single-view Pixal3D core wheel. Normal setup checksum-verifies and force-reinstalls a bundled, additive pure-Python MV core after that wheelhouse; it does not change native CUDA/NATTEN packages or claim GPU compatibility. The vendored upstream `inference_mv.py` invokes the MV cascade through a private generated config and a scoped local-only loader, so downloaded shared weight files are not modified and corrupt/missing local checkpoints cannot trigger an upstream Hugging Face fallback. If the core overlay or isolated DA3 runtime is absent or invalid, setup fails rather than leaving an inert node. Contract tests cover ordered port reconstruction, image custody, DA3 camera conversion, cleanup, cancellation, offline loading, and the calibrated runner adapter. Real inference evidence must still be re-established after this public input-contract migration.
+**Runtime boundary:** the published native wheelhouse still contains the single-view Pixal3D core wheel. Normal setup checksum-verifies and force-reinstalls a bundled, additive pure-Python MV core after that wheelhouse; it does not change native CUDA/NATTEN packages or claim GPU compatibility. The vendored upstream `inference_mv.py` invokes the MV cascade through a private generated config and a scoped local-only loader, so downloaded shared weight files are not modified and corrupt/missing local checkpoints cannot trigger an upstream Hugging Face fallback. If the core overlay or isolated DA3 runtime is absent or invalid, setup fails rather than leaving an inert node. Contract tests cover ordered port reconstruction, image custody, DA3 camera conversion, cleanup, cancellation, offline loading, and the calibrated runner adapter. Real ordered-image MV inference passed on Linux ARM64 / GB10 after the public input-contract migration and produced a structurally valid GLB.
 
 MV NAF loading is intercepted at the exact upstream Torch Hub call and reads only the verified local checkpoint; unexpected Hub requests fail closed. MV progress is reported at stage boundaries. Direct generation checks cancellation before NAF bootstrap and immediately after it, so a pre-cancelled request performs no NAF filesystem or network mutation. Cancellation is also checked before and after later expensive stages, but the upstream model-loading, cascade, and GLB extraction calls cannot be interrupted mid-call; a cancellation request takes effect at the next boundary.
 
@@ -354,13 +355,14 @@ This is **not** a cross-platform offline-generation guarantee. A direct single-v
 - Repository visibility: public.
 - Primary Modly packaged-app lane: Windows `x64` / Python `cp311` / CUDA `12.4`.
 - Setup contract: release-backed wheelhouse with checksum verification and native import probes.
-- Runtime status: the previous single-node layout was validated on Windows `x64` / Python `cp311` / CUDA `12.4` through a complete Modly Low VRAM 1024 generation. The new shared-weight layout has static and mocked-generation coverage but still requires a live Modly run after the dependent host PRs are available.
+- Host status: multi-source downloads are merged in PR #275. Shared groups (PR #348), scene artifacts (PR #357), and typed video artifacts (draft PR #358) remain pending upstream; current upstream main therefore does not yet expose the complete six-node workflow.
+- Runtime status: the previous single-node layout was validated on Windows `x64` / Python `cp311` / CUDA `12.4` through a complete Modly Low VRAM 1024 generation. The current shared-weight layout passed real installed Modly generation on Linux ARM64 / GB10 for the original node, ordered-image MV, image/video scene preparation, and WorldSculpt composition. This is not evidence for untested platforms.
 - Runtime note: use Low VRAM mode on 8GB-class GPUs; generation quality and orientation depend on the input view and upstream Pixal3D export behavior. The extension does not rewrite the final GLB orientation with a fixed yaw transform.
 
-### WorldSculpt scene composition (advertised branch candidate; GB10 GPU inference validated)
+### WorldSculpt scene composition (exposed v0.7 node; GB10 GPU inference validated)
 
-The `worldsculpt` branch candidate is a separate `scene → mesh` node in `manifest.json`, **not** an alias for Pixal3D posed-view generation. The manifest advertises it for Modly weight download and scene dispatch. A direct GB10 GPU run through the extension generator completed crop, reconstruction, and composition and produced a structurally valid GLB; a second installed-API regression run honored a 50,000-face request with a valid 49,593-face GLB. Exact Electron 42 scene normalization, WorldSculpt routing, and Add-to-Scene output propagation also passed, although Xvfb WebGL2 blocking prevented perceptual viewport proof. Other platform lanes remain untested, so this is not a broad compatibility claim. It follows the pinned AlayaLab WorldSculpt geometry-only path: crop each eligible masked instance, reconstruct with the SS/shape LoRA adapters (`--no_tex --no_glb`, step 15000), then compose a normal-bearing scene GLB. It does not produce textures, renders, or a point-cloud visualization. The bundled source snapshot is `373f09f0ecddc94607b569bea0316ff6a2286501`; the UI-managed `worldsculpt-adapters` shared weight group contains exactly two adapter stages from `AlayaLab/WorldSculpt` revision `8cb81056d803c61371dd84ef18a14142a738610e`. The node also depends on the shared `pixal3d-base` group. Load or first generation validates every base and adapter file before checking NAF, and bootstraps NAF only when it is the sole remaining auxiliary deficiency; corrupt local NAF fails closed and requires the forced manual repair command above. Direct generation checks cancellation on both sides of bootstrap, so pre-cancelled requests cannot start it.
+The exposed `worldsculpt` node is a separate `scene → mesh` node in `manifest.json`, **not** an alias for Pixal3D posed-view generation. The manifest advertises it for Modly weight download and scene dispatch. A direct GB10 GPU run through the extension generator completed crop, reconstruction, and composition and produced a structurally valid GLB; a second installed-API regression run honored a 50,000-face request with a valid 49,593-face GLB. Exact Electron 42 scene normalization, WorldSculpt routing, and Add-to-Scene output propagation also passed, although Xvfb WebGL2 blocking prevented perceptual viewport proof. Other platform lanes remain untested, so this is not a broad compatibility claim. It follows the pinned AlayaLab WorldSculpt geometry-only path: crop each eligible masked instance, reconstruct with the SS/shape LoRA adapters (`--no_tex --no_glb`, step 15000), then compose a normal-bearing scene GLB. It does not produce textures, renders, or a point-cloud visualization. The bundled source snapshot is `373f09f0ecddc94607b569bea0316ff6a2286501`; the UI-managed `worldsculpt-adapters` shared weight group contains exactly two adapter stages from `AlayaLab/WorldSculpt` revision `8cb81056d803c61371dd84ef18a14142a738610e`. The node also depends on the shared `pixal3d-base` group. Load or first generation validates every base and adapter file before checking NAF, and bootstraps NAF only when it is the sole remaining auxiliary deficiency; corrupt local NAF fails closed and requires the forced manual repair command above. Direct generation checks cancellation on both sides of bootstrap, so pre-cancelled requests cannot start it.
 
 The input is a Modly `modly.scene-manifest.v1` whose `sceneRoot` contains `transforms.json`, camera-posed full-size PNG frames, `instances` with metric `aabb_world`, and `masks/objNN/####.png`. Literal `sceneRoot: "."` selects the manifest directory; other relative roots are workspace-relative. This implementation deliberately rejects OBB metadata, unprojectable/empty masked instances, symlinked scene files, and incomplete adapter trees. Output is a fresh private run directory under the configured workflow output directory; only a GLB validated against every eligible object is returned. The only exposed parameter is `face_budget` (1,000–3,000,000; default 1,000,000). Cancellation is checked at each subprocess boundary and during a stage; a cancelled or failed run never returns an output path.
 
-**Readiness is intentionally fail-closed.** On the validated Linux aarch64 / Python 3.12 / CUDA 13.0 / torch 2.12.0+cu130 lane, first prepare the primary `venv`, then run `python3 setup.py --repair-worldsculpt --json` for setup or Repair. This verifies nine hash-locked offline wheels in `wheels/worldsculpt/`, creates only `venv-worldsculpt`, links the dynamically resolved primary site-packages with a `.pth` file, installs WorldSculpt-specific packages using `--no-index --no-deps`, then checks dependency closure and native imports. Repeating the command repairs the isolated lane without changing the primary venv or downloading weights. The manifest records the wheel hashes and the PyPI `iopath` 0.1.10 source archive hash; its wheel was privately built from that source. WorldSculpt subprocesses explicitly use the isolated interpreter. Other platforms and CUDA/Python combinations fail closed. Real GB10 GPU scene inference and installed API generation passed; exact Electron routing and Add-to-Scene propagation passed, while perceptual viewport reconstruction remains **PARTIAL** because WebGL2 was unavailable under Xvfb. The overall extension remains **PARTIAL** while real MV inference is outstanding. The runtime uses a disposable source/config overlay for local DINOv3 and NAF overrides, blocks HF/network cache fallback, and does not mutate shared downloaded weights.
+**Readiness is intentionally fail-closed.** On the validated Linux aarch64 / Python 3.12 / CUDA 13.0 / torch 2.12.0+cu130 lane, first prepare the primary `venv`, then run `python3 setup.py --repair-worldsculpt --json` for setup or Repair. This verifies nine hash-locked offline wheels in `wheels/worldsculpt/`, creates only `venv-worldsculpt`, links the dynamically resolved primary site-packages with a `.pth` file, installs WorldSculpt-specific packages using `--no-index --no-deps`, then checks dependency closure and native imports. Repeating the command repairs the isolated lane without changing the primary venv or downloading weights. The manifest records the wheel hashes and the PyPI `iopath` 0.1.10 source archive hash; its wheel was privately built from that source. WorldSculpt subprocesses explicitly use the isolated interpreter. Other platforms and CUDA/Python combinations fail closed. Real GB10 GPU scene inference, ordered-image MV, installed API generation, exact Electron routing, and Add-to-Scene propagation passed. Overall validation remains **PARTIAL** for perceptual viewport reconstruction under Xvfb, untested platforms, and official Blackwell promotion pending real Windows RTX 50 evidence. The runtime uses a disposable source/config overlay for local DINOv3 and NAF overrides, blocks HF/network cache fallback, and does not mutate shared downloaded weights.
