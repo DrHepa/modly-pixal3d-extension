@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -3060,6 +3060,516 @@ print(json.dumps({name: setup._validate_runtime_probe(probe, policy) for name, p
     assert.equal(result[name].ok, false, `${name} should fail closed`)
     assert.ok(result[name].validation_errors.length > 0)
   }
+})
+
+test('Blackwell RTX50 hardware workflow is manual, self-hosted, SHA-pinned, and evidence-only', () => {
+  const workflowPath = join(repoRoot, '.github', 'workflows', 'blackwell-rtx50-hardware-validation.yml')
+  const workflow = readFileSync(workflowPath, 'utf8')
+  const expectedActionPins = {
+    'actions/checkout': { sha: '11d5960a326750d5838078e36cf38b85af677262', version: 'v4' },
+    'actions/upload-artifact': { sha: 'ea165f8d65b6e75b540449e92b4886f43607fa02', version: 'v4' },
+  }
+
+  assert.match(workflow, /workflow_dispatch:/)
+  assert.doesNotMatch(workflow, /^\s*push:/m)
+  assert.doesNotMatch(workflow, /^\s*schedule:/m)
+  assert.match(workflow, /runs-on:\s*\[self-hosted,\s*windows,\s*x64,\s*rtx50\]/)
+  for (const [action, { sha, version }] of Object.entries(expectedActionPins)) {
+    assert.match(workflow, new RegExp(`uses:\\s*${escapeRegExp(action)}@${sha}\\s*#\\s*${escapeRegExp(version)}`))
+  }
+  for (const match of workflow.matchAll(/^\s*uses:\s*([^\s#]+)(?:\s*#\s*([^\n]+))?$/gm)) {
+    const [action, ref] = match[1].split('@')
+    assert.ok(action in expectedActionPins, `Unexpected third-party GitHub Action in Blackwell hardware workflow: ${action}`)
+    assert.match(ref, /^[0-9a-f]{40}$/, `GitHub Action ${action} must be pinned to a full 40-character commit SHA`)
+    assert.equal(match[2]?.trim(), expectedActionPins[action].version)
+  }
+  for (const input of ['candidate_artifact_path', 'expected_artifact_sha256', 'expected_artifact_size_bytes', 'modly_weights_path', 'fixture_image_path']) {
+    assert.match(workflow, new RegExp(`${input}:[\\s\\S]*required:\\s*true`))
+  }
+  assert.match(workflow, /tools\/validation\/validate-blackwell-rtx50\.ps1/)
+  assert.match(workflow, /blackwell-validation-evidence-\$\{\{ github\.run_id \}\}/)
+  assert.match(workflow, /path:\s*\$\{\{\s*runner\.temp\s*\}\}\/pixal3d-blackwell-validation-evidence/)
+  assert.match(workflow, /INPUT_CANDIDATE_ARTIFACT_PATH:\s*\$\{\{\s*inputs\.candidate_artifact_path\s*\}\}/)
+  assert.match(workflow, /INPUT_EXPECTED_ARTIFACT_SHA256:\s*\$\{\{\s*inputs\.expected_artifact_sha256\s*\}\}/)
+  assert.match(workflow, /INPUT_EXPECTED_ARTIFACT_SIZE_BYTES:\s*\$\{\{\s*inputs\.expected_artifact_size_bytes\s*\}\}/)
+  assert.match(workflow, /INPUT_MODLY_WEIGHTS_PATH:\s*\$\{\{\s*inputs\.modly_weights_path\s*\}\}/)
+  assert.match(workflow, /INPUT_FIXTURE_IMAGE_PATH:\s*\$\{\{\s*inputs\.fixture_image_path\s*\}\}/)
+  for (const runBlock of workflow.matchAll(/run:\s*\|\n([\s\S]*?)(?=\n\s{6}- name:|\n\s{4}[a-zA-Z_-]+:|\n?$)/g)) {
+    assert.doesNotMatch(runBlock[1], /\$\{\{\s*inputs\./, 'workflow run source must not embed raw user inputs')
+    assert.match(runBlock[1], /\$env:INPUT_CANDIDATE_ARTIFACT_PATH/)
+  }
+  assert.doesNotMatch(workflow, /\$\{\{\s*secrets\./)
+  assert.doesNotMatch(workflow, /upload-release-asset|gh release|wheelhouse\.manifest\.json/i)
+})
+
+test('Blackwell RTX50 PowerShell orchestrator fails closed and uses temp extension setup twice', () => {
+  const scriptPath = join(repoRoot, 'tools', 'validation', 'validate-blackwell-rtx50.ps1')
+  const script = readFileSync(scriptPath, 'utf8')
+
+  for (const parameter of ['CandidateArtifactPath', 'ExpectedArtifactSha256', 'ExpectedArtifactSizeBytes', 'ModlyWeightsPath', 'FixtureImagePath', 'EvidenceDir']) {
+    assert.match(script, new RegExp(`\\[Parameter\\(Mandatory=\\$true\\)\\][\\s\\S]*\\$${parameter}`))
+  }
+  assert.match(script, /\[ValidatePattern\('\^\[0-9a-fA-F\]\{64\}\$'\)\]/)
+  assert.match(script, /Assert-FileContract -Path \$candidateArtifact -ExpectedSha256 \$ExpectedArtifactSha256 -ExpectedSizeBytes \$ExpectedArtifactSizeBytes/)
+  assert.match(script, /Copy-ExtensionTree/)
+  assert.match(script, /\$setupPayload = \[ordered\]@\{[\s\S]*ext_dir = \$tempExtension[\s\S]*cuda_version = 128[\s\S]*gpu_sm = 120[\s\S]*\}/)
+  assert.match(script, /Invoke-SetupRepair -Attempt 1/)
+  assert.match(script, /Invoke-SetupRepair -Attempt 2/)
+  assert.match(script, /-m pip check/)
+  assert.match(script, /blackwell_real_generation\.py/)
+  assert.match(script, /blackwell-validation\.json/)
+  assert.match(script, /Assert-PathContained/)
+  assert.match(script, /Assert-BlackwellAuxiliaryAssets/)
+  assert.match(script, /Assert-NetworkDeniedBoundary/)
+  assert.match(script, /cancellation.*not_supported_by_harness/is)
+  assert.match(script, /Remove-Item -LiteralPath \$workRoot -Recurse -Force/)
+  assert.doesNotMatch(script, /Invoke-WebRequest|Start-BitsTransfer|huggingface-cli|from_pretrained|gh release/i)
+})
+
+test('Blackwell PowerShell gates accept ordered dictionaries and never pass deferred configuration checks', () => {
+  const script = readFileSync(join(repoRoot, 'tools', 'validation', 'validate-blackwell-rtx50.ps1'), 'utf8')
+  const newGateMatch = script.match(/function New-Gate \{[\s\S]*?\n\}/)
+  assert.ok(newGateMatch, 'New-Gate function must exist')
+  assert.match(newGateMatch[0], /\[System\.Collections\.IDictionary\]\$Fields\s*=\s*\[ordered\]@\{\}/)
+  assert.doesNotMatch(newGateMatch[0], /\[hashtable\]\$Fields/, 'PowerShell binder must not require [hashtable] for [ordered] callers')
+  assert.match(script, /\$gates\['blackwell_auxiliary_assets'\]\s*=\s*New-Gate 'blackwell_auxiliary_assets' 'deferred'/)
+  assert.match(script, /\$gates\['network_denied_boundary'\]\s*=\s*New-Gate 'network_denied_boundary' 'configured'/)
+  assert.doesNotMatch(script, /New-Gate 'blackwell_auxiliary_assets' 'passed'/)
+  assert.doesNotMatch(script, /New-Gate 'network_denied_boundary' 'passed'/)
+})
+
+test('Blackwell real-generation helper validates GLB geometry and fails closed on file contracts and paths', () => {
+  const result = runPython(`
+import importlib.util, json, tempfile
+from pathlib import Path
+
+module_path = Path('tools/validation/blackwell_real_generation.py').resolve()
+spec = importlib.util.spec_from_file_location('blackwell_real_generation', module_path)
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    glb = root / 'triangle.glb'
+    output_dir = root / 'outputs'
+    output_dir.mkdir()
+    output_glb = output_dir / 'triangle.glb'
+    helper.write_synthetic_glb_for_test(glb)
+    helper.write_synthetic_glb_for_test(output_glb)
+    stats = helper.validate_glb(glb)
+    output_stats = helper.validate_generated_glb_output(output_glb, output_dir=output_dir, workspace_dir=root)
+    digest = helper.sha256_file(glb)
+    ok_contract = helper.validate_file_contract(glb, digest, glb.stat().st_size)
+    failures = {}
+    for name, call in {
+        'bad_hash': lambda: helper.validate_file_contract(glb, '0' * 64, glb.stat().st_size),
+        'bad_size': lambda: helper.validate_file_contract(glb, digest, glb.stat().st_size + 1),
+        'bad_header': lambda: helper.validate_glb(root / 'bad.glb'),
+        'escape': lambda: helper.assert_path_contained(root / 'inside', root),
+        'output_escape': lambda: helper.validate_generated_glb_output(glb, output_dir=output_dir, workspace_dir=output_dir),
+        'output_missing': lambda: helper.validate_generated_glb_output(output_dir / 'missing.glb', output_dir=output_dir, workspace_dir=root),
+    }.items():
+        try:
+            if name == 'bad_header':
+                (root / 'bad.glb').write_bytes(b'not-glb')
+            call()
+            failures[name] = 'accepted'
+        except Exception as exc:
+            failures[name] = type(exc).__name__
+    print(json.dumps({'stats': stats, 'output_stats': output_stats, 'contract': ok_contract, 'failures': failures}, sort_keys=True))
+`)
+
+  assert.equal(result.stats.magic, 'glTF')
+  assert.equal(result.stats.version, 2)
+  assert.equal(result.stats.vertex_count, 3)
+  assert.deepEqual(result.stats.bbox_min, [0, 0, 0])
+  assert.deepEqual(result.stats.bbox_max, [1, 1, 0])
+  assert.equal(result.stats.sha256.length, 64)
+  assert.equal(result.contract.sha256.length, 64)
+  assert.equal(result.output_stats.path.endsWith('/outputs/triangle.glb'), true)
+  for (const [name, status] of Object.entries(result.failures)) {
+    assert.notEqual(status, 'accepted', `${name} must fail closed`)
+  }
+})
+
+test('Blackwell GLB validation walks every POSITION primitive and aggregates geometry truthfully', () => {
+  const result = runPython(String.raw`
+import importlib.util, json, math, struct, tempfile
+from pathlib import Path
+
+module_path = Path('tools/validation/blackwell_real_generation.py').resolve()
+spec = importlib.util.spec_from_file_location('blackwell_real_generation', module_path)
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+
+def pad4(data, pad=b' '):
+    return data + pad * ((4 - (len(data) % 4)) % 4)
+
+def write_multi(path, primitive_vertices):
+    blob = b''
+    views = []
+    accessors = []
+    primitives = []
+    for vertices in primitive_vertices:
+        offset = len(blob)
+        packed = struct.pack('<' + 'f' * (len(vertices) * 3), *(coord for vertex in vertices for coord in vertex))
+        blob += packed
+        views.append({'buffer': 0, 'byteOffset': offset, 'byteLength': len(packed), 'byteStride': 12, 'target': 34962})
+        accessors.append({'bufferView': len(views) - 1, 'byteOffset': 0, 'componentType': 5126, 'count': len(vertices), 'type': 'VEC3'})
+        primitives.append({'attributes': {'POSITION': len(accessors) - 1}})
+    json_doc = {
+        'asset': {'version': '2.0'},
+        'buffers': [{'byteLength': len(blob)}],
+        'bufferViews': views,
+        'accessors': accessors,
+        'meshes': [{'primitives': primitives}],
+    }
+    json_payload = pad4(json.dumps(json_doc, separators=(',', ':')).encode('utf-8'), b' ')
+    bin_payload = pad4(blob, b'\x00')
+    total_length = 12 + 8 + len(json_payload) + 8 + len(bin_payload)
+    path.write_bytes(
+        struct.pack('<4sII', b'glTF', 2, total_length)
+        + struct.pack('<I4s', len(json_payload), b'JSON')
+        + json_payload
+        + struct.pack('<I4s', len(bin_payload), b'BIN\x00')
+        + bin_payload
+    )
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    valid = root / 'multi.glb'
+    write_multi(valid, [
+        [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)],
+        [(0.0, 0.0, 1.0), (2.0, 0.0, 1.0), (0.0, 2.0, 1.0), (2.0, 2.0, 1.0), (3.0, 2.0, 1.0), (2.0, 3.0, 1.0)],
+    ])
+    stats = helper.validate_glb(valid)
+    invalid = root / 'nan.glb'
+    write_multi(invalid, [
+        [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)],
+        [(0.0, 0.0, 1.0), (math.nan, 0.0, 1.0), (0.0, 2.0, 1.0)],
+    ])
+    try:
+        helper.validate_glb(invalid)
+        nan_failure = 'accepted'
+    except Exception as exc:
+        nan_failure = getattr(exc, 'code', type(exc).__name__)
+    print(json.dumps({'stats': stats, 'nan_failure': nan_failure}, sort_keys=True))
+`)
+
+  assert.equal(result.stats.mesh_count, 1)
+  assert.equal(result.stats.primitive_count, 2)
+  assert.equal(result.stats.position_primitive_count, 2)
+  assert.equal(result.stats.vertex_count, 9)
+  assert.equal(result.stats.face_count, 3)
+  assert.deepEqual(result.stats.bbox_min, [0, 0, 0])
+  assert.deepEqual(result.stats.bbox_max, [3, 3, 1])
+  assert.equal(result.nan_failure, 'non_finite_position')
+})
+
+test('Blackwell GLB validation fully validates indexed triangle primitives', () => {
+  const result = runPython(String.raw`
+import importlib.util, json, struct, tempfile
+from pathlib import Path
+
+module_path = Path('tools/validation/blackwell_real_generation.py').resolve()
+spec = importlib.util.spec_from_file_location('blackwell_real_generation', module_path)
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+
+COMPONENT_PACK = {5121: 'B', 5123: 'H', 5125: 'I'}
+
+def pad4(data, pad=b' '):
+    return data + pad * ((4 - (len(data) % 4)) % 4)
+
+def align_blob(blob, alignment):
+    return blob + (b'\x00' * ((alignment - (len(blob) % alignment)) % alignment))
+
+def write_indexed(path, primitives):
+    blob = b''
+    views = []
+    accessors = []
+    mesh_primitives = []
+    for primitive in primitives:
+        vertices = primitive['vertices']
+        blob = align_blob(blob, 4)
+        if primitive.get('position_prefix_byte'):
+            blob += b'\x00'
+        pos_offset = len(blob)
+        if primitive.get('interleaved_position_stride'):
+            stride = primitive['interleaved_position_stride']
+            pos_blob = b''.join(struct.pack('<fff', *vertex) + (b'\x00' * (stride - 12)) for vertex in vertices)
+        else:
+            stride = primitive.get('position_stride', 12)
+            pos_blob = struct.pack('<' + 'f' * (len(vertices) * 3), *(coord for vertex in vertices for coord in vertex))
+        blob += pos_blob
+        views.append({'buffer': 0, 'byteOffset': pos_offset + primitive.get('position_view_offset_delta', 0), 'byteLength': primitive.get('position_view_length', len(pos_blob)), 'byteStride': stride})
+        accessors.append({'bufferView': len(views) - 1, 'byteOffset': primitive.get('position_accessor_offset', 0), 'componentType': 5126, 'count': len(vertices), 'type': 'VEC3'})
+        glb_primitive = {'attributes': {'POSITION': len(accessors) - 1}}
+        if 'mode' in primitive:
+            glb_primitive['mode'] = primitive['mode']
+        if 'indices' in primitive:
+            component = primitive.get('index_component', 5123)
+            index_values = primitive['indices']
+            fmt = COMPONENT_PACK.get(component, 'f')
+            index_blob = struct.pack('<' + fmt * len(index_values), *index_values)
+            if primitive.get('truncate_index_blob'):
+                index_blob = index_blob[:-1]
+            component_size = struct.calcsize('<' + fmt)
+            blob = align_blob(blob, component_size)
+            index_offset = len(blob)
+            blob += index_blob
+            views.append({
+                'buffer': primitive.get('index_buffer', 0),
+                'byteOffset': index_offset + primitive.get('index_view_offset_delta', 0),
+                'byteLength': primitive.get('index_view_length', len(index_blob)),
+                **({'byteStride': primitive['index_stride']} if 'index_stride' in primitive else {}),
+            })
+            accessors.append({
+                'bufferView': len(views) - 1,
+                'byteOffset': primitive.get('index_accessor_offset', 0),
+                'componentType': component,
+                'count': primitive.get('index_count', len(index_values)),
+                'type': primitive.get('index_type', 'SCALAR'),
+            })
+            glb_primitive['indices'] = len(accessors) - 1
+        mesh_primitives.append(glb_primitive)
+    doc = {'asset': {'version': '2.0'}, 'buffers': [{'byteLength': len(blob)}], 'bufferViews': views, 'accessors': accessors, 'meshes': [{'primitives': mesh_primitives}]}
+    json_payload = pad4(json.dumps(doc, separators=(',', ':')).encode(), b' ')
+    bin_payload = pad4(blob, b'\x00')
+    path.write_bytes(struct.pack('<4sII', b'glTF', 2, 12 + 8 + len(json_payload) + 8 + len(bin_payload)) + struct.pack('<I4s', len(json_payload), b'JSON') + json_payload + struct.pack('<I4s', len(bin_payload), b'BIN\x00') + bin_payload)
+
+base_vertices = [(0,0,0), (1,0,0), (0,1,0), (1,1,0)]
+cases = {}
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    valid = root / 'valid-indexed.glb'
+    write_indexed(valid, [
+        {'vertices': base_vertices, 'indices': [0, 1, 2], 'index_component': 5121},
+        {'vertices': base_vertices, 'indices': [0, 2, 3], 'index_component': 5123},
+        {'vertices': base_vertices, 'indices': [0, 1, 2, 1, 3, 2], 'index_component': 5125},
+        {'vertices': [(0,0,1), (1,0,1), (0,1,1)]},
+    ])
+    stats = helper.validate_glb(valid)
+    cases['valid'] = {key: stats[key] for key in ('primitive_count', 'position_primitive_count', 'vertex_count', 'face_count')}
+    negative_specs = {
+        'zero_index_bufferview': {'vertices': base_vertices, 'indices': [0, 1, 2], 'index_component': 5121, 'index_view_length': 0},
+        'truncated_index_bufferview': {'vertices': base_vertices, 'indices': [0, 1, 2], 'index_component': 5123, 'truncate_index_blob': True},
+        'signed_or_float_index_component': {'vertices': base_vertices, 'indices': [0.0, 1.0, 2.0], 'index_component': 5126},
+        'non_scalar_indices': {'vertices': base_vertices, 'indices': [0, 1, 2], 'index_component': 5121, 'index_type': 'VEC3'},
+        'out_of_range_index': {'vertices': base_vertices, 'indices': [0, 1, 4], 'index_component': 5121},
+        'misaligned_index_accessor': {'vertices': base_vertices, 'indices': [0, 1, 2], 'index_component': 5123, 'index_accessor_offset': 1},
+        'bad_index_stride': {'vertices': base_vertices, 'indices': [0, 1, 2], 'index_component': 5123, 'index_stride': 3},
+        'zero_index_count': {'vertices': base_vertices, 'indices': [0, 1, 2], 'index_component': 5121, 'index_count': 0},
+        'misaligned_position_view': {'vertices': base_vertices[:3], 'position_prefix_byte': True, 'position_view_offset_delta': 0},
+        'misaligned_position_accessor': {'vertices': base_vertices[:3], 'position_prefix_byte': True, 'position_view_offset_delta': -1, 'position_view_length': 37, 'position_accessor_offset': 1},
+        'bad_position_stride': {'vertices': base_vertices[:3], 'position_stride': 14, 'position_view_length': 42},
+        'nonmultiple_triangle_count': {'vertices': base_vertices, 'indices': [0, 1, 2, 3], 'index_component': 5121},
+        'unsupported_mode': {'vertices': base_vertices, 'indices': [0, 1], 'index_component': 5121, 'mode': 1},
+    }
+    aligned_interleaved = root / 'aligned-interleaved.glb'
+    write_indexed(aligned_interleaved, [
+        {'vertices': base_vertices[:3], 'interleaved_position_stride': 16},
+    ])
+    cases['aligned_interleaved'] = helper.validate_glb(aligned_interleaved)['face_count']
+    for name, spec in negative_specs.items():
+        path = root / f'{name}.glb'
+        try:
+            write_indexed(path, [spec])
+            helper.validate_glb(path)
+            cases[name] = 'accepted'
+        except Exception as exc:
+            cases[name] = getattr(exc, 'code', type(exc).__name__)
+print(json.dumps(cases, sort_keys=True))
+`)
+
+  assert.deepEqual(result.valid, {
+    primitive_count: 4,
+    position_primitive_count: 4,
+    vertex_count: 15,
+    face_count: 5,
+  })
+  for (const name of [
+    'zero_index_bufferview',
+    'truncated_index_bufferview',
+    'signed_or_float_index_component',
+    'non_scalar_indices',
+    'out_of_range_index',
+    'misaligned_index_accessor',
+    'bad_index_stride',
+    'zero_index_count',
+    'misaligned_position_view',
+    'misaligned_position_accessor',
+    'bad_position_stride',
+    'nonmultiple_triangle_count',
+    'unsupported_mode',
+  ]) {
+    assert.notEqual(result[name], 'accepted', `${name} must fail closed`)
+  }
+  assert.equal(result.aligned_interleaved, 1)
+})
+
+test('Blackwell GLB validation requires at least one nondegenerate triangle', () => {
+  const result = runPython(String.raw`
+import importlib.util, json, struct, tempfile
+from pathlib import Path
+
+module_path = Path('tools/validation/blackwell_real_generation.py').resolve()
+spec = importlib.util.spec_from_file_location('blackwell_real_generation', module_path)
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+
+def pad4(data, pad=b' '):
+    return data + pad * ((4 - (len(data) % 4)) % 4)
+
+def write_glb(path, primitives):
+    blob = b''
+    views = []
+    accessors = []
+    glb_primitives = []
+    for primitive in primitives:
+        vertices = primitive['vertices']
+        pos_offset = len(blob)
+        pos_blob = struct.pack('<' + 'f' * (len(vertices) * 3), *(coord for vertex in vertices for coord in vertex))
+        blob += pos_blob
+        views.append({'buffer': 0, 'byteOffset': pos_offset, 'byteLength': len(pos_blob), 'byteStride': 12})
+        accessors.append({'bufferView': len(views) - 1, 'byteOffset': 0, 'componentType': 5126, 'count': len(vertices), 'type': 'VEC3'})
+        glb_primitive = {'attributes': {'POSITION': len(accessors) - 1}}
+        if 'indices' in primitive:
+            index_offset = len(blob)
+            index_blob = struct.pack('<' + 'H' * len(primitive['indices']), *primitive['indices'])
+            blob += index_blob
+            views.append({'buffer': 0, 'byteOffset': index_offset, 'byteLength': len(index_blob)})
+            accessors.append({'bufferView': len(views) - 1, 'byteOffset': 0, 'componentType': 5123, 'count': len(primitive['indices']), 'type': 'SCALAR'})
+            glb_primitive['indices'] = len(accessors) - 1
+        glb_primitives.append(glb_primitive)
+    doc = {'asset': {'version': '2.0'}, 'buffers': [{'byteLength': len(blob)}], 'bufferViews': views, 'accessors': accessors, 'meshes': [{'primitives': glb_primitives}]}
+    json_payload = pad4(json.dumps(doc, separators=(',', ':')).encode(), b' ')
+    bin_payload = pad4(blob, b'\x00')
+    path.write_bytes(struct.pack('<4sII', b'glTF', 2, 12 + 8 + len(json_payload) + 8 + len(bin_payload)) + struct.pack('<I4s', len(json_payload), b'JSON') + json_payload + struct.pack('<I4s', len(bin_payload), b'BIN\x00') + bin_payload)
+
+def status_for(path):
+    try:
+        return helper.validate_glb(path)
+    except Exception as exc:
+        return getattr(exc, 'code', type(exc).__name__)
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    valid_small = root / 'valid-small.glb'
+    write_glb(valid_small, [{'vertices': [(0.0, 0.0, 0.0), (1e-12, 0.0, 0.0), (0.0, 1e-12, 0.0)]}])
+    mixed = root / 'mixed.glb'
+    write_glb(mixed, [
+        {'vertices': [(0,0,0), (0,0,0), (0,0,0)]},
+        {'vertices': [(0,0,0), (1,0,0), (0,1,0)]},
+        {'vertices': [(0,0,0), (1,0,0), (2,0,0)]},
+    ])
+    cases = {
+        'valid_small': status_for(valid_small),
+        'mixed': status_for(mixed),
+    }
+    negatives = {
+        'indexed_identical': [{'vertices': [(0,0,0), (0,0,0), (0,0,0)], 'indices': [0,1,2]}],
+        'nonindexed_identical': [{'vertices': [(1,1,1), (1,1,1), (1,1,1)]}],
+        'indexed_collinear': [{'vertices': [(0,0,0), (1,0,0), (2,0,0)], 'indices': [0,1,2]}],
+        'nonindexed_collinear': [{'vertices': [(0,0,0), (0,1,0), (0,2,0)]}],
+        'repeated_index': [{'vertices': [(0,0,0), (1,0,0), (0,1,0)], 'indices': [0,0,1]}],
+    }
+    for name, primitives in negatives.items():
+        path = root / f'{name}.glb'
+        write_glb(path, primitives)
+        cases[name] = status_for(path)
+    print(json.dumps(cases, sort_keys=True))
+`)
+
+  assert.equal(result.valid_small.face_count, 1)
+  assert.equal(result.valid_small.nondegenerate_face_count, 1)
+  assert.equal(result.mixed.face_count, 3)
+  assert.equal(result.mixed.nondegenerate_face_count, 1)
+  for (const name of ['indexed_identical', 'nonindexed_identical', 'indexed_collinear', 'nonindexed_collinear', 'repeated_index']) {
+    assert.notEqual(result[name], 'accepted', `${name} must fail closed`)
+    assert.equal(result[name], 'missing_nondegenerate_faces')
+  }
+})
+
+test('Blackwell real-generation helper is directly executable outside repo cwd without PYTHONPATH', () => {
+  const helperPath = join(repoRoot, 'tools', 'validation', 'blackwell_real_generation.py')
+  const outsideCwd = mkdtempSync(join(tmpdir(), 'pixal3d-helper-outside-'))
+  const baseEnv = { ...process.env }
+  delete baseEnv.PYTHONPATH
+
+  const direct = spawnSync(python, [helperPath, '--help'], {
+    cwd: outsideCwd,
+    encoding: 'utf8',
+    env: baseEnv,
+  })
+  assert.equal(direct.status, 0, `direct helper --help failed\nSTDOUT:\n${direct.stdout}\nSTDERR:\n${direct.stderr}`)
+  assert.match(direct.stdout, /validate-real/)
+
+  const tempRoot = join(mkdtempSync(join(tmpdir(), 'pixal3d helper path with spaces ')), 'extension copy')
+  mkdirSync(join(tempRoot, 'tools', 'validation'), { recursive: true })
+  cpSync(helperPath, join(tempRoot, 'tools', 'validation', 'blackwell_real_generation.py'))
+  cpSync(join(repoRoot, 'pixal3d_extension'), join(tempRoot, 'pixal3d_extension'), { recursive: true })
+  cpSync(join(repoRoot, 'generator.py'), join(tempRoot, 'generator.py'))
+  const copied = spawnSync(python, [join(tempRoot, 'tools', 'validation', 'blackwell_real_generation.py'), '--help'], {
+    cwd: outsideCwd,
+    encoding: 'utf8',
+    env: baseEnv,
+  })
+  assert.equal(copied.status, 0, `copied helper --help failed\nSTDOUT:\n${copied.stdout}\nSTDERR:\n${copied.stderr}`)
+  assert.match(copied.stdout, /validate-real/)
+})
+
+test('Blackwell helper enforces strict offline assets, full native imports, and process-level restart evidence', () => {
+  const helper = readFileSync(join(repoRoot, 'tools', 'validation', 'blackwell_real_generation.py'), 'utf8')
+
+  for (const moduleName of ['cumesh_vb', 'flex_gemm_ap', 'o_voxel_vb_ap', 'drtk', 'flash_attn', 'nvdiffrast', 'nvdiffrec_render', 'natten']) {
+    assert.match(helper, new RegExp(`BLACKWELL_REQUIRED_IMPORTS = \\[[\\s\\S]*"${moduleName}"`))
+  }
+  assert.match(helper, /from pixal3d_extension\.assets import[\s\S]*AUXILIARY_ASSETS[\s\S]*PRIMARY_ASSET/)
+  assert.match(helper, /from pixal3d_extension\.naf_checkpoint import verify_naf_checkpoint/)
+  assert.match(helper, /def validate_blackwell_assets/)
+  assert.match(helper, /verify_naf_checkpoint/)
+  assert.match(helper, /auxiliary_mode=.*strict/s)
+  assert.match(helper, /network_available=False/)
+  assert.doesNotMatch(helper, /network_available=True/)
+  for (const envName of ['HF_HUB_OFFLINE', 'TRANSFORMERS_OFFLINE', 'HF_DATASETS_OFFLINE', 'HF_HUB_DISABLE_IMPLICIT_TOKEN', 'HF_HUB_DISABLE_TELEMETRY']) {
+    assert.match(helper, new RegExp(envName))
+  }
+  assert.match(helper, /class NetworkDenied/)
+  assert.match(helper, /socket\.create_connection/)
+  assert.match(helper, /urllib\.request\.urlopen/)
+  assert.match(helper, /gates\["network_denial_boundary"\]\s*=\s*\{"status": "configured"/)
+  assert.match(helper, /"network_denial"\s*:/)
+  assert.match(helper, /"asset_gate"\s*:/)
+  assert.match(helper, /generation\["asset_gate"\]\["status"\] != "passed"/)
+  assert.match(helper, /generation\["network_denial"\]\["status"\] != "passed"/)
+  assert.match(helper, /def second_runtime_probe/)
+  assert.match(helper, /validate_runtime\(/)
+  assert.match(helper, /process-level cleanup proof/)
+  assert.doesNotMatch(helper, /import generator\\n"\s*"print\(json\.dumps\(\{'status':'passed','module': generator\.__name__\}/)
+})
+
+test('Blackwell hardware validation docs define manual usage and candidate-only evidence boundary', () => {
+  const docs = readFileSync(join(repoRoot, 'tools', 'wheelhouse', 'BLACKWELL-SM120.md'), 'utf8')
+
+  assert.match(docs, /validate-blackwell-rtx50\.ps1/)
+  assert.match(docs, /blackwell_real_generation\.py/)
+  assert.match(docs, /blackwell-rtx50-hardware-validation\.yml/)
+  assert.match(docs, /candidate artifact path.*expected SHA256.*expected size/i)
+  assert.match(docs, /pre-provisioned.*Modly weights path/i)
+  assert.match(docs, /setup\.py.*cuda_version.*128.*gpu_sm.*120/s)
+  assert.match(docs, /Repair.*twice.*idempot/i)
+  assert.match(docs, /natten\.HAS_LIBNATTEN.*True/)
+  assert.match(docs, /`drtk`.*`flash_attn`/s)
+  assert.match(docs, /strict.*offline.*auxiliary/i)
+  assert.match(docs, /local valid NAF sentinel/i)
+  assert.match(docs, /network-denial/i)
+  assert.match(docs, /process-level.*restart/i)
+  assert.match(docs, /regular file.*within.*output/i)
+  assert.match(docs, /single-view.*low_vram.*GLB/i)
+  assert.match(docs, /blackwell-validation\.json/)
+  assert.match(docs, /candidate_complete_unvalidated/)
+  assert.match(docs, /not official.*real Windows RTX 50/i)
 })
 
 test('linux x64 native source refs are immutable and confidence-documented', () => {

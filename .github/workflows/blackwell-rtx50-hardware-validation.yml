@@ -1,0 +1,97 @@
+name: Blackwell RTX50 hardware validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_artifact_path:
+        description: Local path on the self-hosted runner to the candidate artifact zip.
+        required: true
+        type: string
+      expected_artifact_sha256:
+        description: Expected SHA256 for candidate_artifact_path.
+        required: true
+        type: string
+      expected_artifact_size_bytes:
+        description: Expected byte size for candidate_artifact_path.
+        required: true
+        type: string
+      modly_weights_path:
+        description: Pre-provisioned authoritative Modly home or pixal3d-base weights path. The workflow never downloads weights or uses secrets.
+        required: true
+        type: string
+      fixture_image_path:
+        description: Local path on the self-hosted runner to the single-view fixture image.
+        required: true
+        type: string
+      python_exe:
+        description: Python executable to run setup.py and validation inside the temporary extension copy.
+        required: false
+        default: python
+        type: string
+      keep_work_dir:
+        description: Keep the temporary extension/workspace directory for manual debugging.
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  validate:
+    name: Real Windows RTX50 validation
+    runs-on: [self-hosted, windows, x64, rtx50]
+    timeout-minutes: 180
+    env:
+      EVIDENCE_DIR: ${{ runner.temp }}/pixal3d-blackwell-validation-evidence
+      INPUT_CANDIDATE_ARTIFACT_PATH: ${{ inputs.candidate_artifact_path }}
+      INPUT_EXPECTED_ARTIFACT_SHA256: ${{ inputs.expected_artifact_sha256 }}
+      INPUT_EXPECTED_ARTIFACT_SIZE_BYTES: ${{ inputs.expected_artifact_size_bytes }}
+      INPUT_MODLY_WEIGHTS_PATH: ${{ inputs.modly_weights_path }}
+      INPUT_FIXTURE_IMAGE_PATH: ${{ inputs.fixture_image_path }}
+      INPUT_PYTHON_EXE: ${{ inputs.python_exe }}
+      INPUT_KEEP_WORK_DIR: ${{ inputs.keep_work_dir }}
+      VALIDATION_SOURCE_COMMIT: ${{ github.sha }}
+      VALIDATION_GITHUB_RUN_ID: ${{ github.run_id }}
+      VALIDATION_GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Checkout exact validation source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Run Blackwell RTX50 validation harness
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:EVIDENCE_DIR | Out-Null
+          $arguments = @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass',
+            '-File', 'tools/validation/validate-blackwell-rtx50.ps1',
+            '-CandidateArtifactPath', $env:INPUT_CANDIDATE_ARTIFACT_PATH,
+            '-ExpectedArtifactSha256', $env:INPUT_EXPECTED_ARTIFACT_SHA256,
+            '-ExpectedArtifactSizeBytes', $env:INPUT_EXPECTED_ARTIFACT_SIZE_BYTES,
+            '-ModlyWeightsPath', $env:INPUT_MODLY_WEIGHTS_PATH,
+            '-FixtureImagePath', $env:INPUT_FIXTURE_IMAGE_PATH,
+            '-EvidenceDir', $env:EVIDENCE_DIR,
+            '-PythonExe', $env:INPUT_PYTHON_EXE,
+            '-SourceCommit', $env:VALIDATION_SOURCE_COMMIT,
+            '-GitHubRunId', $env:VALIDATION_GITHUB_RUN_ID,
+            '-GitHubRunUrl', $env:VALIDATION_GITHUB_RUN_URL
+          )
+          if ($env:INPUT_KEEP_WORK_DIR -eq 'true') {
+            $arguments += '-KeepWorkDir'
+          }
+          & pwsh @arguments
+
+      - name: Upload Blackwell RTX50 validation evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: blackwell-validation-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/pixal3d-blackwell-validation-evidence
+          if-no-files-found: warn
+          retention-days: 30
