@@ -425,6 +425,82 @@ class Pixal3DGenerator:
     def is_loaded(self) -> bool:
         return self._loaded
 
+    def _artifact_transport_path(self, kind: str, path: Any) -> Path:
+        if not isinstance(path, (str, Path)):
+            raise TypeError(f"{kind} artifact path must be a str or pathlib.Path")
+        artifact_path = Path(path).expanduser()
+        if not str(artifact_path):
+            raise ValueError(f"{kind} artifact path must not be empty")
+        return artifact_path.resolve(strict=False)
+
+    def _artifact_params(self, params: dict | None, reserved: set[str]) -> dict:
+        if params is None:
+            return {}
+        if not isinstance(params, dict):
+            raise TypeError("artifact params must be a dict when provided")
+        values = dict(params)
+        unexpected = sorted(reserved.intersection(values))
+        if unexpected:
+            raise ValueError(f"Artifact reserved transport parameter is not allowed: {unexpected[0]}")
+        return values
+
+    def _scene_artifact_params(self, params: dict | None, artifact_path: Path) -> dict:
+        values = self._artifact_params(
+            params,
+            {"extra_image_paths", "capture_manifest_path", "video_path", "input_image", "kind", "path"},
+        )
+        injected = values.get("scene_manifest_path")
+        if injected is not None:
+            injected_path = self._artifact_transport_path("scene_manifest_path", injected)
+            if injected_path != artifact_path:
+                raise ValueError("Artifact scene_manifest_path does not match the scene artifact path")
+        values["scene_manifest_path"] = str(artifact_path)
+        return values
+
+    def generate_artifact(
+        self,
+        kind: str,
+        path: str | Path,
+        params: dict | None = None,
+        progress_cb: Any | None = None,
+        cancel_event: Any | None = None,
+        **kwargs: Any,
+    ) -> Path:
+        """Dispatch upstream typed file artifacts into the existing node paths."""
+
+        if "cancel_evt" in kwargs:
+            if cancel_event is not None:
+                raise TypeError("generate_artifact received both cancel_event and cancel_evt")
+            cancel_event = kwargs.pop("cancel_evt")
+        if kwargs:
+            unexpected = ", ".join(sorted(kwargs))
+            raise TypeError(f"generate_artifact got unexpected keyword argument(s): {unexpected}")
+        if not isinstance(kind, str):
+            raise TypeError("artifact kind must be a string")
+        artifact_kind = kind.strip().lower()
+        if artifact_kind == "video":
+            artifact_path = self._artifact_transport_path(artifact_kind, path)
+            values = self._artifact_params(
+                params,
+                {"extra_image_paths", "capture_manifest_path", "scene_manifest_path", "video_path", "input_image", "kind", "path"},
+            )
+            return self.generate(
+                {"kind": "video", "path": str(artifact_path)},
+                values,
+                progress_cb=progress_cb,
+                cancel_evt=cancel_event,
+            )
+        if artifact_kind == "scene":
+            artifact_path = self._artifact_transport_path(artifact_kind, path)
+            values = self._scene_artifact_params(params, artifact_path)
+            return self.generate(
+                artifact_path,
+                values,
+                progress_cb=progress_cb,
+                cancel_evt=cancel_event,
+            )
+        raise ValueError(f"Unsupported artifact kind for Pixal3D: {kind}")
+
     def generate(self, image_or_job: Any, params: dict | None = None, progress_cb: Any | None = None, cancel_evt: Any | None = None) -> Path:
         if self._effective_node_id() == SCENE_IMAGES_NODE:
             from pixal3d_extension.scene_prepare import run_scene_from_images
