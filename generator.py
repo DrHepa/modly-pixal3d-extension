@@ -20,7 +20,10 @@ SHARED_MV_GROUP = "pixal3d-mv"
 SAM3_GROUP = "sam3"
 DA3_GROUP = "da3-base"
 SCENE_ESTIMATE_NODE = "scene-from-estimates"
+SCENE_IMAGES_NODE = "scene-from-images"
+SCENE_VIDEO_NODE = "scene-from-video"
 SCENE_NORMALIZE_NODE = "normalize-annotated-scene"
+SCENE_PREP_NODES = {SCENE_ESTIMATE_NODE, SCENE_IMAGES_NODE, SCENE_VIDEO_NODE}
 
 
 def _patch_pipeline_json(model_dir: Path | None) -> None:
@@ -212,9 +215,12 @@ class Pixal3DGenerator:
         return checkpoint
 
     def params_schema(self) -> list[dict[str, Any]]:
-        if self._effective_node_id() in {SCENE_ESTIMATE_NODE, SCENE_NORMALIZE_NODE}:
+        if self._effective_node_id() in {*SCENE_PREP_NODES, SCENE_NORMALIZE_NODE}:
             manifest = json.loads((Path(__file__).resolve().parent / "manifest.json").read_text(encoding="utf-8"))
-            return next(node["params_schema"] for node in manifest["nodes"] if node["id"] == self._effective_node_id())
+            node_id = self._effective_node_id()
+            if node_id == SCENE_ESTIMATE_NODE:
+                node_id = SCENE_VIDEO_NODE
+            return next(node["params_schema"] for node in manifest["nodes"] if node["id"] == node_id)
         if self._effective_node_id() == "worldsculpt":
             return [{"id": "face_budget", "label": "Faces per Instance", "type": "int",
                      "default": 1000000, "min": 1000, "max": 3000000,
@@ -283,7 +289,7 @@ class Pixal3DGenerator:
     def readiness_status(self) -> dict:
         if self._effective_node_id() == SCENE_NORMALIZE_NODE:
             return {"ok": True, "machine_code": "ready", "reason": "Annotated-scene normalization requires no model weights."}
-        if self._effective_node_id() == SCENE_ESTIMATE_NODE:
+        if self._effective_node_id() in SCENE_PREP_NODES:
             from pixal3d_extension.scene_prepare import validate_scene_prepare_weights
             from pixal3d_extension.scene_prepare_lane import capability, validate_runtime
 
@@ -358,7 +364,7 @@ class Pixal3DGenerator:
     def is_downloaded(self, root: str | Path = ".") -> bool:
         if self._effective_node_id() == SCENE_NORMALIZE_NODE:
             return True
-        if self._effective_node_id() == SCENE_ESTIMATE_NODE:
+        if self._effective_node_id() in SCENE_PREP_NODES:
             try:
                 from pixal3d_extension.scene_prepare import validate_scene_prepare_weights
 
@@ -376,7 +382,7 @@ class Pixal3DGenerator:
         return (Path(model_dir) / "pipeline.json").is_file()
 
     def load(self) -> "Pixal3DGenerator":
-        if self._effective_node_id() in {SCENE_ESTIMATE_NODE, SCENE_NORMALIZE_NODE}:
+        if self._effective_node_id() in {*SCENE_PREP_NODES, SCENE_NORMALIZE_NODE}:
             readiness = self.readiness_status()
             if not readiness["ok"]:
                 raise RuntimeError(f"{readiness['machine_code']}: {readiness['reason']}")
@@ -420,6 +426,45 @@ class Pixal3DGenerator:
         return self._loaded
 
     def generate(self, image_or_job: Any, params: dict | None = None, progress_cb: Any | None = None, cancel_evt: Any | None = None) -> Path:
+        if self._effective_node_id() == SCENE_IMAGES_NODE:
+            from pixal3d_extension.scene_prepare import run_scene_from_images
+
+            if self.workspace_dir is None:
+                raise RuntimeError("Scene preparation requires the Modly workspace directory")
+            if not isinstance(image_or_job, (bytes, bytearray)) or not image_or_job:
+                raise ValueError("Scene from images requires a primary image and at least one additional connected image")
+            values = dict(params or {})
+            for reserved in ("capture_manifest_path", "scene_manifest_path", "video_path", "input_image", "primary_image_path", "num_views"):
+                if reserved in values:
+                    raise ValueError(f"Scene from images reserved transport parameter is not allowed: {reserved}")
+            extra_image_paths = values.pop("extra_image_paths", None)
+            if not isinstance(extra_image_paths, list):
+                raise ValueError("Scene from images requires extra_image_paths from Modly's ordered multiple-image ports")
+            sam_root, da3_root = self._scene_prep_sources()
+            output_dir = getattr(self, "outputs_dir", None) or self.workspace_dir / "Workflows"
+            return run_scene_from_images(
+                primary_image_bytes=bytes(image_or_job), extra_image_paths=extra_image_paths,
+                workspace_dir=self.workspace_dir, output_dir=output_dir,
+                sam_root=sam_root, da3_root=da3_root, params=values,
+                progress_cb=progress_cb, cancel_event=cancel_evt,
+            )
+        if self._effective_node_id() == SCENE_VIDEO_NODE:
+            from pixal3d_extension.scene_prepare import run_scene_from_video
+
+            if self.workspace_dir is None:
+                raise RuntimeError("Scene preparation requires the Modly workspace directory")
+            values = dict(params or {})
+            reserved = {"extra_image_paths", "capture_manifest_path", "scene_manifest_path", "video_path", "input_image"}
+            unexpected = sorted(reserved.intersection(values))
+            if unexpected:
+                raise ValueError(f"Scene from video reserved transport parameter is not allowed: {unexpected[0]}")
+            sam_root, da3_root = self._scene_prep_sources()
+            output_dir = getattr(self, "outputs_dir", None) or self.workspace_dir / "Workflows"
+            return run_scene_from_video(
+                video_input=image_or_job, workspace_dir=self.workspace_dir, output_dir=output_dir,
+                sam_root=sam_root, da3_root=da3_root, params=values,
+                progress_cb=progress_cb, cancel_event=cancel_evt,
+            )
         if self._effective_node_id() == SCENE_ESTIMATE_NODE:
             from pixal3d_extension.scene_prepare import run_scene_from_estimates
 

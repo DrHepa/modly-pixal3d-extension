@@ -26,7 +26,7 @@ python3 setup.py --prepare --json
 - on supported Linux ARM64 hosts, creates or repairs the separate Python 3.12
   `venv-scene-prep/` for the pinned official SAM3 and DA3 sources; unsupported
   platforms keep the primary setup successful and report only
-  `scene-from-estimates` as unavailable. This lane never changes `venv/` or
+  `scene-from-images` and `scene-from-video` as unavailable. This lane never changes `venv/` or
   `venv-worldsculpt/`
 
 It does **not** download model weights and does **not** run generation.
@@ -77,16 +77,37 @@ On Windows, the equivalent exact-stack native package distributions are installe
 
 ## Scene preparation for WorldSculpt
 
-This branch adds two typed model nodes. They are separate because estimating a
-scene from pixels and validating an already annotated scene have different
-trust, dependency, and licensing boundaries.
+This extension exposes three scene nodes. Image and video ingestion are separate
+public contracts; annotated-scene normalization remains weightless.
 
-### Prepare Scene from Estimates (`capture -> scene`)
+### Prepare Scene from Images (`image x 8 -> scene`)
 
-`scene-from-estimates` accepts a workspace-contained
-`modly.capture-manifest.v1`. It selects frames deterministically, runs the
-official SAM3 video predictor for text-guided instance tracking, and runs the
-official DA3 Base multiview model for depth, confidence, intrinsics, and
+`scene-from-images` declares eight fixed positional image ports named **Primary
+view** and **View 2** through **View 8**. At least two images must be connected.
+Modly supplies the first as bytes and the other seven as ordered
+`extra_image_paths`; `null` holes are ignored without reordering later ports.
+Eight is the practical UI bound: it gives DA3 and SAM3 useful multiview coverage
+without exposing the worker's much larger video-frame limit as an unwieldy node.
+Images must be unique, workspace-owned PNG/JPEG/WebP files with matching
+dimensions. They are snapshotted into disposable private custody before work.
+
+### Prepare Scene from Video (`video -> scene`)
+
+`scene-from-video` accepts one typed local video envelope. The runtime validates
+workspace custody, traversal/symlinks, regular-file status, a 512 MiB limit,
+extension and file signature, then snapshots the video. The isolated Python 3.12
+lane fully decodes it to verify dimensions and frame count. `frame_stride` and
+`max_frames` deterministically select frames in decode order.
+
+The exact future host payload is `{ "kind": "video", "path":
+"<workspace-relative-or-native-workspace-path>" }` (an object exposing the same
+`kind` and `path` attributes is also accepted). Parsing lives only in
+`pixal3d_extension/scene_video_input.py`. **The corresponding Modly host video
+transport is not merged yet**, so the manifest/runtime contract is prepared but
+end-to-end workflow dispatch remains blocked on that host change.
+
+Both nodes run the official SAM3 video predictor for text-guided instance
+tracking and the official DA3 Base multiview model for depth, confidence, intrinsics, and
 world-to-camera poses. A clean-room geometry layer then:
 
 - scales the declared DA3 processing-resolution intrinsics to the original
@@ -104,11 +125,12 @@ provenance. DA3 Base has **relative scale**. The output explicitly records
 WorldSculpt scene node, but the composed result remains in that relative scene
 scale unless the user supplies an external metric calibration.
 
-User parameters cover object labels, maximum frames, frame stride, DA3 process
-resolution, mask erosion, minimum retained geometry points, confidence/depth
+User parameters cover object labels, DA3 process resolution, mask erosion,
+minimum retained geometry points, confidence/depth
 trimming, AABB percentiles, reprojection coverage, label-aware IoU, camera
 consistency, and the SAM score threshold. Defaults and bounds in
-`manifest.json` are the runtime authority.
+`manifest.json` are the runtime authority. The video node additionally exposes
+maximum frames and frame stride; the image node always uses every connected view.
 
 ### Normalize Annotated Scene (`scene -> scene`)
 
@@ -119,9 +141,11 @@ canonical masks, camera data, and AABBs into a fresh workflow directory, and
 records normalization provenance. It preserves declared scale mode
 (`metric`, `relative`, or `unknown`) instead of inventing calibration.
 
-### Capture manifest
+### Private capture ABI
 
-A capture is either an ordered frame list or one video, never both. All paths
+`modly.capture-manifest.v1` remains an internal/backward-compatible worker ABI;
+it is no longer a public workflow input. A capture is either an ordered frame
+list or one video, never both. All paths
 are relative to the workspace/capture root, file byte sizes are rechecked, frame
 images are checked against their declared dimensions, and the isolated worker
 revalidates custody before inference. Frame arrays use contiguous zero-based
@@ -140,13 +164,13 @@ count and dimensions while selecting frames in decode order.
 }
 ```
 
-For video captures, use `kind: "video"`, omit `frames`, add
+Internal video captures use `kind: "video"`, omit `frames`, add
 `video: {"path", "width", "height", "byteSize", "frameCount"}`, and set
 `provenance.ordering` to `decode-index`.
 
 ### Weights, authentication, and runtime
 
-Download both groups from Modly Models before running `scene-from-estimates`:
+Download both groups from Modly Models before running either public scene-preparation node:
 
 - `sam3`: gated `facebook/sam3` revision
   `3c879f39826c281e95690f02c7821c4de09afae7`, exact files
@@ -168,9 +192,9 @@ The manifest, contract, geometry, setup isolation, and subprocess adapter have
 focused automated coverage. On Linux ARM64 / GB10, a real three-view SAM3 +
 DA3 run produced a validated canonical scene with three cameras, three nonempty
 masks, relative-scale provenance, and an object AABB. Exact Electron 42 routing
-of typed capture inputs was also validated. Perceptual scene quality, a complete
-capture-to-viewport UI run, and other hardware/platform combinations remain
-**UNTESTED**.
+of private capture inputs was also validated. The new public image/video adapters
+have automated contract coverage, but a complete public-node UI run and the host
+video envelope transport remain **UNTESTED**.
 
 Licensing and clean-room attribution are documented in
 `THIRD_PARTY_NOTICES.md`. The unlicensed community
@@ -179,9 +203,10 @@ copied or vendored here.
 
 ## Usage
 
-Connect **Load Capture** to **Prepare Scene from Estimates**, or connect an
-existing typed scene to **Normalize Annotated Scene**. Connect either scene
-output to the existing **WorldSculpt** node. For Pixal3D MV, connect two to four
+Connect two to eight image-producing nodes to **Prepare Scene from Images**, or
+connect a host video node to **Prepare Scene from Video** once Modly lands the
+typed video transport. Existing datasets can use **Normalize Annotated Scene**.
+Connect any scene output to **WorldSculpt**. For Pixal3D MV, connect two to four
 image-producing nodes to **Multi-Image to 3D** in declared port order. The first
 connected port is the primary view. Modly forwards it as image bytes and forwards
 the remaining connected images as the ordered `extra_image_paths` transport
@@ -189,7 +214,7 @@ field. WorldSculpt remains a separate scene-input model.
 
 ## Outputs
 
-Both scene-preparation nodes return a path to a canonical
+All three scene-producing nodes return a path to a canonical
 `modly.scene-manifest.v1` stored inside the workflow workspace. WorldSculpt
 consumes that scene and returns its existing GLB mesh output. Estimated scenes
 remain relative-scale unless calibrated externally.
@@ -212,7 +237,7 @@ environment is not implied by successful static tests.
 
 ## Limitations
 
-Perceptual scene-preparation quality, a complete capture-to-viewport UI run,
+Perceptual scene-preparation quality, a complete public-input-to-viewport UI run,
 and non-target platforms remain **UNTESTED** in this change. Relative DA3 depth
 cannot establish metric scale by itself.
 

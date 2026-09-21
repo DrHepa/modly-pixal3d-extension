@@ -3,10 +3,10 @@
   "kind": "model",
   "type": "model",
   "name": "Pixal3D",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "source": "https://github.com/DrHepa/modly-pixal3d-extension",
   "author": "DrHepa",
-  "description": "Pixal3D single-image, multi-image, and WorldSculpt workflows with official DA3 camera estimation and clean-room capture-to-scene preparation.",
+  "description": "Pixal3D single-image, multi-image, and WorldSculpt workflows with native image/video scene preparation using official SAM3 and DA3.",
   "generator_class": "Pixal3DGenerator",
   "model_identity": {
     "source_model": "TencentARC/Pixal3D",
@@ -220,10 +220,179 @@
       ]
     },
     {
-      "id": "scene-from-estimates",
-      "name": "Prepare Scene from Estimates",
+      "id": "scene-from-images",
+      "name": "Prepare Scene from Images",
       "type": "model.generate",
-      "input": "capture",
+      "input": "image",
+      "inputs": [
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image",
+        "image"
+      ],
+      "input_labels": [
+        "Primary view",
+        "View 2",
+        "View 3",
+        "View 4",
+        "View 5",
+        "View 6",
+        "View 7",
+        "View 8"
+      ],
+      "output": "scene",
+      "params_schema": [
+        {
+          "id": "object_labels",
+          "label": "Object Labels",
+          "type": "string",
+          "default": "chair,table,sofa,bed,cabinet,lamp,plant,appliance",
+          "tooltip": "Comma-separated SAM3 text labels. Each label is tracked independently and kept through label-aware 3D deduplication."
+        },
+        {
+          "id": "process_resolution",
+          "label": "DA3 Processing Resolution",
+          "type": "select",
+          "default": 504,
+          "options": [
+            {
+              "value": 392,
+              "label": "392"
+            },
+            {
+              "value": 504,
+              "label": "504"
+            },
+            {
+              "value": 630,
+              "label": "630"
+            }
+          ],
+          "tooltip": "DA3 processing bound. Intrinsics are explicitly rescaled from this processed resolution to the source frames."
+        },
+        {
+          "id": "mask_erosion",
+          "label": "Mask Erosion",
+          "type": "int",
+          "default": 1,
+          "min": 0,
+          "max": 8,
+          "tooltip": "Erode SAM3 masks before depth unprojection to reduce boundary contamination."
+        },
+        {
+          "id": "minimum_geometry_points",
+          "label": "Minimum Geometry Points",
+          "type": "int",
+          "default": 128,
+          "min": 16,
+          "max": 100000,
+          "tooltip": "Reject an instance in a frame when robust mask/depth filtering leaves fewer points."
+        },
+        {
+          "id": "confidence_percentile",
+          "label": "Depth Confidence Percentile",
+          "type": "float",
+          "default": 40,
+          "min": 0,
+          "max": 100,
+          "step": 1,
+          "tooltip": "Discard DA3 samples below this per-mask confidence percentile."
+        },
+        {
+          "id": "depth_trim_low",
+          "label": "Depth Trim Low",
+          "type": "float",
+          "default": 5,
+          "min": 0,
+          "max": 49,
+          "step": 1,
+          "tooltip": "Lower per-mask depth percentile retained for geometry."
+        },
+        {
+          "id": "depth_trim_high",
+          "label": "Depth Trim High",
+          "type": "float",
+          "default": 95,
+          "min": 51,
+          "max": 100,
+          "step": 1,
+          "tooltip": "Upper per-mask depth percentile retained for geometry."
+        },
+        {
+          "id": "aabb_percentile_low",
+          "label": "AABB Percentile Low",
+          "type": "float",
+          "default": 2,
+          "min": 0,
+          "max": 25,
+          "step": 1,
+          "tooltip": "Lower percentile used after accepted frames are merged."
+        },
+        {
+          "id": "aabb_percentile_high",
+          "label": "AABB Percentile High",
+          "type": "float",
+          "default": 98,
+          "min": 75,
+          "max": 100,
+          "step": 1,
+          "tooltip": "Upper percentile used after accepted frames are merged."
+        },
+        {
+          "id": "min_reprojection_coverage",
+          "label": "Minimum Reprojection Coverage",
+          "type": "float",
+          "default": 0.1,
+          "min": 0,
+          "max": 1,
+          "step": 0.01,
+          "tooltip": "Reject object/frame geometry that does not project back onto enough of its SAM3 mask."
+        },
+        {
+          "id": "dedup_iou_threshold",
+          "label": "3D Deduplication IoU",
+          "type": "float",
+          "default": 0.5,
+          "min": 0,
+          "max": 1,
+          "step": 0.05,
+          "tooltip": "Deduplicate only same-label AABBs above this 3D IoU."
+        },
+        {
+          "id": "camera_consistency_tolerance",
+          "label": "Camera Consistency Tolerance",
+          "type": "float",
+          "default": 0.15,
+          "min": 0.01,
+          "max": 0.5,
+          "step": 0.01,
+          "tooltip": "Reject DA3 frames whose source-resolution intrinsics drift too far from the sequence median."
+        },
+        {
+          "id": "sam_score_threshold",
+          "label": "SAM3 Score Threshold",
+          "type": "float",
+          "default": 0.5,
+          "min": 0,
+          "max": 1,
+          "step": 0.05,
+          "tooltip": "Official SAM3 detection/tracking output threshold."
+        }
+      ],
+      "weight_groups": [
+        "sam3",
+        "da3-base"
+      ]
+    },
+    {
+      "id": "scene-from-video",
+      "name": "Prepare Scene from Video",
+      "type": "model.generate",
+      "input": "video",
       "output": "scene",
       "params_schema": [
         {

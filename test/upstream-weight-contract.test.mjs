@@ -18,7 +18,7 @@ function python(source) {
 test('generate owns one shared multi-source group without a legacy or private download plan', () => {
   assert.ok(group)
   assert.deepEqual(manifest.nodes.map((node) => node.id), [
-    'generate', 'generate-mv', 'worldsculpt', 'scene-from-estimates', 'normalize-annotated-scene',
+    'generate', 'generate-mv', 'worldsculpt', 'scene-from-images', 'scene-from-video', 'normalize-annotated-scene',
   ])
   assert.deepEqual(manifest.nodes[0].weight_groups, ['pixal3d-base'])
   assert.equal(manifest.nodes[0].model_sources, undefined)

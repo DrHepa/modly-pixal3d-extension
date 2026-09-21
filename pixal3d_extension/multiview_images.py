@@ -235,10 +235,15 @@ def _workspace_file(raw: object, workspace: Path, label: str) -> tuple[Path, byt
 
 def validate_ordered_images(
     primary_image_bytes: bytes, extra_image_paths: object, workspace_dir: str | Path,
+    *, max_connected: int = 3, purpose: str = "Pixal3D MV",
 ) -> list[ValidatedImage]:
     workspace = Path(workspace_dir).resolve(strict=True)
     if not isinstance(extra_image_paths, list):
         raise TypeError("extra_image_paths must be an ordered list supplied by Modly")
+    if len(extra_image_paths) > max_connected:
+        words = {4: "four", 8: "eight"}
+        total = max_connected + 1
+        raise ValueError(f"{purpose} accepts at most {words.get(total, total)} connected images")
     connected_paths: list[tuple[int, str]] = []
     for index, value in enumerate(extra_image_paths, start=2):
         if value is None:
@@ -247,25 +252,23 @@ def validate_ordered_images(
             raise TypeError(f"view {index} must be None or a workspace image path")
         connected_paths.append((index, value))
     if len(connected_paths) < 1:
-        raise ValueError("Pixal3D MV requires at least two connected images")
-    if len(connected_paths) > 3:
-        raise ValueError("Pixal3D MV accepts at most four connected images")
+        raise ValueError(f"{purpose} requires at least two connected images")
     snapshots = [
-        _workspace_file(value, workspace, f"view {index}")
+        (index, *_workspace_file(value, workspace, f"view {index}"))
         for index, value in connected_paths
     ]
-    paths = [item[0] for item in snapshots]
+    paths = [item[1] for item in snapshots]
     if len(set(paths)) != len(paths):
-        raise ValueError("Pixal3D MV extra image paths must not contain duplicate or repeated paths")
+        raise ValueError(f"{purpose} extra image paths must not contain duplicate or repeated paths")
     images = [_decode(bytes(primary_image_bytes), "primary view")]
-    for index, (_path, data) in enumerate(snapshots, start=2):
+    for index, _path, data in snapshots:
         images.append(_decode(data, f"view {index}"))
     digests = [image.digest for image in images]
     if len(set(digests)) != len(digests):
-        raise ValueError("Pixal3D MV connected images must not contain duplicate content")
+        raise ValueError(f"{purpose} connected images must not contain duplicate content")
     dimensions = {(image.width, image.height) for image in images}
     if len(dimensions) != 1:
-        raise ValueError("Pixal3D MV connected images must have matching dimensions")
+        raise ValueError(f"{purpose} connected images must have matching dimensions")
     return images
 
 

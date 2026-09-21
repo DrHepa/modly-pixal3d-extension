@@ -15,6 +15,7 @@ from .scene_prepare_lane import python_path, validate_runtime
 from .process_tree import popen_process_group_kwargs, terminate_process_tree
 from .worldsculpt import resolve_scene_manifest
 from .worldsculpt_contract import validate_scene
+from .scene_video_input import parse_video_input, stage_video_input
 
 
 SAM3_GROUP = "sam3"
@@ -163,9 +164,9 @@ def _run_worker(
         process.stderr.close()
 
 
-def run_scene_from_estimates(
+def _run_scene_from_capture(
     *,
-    capture_input,
+    capture_manifest: Path,
     workspace_dir: Path,
     output_dir: Path,
     sam_root: Path,
@@ -175,7 +176,7 @@ def run_scene_from_estimates(
     cancel_event=None,
 ) -> Path:
     workspace = Path(workspace_dir).resolve(strict=True)
-    capture_manifest = _typed_path(capture_input, "capture").resolve(strict=True)
+    capture_manifest = Path(capture_manifest).resolve(strict=True)
     load_capture_manifest(capture_manifest, workspace)
     destination = validate_workspace_output_parent(output_dir, workspace, "scene-prep output directory")
     validate_scene_prepare_weights(sam_root, da3_root)
@@ -217,3 +218,127 @@ def run_scene_from_estimates(
         except Exception:
             pass
         job_path.unlink(missing_ok=True)
+
+
+def run_scene_from_estimates(
+    *, capture_input, workspace_dir: Path, output_dir: Path, sam_root: Path,
+    da3_root: Path, params: dict, progress_cb=None, cancel_event=None,
+) -> Path:
+    """Private backward-compatible capture adapter; not a public manifest node."""
+    capture_manifest = _typed_path(capture_input, "capture")
+    return _run_scene_from_capture(
+        capture_manifest=capture_manifest, workspace_dir=workspace_dir, output_dir=output_dir,
+        sam_root=sam_root, da3_root=da3_root, params=params,
+        progress_cb=progress_cb, cancel_event=cancel_event,
+    )
+
+
+def run_scene_from_images(
+    *, primary_image_bytes: bytes, extra_image_paths: list, workspace_dir: Path,
+    output_dir: Path, sam_root: Path, da3_root: Path, params: dict,
+    progress_cb=None, cancel_event=None,
+) -> Path:
+    """Adapt eight fixed ordered Modly image ports to the private capture ABI."""
+    from .multiview_images import _stage_pngs, validate_ordered_images
+
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("Scene preparation cancelled")
+    workspace = Path(workspace_dir).resolve(strict=True)
+    images = validate_ordered_images(
+        primary_image_bytes, extra_image_paths, workspace,
+        max_connected=7, purpose="Scene preparation",
+    )
+    output = validate_workspace_output_parent(output_dir, workspace, "scene-prep output directory")
+    output.mkdir(parents=True, exist_ok=True)
+    connected_ports = [1, *[index for index, value in enumerate(extra_image_paths, start=2) if value is not None]]
+    with tempfile.TemporaryDirectory(prefix=".scene-images-", dir=output) as directory:
+        staging = Path(directory)
+        frame_paths = _stage_pngs(images, staging)
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Scene preparation cancelled")
+        frames = [
+            {
+                "index": index,
+                "path": path.name,
+                "width": image.width,
+                "height": image.height,
+                "byteSize": path.stat().st_size,
+            }
+            for index, (path, image) in enumerate(zip(frame_paths, images, strict=True))
+        ]
+        manifest = staging / "capture-manifest.json"
+        manifest.write_text(json.dumps({
+            "schema": "modly.capture-manifest.v1",
+            "captureRoot": ".",
+            "kind": "frames",
+            "frames": frames,
+            "provenance": {
+                "source": "ordered Modly image ports",
+                "ordering": "manifest-index",
+                "sourcePorts": connected_ports,
+            },
+        }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        internal_params = dict(params)
+        internal_params.update({"max_frames": len(images), "frame_stride": 1})
+        return _run_scene_from_capture(
+            capture_manifest=manifest, workspace_dir=workspace, output_dir=output,
+            sam_root=sam_root, da3_root=da3_root, params=internal_params,
+            progress_cb=progress_cb, cancel_event=cancel_event,
+        )
+
+
+def _probe_video(staged_video: Path, extension_root: Path, progress_cb=None, cancel_event=None) -> dict:
+    if progress_cb:
+        progress_cb(2, "Validating and decoding scene video")
+    metadata_path = _run_worker(
+        [str(python_path(extension_root)), "-m", "pixal3d_extension.scene_video_probe_worker", str(staged_video)],
+        cwd=extension_root,
+        env=offline_environment(staged_video.parent / ".scene-prep-cache", extension_root),
+        progress_cb=progress_cb,
+        cancel_event=cancel_event,
+        output_field="metadata_path",
+        label="Scene video validation",
+    )
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    finally:
+        metadata_path.unlink(missing_ok=True)
+    if not isinstance(metadata, dict) or any(type(metadata.get(key)) is not int or metadata[key] <= 0 for key in ("width", "height", "frameCount")):
+        raise RuntimeError("Scene video validation returned invalid metadata")
+    return metadata
+
+
+def run_scene_from_video(
+    *, video_input, workspace_dir: Path, output_dir: Path, sam_root: Path,
+    da3_root: Path, params: dict, progress_cb=None, cancel_event=None,
+) -> Path:
+    """Validate one typed local video, sample it deterministically, and prepare a scene."""
+    workspace = Path(workspace_dir).resolve(strict=True)
+    output = validate_workspace_output_parent(output_dir, workspace, "scene-prep output directory")
+    output.mkdir(parents=True, exist_ok=True)
+    extension_root = Path(__file__).resolve().parent.parent
+    with tempfile.TemporaryDirectory(prefix=".scene-video-", dir=output) as directory:
+        staging = Path(directory)
+        staged_video = stage_video_input(video_input, workspace, staging, cancel_event)
+        validate_scene_prepare_weights(sam_root, da3_root)
+        validate_runtime(extension_root)
+        metadata = _probe_video(staged_video, extension_root, progress_cb, cancel_event)
+        manifest = staging / "capture-manifest.json"
+        manifest.write_text(json.dumps({
+            "schema": "modly.capture-manifest.v1",
+            "captureRoot": ".",
+            "kind": "video",
+            "video": {
+                "path": staged_video.name,
+                "width": metadata["width"],
+                "height": metadata["height"],
+                "frameCount": metadata["frameCount"],
+                "byteSize": staged_video.stat().st_size,
+            },
+            "provenance": {"source": "typed Modly video input", "ordering": "decode-index"},
+        }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return _run_scene_from_capture(
+            capture_manifest=manifest, workspace_dir=workspace, output_dir=output,
+            sam_root=sam_root, da3_root=da3_root, params=dict(params),
+            progress_cb=progress_cb, cancel_event=cancel_event,
+        )

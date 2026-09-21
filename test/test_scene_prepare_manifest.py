@@ -8,16 +8,31 @@ class ScenePrepareManifestTests(unittest.TestCase):
     def setUpClass(cls):
         cls.manifest = json.loads((Path(__file__).parents[1] / "manifest.json").read_text())
 
-    def test_two_static_typed_nodes_preserve_existing_ids(self):
+    def test_public_scene_prep_nodes_use_native_image_and_video_contracts(self):
         nodes = {node["id"]: node for node in self.manifest["nodes"]}
         self.assertTrue({"generate", "generate-mv", "worldsculpt"}.issubset(nodes))
-        self.assertEqual((nodes["scene-from-estimates"]["input"], nodes["scene-from-estimates"]["output"]), ("capture", "scene"))
-        self.assertEqual(nodes["scene-from-estimates"]["weight_groups"], ["sam3", "da3-base"])
+        self.assertNotIn("scene-from-estimates", nodes)
+        images = nodes["scene-from-images"]
+        self.assertEqual((images["input"], images["output"]), ("image", "scene"))
+        self.assertEqual(images["inputs"], ["image"] * 8)
+        self.assertEqual(images["input_labels"], ["Primary view", *[f"View {index}" for index in range(2, 9)]])
+        self.assertEqual(images["weight_groups"], ["sam3", "da3-base"])
+        video = nodes["scene-from-video"]
+        self.assertEqual((video["input"], video["output"]), ("video", "scene"))
+        self.assertEqual(video["weight_groups"], ["sam3", "da3-base"])
         self.assertEqual((nodes["normalize-annotated-scene"]["input"], nodes["normalize-annotated-scene"]["output"]), ("scene", "scene"))
         self.assertNotIn("weight_groups", nodes["normalize-annotated-scene"])
-        params = {param["id"]: param for param in nodes["scene-from-estimates"]["params_schema"]}
+        params = {param["id"]: param for param in images["params_schema"]}
+        self.assertNotIn("max_frames", params)
+        self.assertNotIn("frame_stride", params)
+        video_params = {param["id"]: param for param in video["params_schema"]}
+        self.assertEqual(
+            params,
+            {key: value for key, value in video_params.items() if key not in {"max_frames", "frame_stride"}},
+        )
+        self.assertEqual(video_params["max_frames"]["default"], 16)
+        self.assertEqual(video_params["frame_stride"]["default"], 1)
         self.assertEqual(params["minimum_geometry_points"]["default"], 128)
-        self.assertEqual([option["value"] for option in params["process_resolution"]["options"]], [392, 504, 630])
 
     def test_official_weight_groups_are_immutable_and_exact(self):
         groups = {group["id"]: group for group in self.manifest["weight_groups"]}

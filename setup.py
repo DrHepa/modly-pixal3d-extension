@@ -951,7 +951,7 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
                     result["installs_started"] = True
                     result["next_steps"] = [
                         *result.get("next_steps", []),
-                        "install Python 3.12 and a CUDA >=12.6 runtime for scene-from-estimates",
+                        "install Python 3.12 and a CUDA >=12.6 runtime for scene-from-images/scene-from-video",
                         "rerun setup.py --repair-scene-prep",
                     ]
         return result
