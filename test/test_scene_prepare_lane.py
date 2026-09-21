@@ -1,6 +1,8 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from pixal3d_extension import scene_prepare_lane
@@ -55,6 +57,23 @@ class ScenePrepareLaneTests(unittest.TestCase):
         metadata_probe = scene_prepare_lane._source_metadata_probe_code()
         compile(metadata_probe, "<scene-prep-source-probe>", "exec")
         self.assertIn("direct_url.json", metadata_probe)
+
+    def test_mv_da3_readiness_does_not_require_sam_import_or_source_metadata(self):
+        metadata = _exact_source_metadata()
+        metadata.pop("sam3")
+        response = json.dumps({
+            "python": [3, 12], "torch": "2.12.0", "cuda": "13.0",
+            "cuda_available": True, "da3_revision": scene_prepare_lane.DA3_SOURCE_REVISION,
+        })
+        with patch.object(scene_prepare_lane, "da3_capability", return_value={"supported": True}), \
+             patch.object(scene_prepare_lane, "_interpreter_custody", return_value=(True, {"status": "owned"})), \
+             patch.object(scene_prepare_lane, "_source_metadata", return_value=metadata), \
+             patch.object(scene_prepare_lane.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout=response, stderr="")) as run:
+            result = scene_prepare_lane.validate_da3_runtime(Path("/extension"))
+        self.assertEqual(result["status"], "ready")
+        probe = run.call_args.args[0][-1]
+        self.assertIn("load_depth_anything3", probe)
+        self.assertNotIn("sam3", probe)
 
     def test_repair_skips_vcs_install_only_when_both_sources_are_exact(self):
         with tempfile.TemporaryDirectory() as temp:

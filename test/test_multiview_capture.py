@@ -39,34 +39,24 @@ def capture_fixture(root: Path, count: int = 2) -> tuple[Path, dict]:
 
 
 class MultiviewCaptureTests(unittest.TestCase):
-    def test_node_accepts_capture_without_changing_shared_weights_or_other_ports(self):
+    def test_node_exposes_ordered_images_while_internal_capture_adapter_remains_available(self):
         manifest = json.loads((Path(__file__).parents[1] / "manifest.json").read_text())
         nodes = {node["id"]: node for node in manifest["nodes"]}
-        self.assertEqual((nodes["generate-mv"]["input"], nodes["generate-mv"]["output"]), ("capture", "mesh"))
-        self.assertEqual(nodes["generate-mv"]["weight_groups"], ["pixal3d-base", "pixal3d-mv"])
+        self.assertEqual((nodes["generate-mv"]["input"], nodes["generate-mv"]["output"]), ("image", "mesh"))
+        self.assertEqual(nodes["generate-mv"]["inputs"], ["image"] * 4)
+        self.assertEqual(nodes["generate-mv"]["weight_groups"], ["pixal3d-base", "pixal3d-mv", "da3-base"])
         self.assertEqual(nodes["worldsculpt"]["input"], "scene")
 
-    def test_generator_uses_typed_capture_authority_not_parameter_paths(self):
+    def test_generator_rejects_non_image_and_incomplete_multi_image_inputs(self):
         gen = Pixal3DGenerator("/tmp/modly/models/pixal3d/generate-mv", "/tmp/modly/workspace")
         gen.MODEL_NODE_ID = "generate-mv"
-        gen.shared_model_dirs = {"pixal3d-base": "/tmp/base", "pixal3d-mv": "/tmp/mv"}
-        incoming = SimpleNamespace(kind="capture", path=Path("/tmp/modly/workspace/input/capture-manifest.json"))
-        cancel = threading.Event()
-        with patch.object(gen, "_prepare_generation_assets", return_value=Path("/tmp/modly/models/pixal3d/auxiliary/naf/naf_release.pth")), \
-             patch("pixal3d_extension.multiview_capture.validate_mv_capture") as preflight, \
-             patch("pixal3d_extension.multiview.run_multiview", return_value=Path("/tmp/result.glb")) as run:
-            gen.generate(incoming, {"capture_manifest_path": "/foreign.json", "scene_manifest_path": "/scene.json"}, None, cancel)
-        preflight.assert_called_once_with(incoming.path, gen.workspace_dir, 4)
-        self.assertEqual(run.call_args.kwargs["capture_manifest_path"], incoming.path)
-        self.assertIs(run.call_args.kwargs["cancel_event"], cancel)
-        self.assertNotIn("scene_manifest_path", run.call_args.kwargs)
-
-    def test_generator_rejects_scene_and_image_inputs_instead_of_silent_conversion(self):
-        gen = Pixal3DGenerator("/tmp/modly/models/pixal3d/generate-mv", "/tmp/modly/workspace")
-        gen.MODEL_NODE_ID = "generate-mv"
-        for incoming in (b"image", b"", SimpleNamespace(kind="scene", path=Path("/tmp/scene.json"))):
-            with self.subTest(incoming=incoming), self.assertRaisesRegex(ValueError, "capture"):
-                gen.generate(incoming, {"scene_manifest_path": "/tmp/scene.json"})
+        for incoming, params in (
+            (b"", {}),
+            (SimpleNamespace(kind="scene", path=Path("/tmp/scene.json")), {}),
+            (b"not-an-image", {}),
+        ):
+            with self.subTest(incoming=incoming), self.assertRaisesRegex(ValueError, "primary image|extra_image_paths"):
+                gen.generate(incoming, params)
 
     def test_ordered_images_are_staged_privately_with_alpha_and_real_cameras(self):
         from pixal3d_extension.multiview_capture import prepare_capture_views

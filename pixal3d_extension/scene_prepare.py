@@ -38,6 +38,12 @@ def validate_scene_prepare_weights(sam_root: Path, da3_root: Path) -> None:
         _regular(da3_root, relative, "DA3 Base weights")
 
 
+def validate_da3_weights(da3_root: Path) -> None:
+    """Validate the UI-managed DA3 subset used by MV camera calibration."""
+    for relative in DA3_FILES:
+        _regular(da3_root, relative, "DA3 Base weights")
+
+
 def offline_environment(cache_root: Path, package_root: Path | None = None) -> dict[str, str]:
     env = os.environ.copy()
     for key in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN"):
@@ -71,7 +77,10 @@ def _typed_path(value, expected_kind: str) -> Path:
     return Path(path)
 
 
-def _run_worker(command: list[str], *, cwd: Path, env: dict[str, str], progress_cb=None, cancel_event=None) -> Path:
+def _run_worker(
+    command: list[str], *, cwd: Path, env: dict[str, str], progress_cb=None,
+    cancel_event=None, output_field: str = "scene_manifest_path", label: str = "Scene preparation",
+) -> Path:
     process = subprocess.Popen(
         command,
         cwd=Path(cwd),
@@ -120,15 +129,15 @@ def _run_worker(command: list[str], *, cwd: Path, env: dict[str, str], progress_
         if message.get("type") == "progress" and progress_cb:
             progress_cb(int(message.get("pct", 0)), str(message.get("step", "")))
         elif message.get("type") == "done":
-            output = Path(message["scene_manifest_path"])
+            output = Path(message[output_field])
         elif message.get("type") == "error":
-            raise RuntimeError(str(message.get("message", "Scene-prep worker failed")))
+            raise RuntimeError(str(message.get("message", f"{label} worker failed")))
 
     try:
         while active or process.poll() is None:
             if cancel_event is not None and cancel_event.is_set():
                 terminate_process_tree(process)
-                raise RuntimeError("Scene preparation cancelled")
+                raise RuntimeError(f"{label} cancelled")
             try:
                 name, chunk = chunks.get(timeout=0.05)
             except queue.Empty:
@@ -144,7 +153,7 @@ def _run_worker(command: list[str], *, cwd: Path, env: dict[str, str], progress_
                 raw, buffers[name] = buffers[name].split(b"\n", 1)
                 consume(name, raw)
         if process.wait() != 0 or output is None:
-            raise RuntimeError("Scene-prep worker failed: " + "\n".join(stderr_tail[-20:]))
+            raise RuntimeError(f"{label} worker failed: " + "\n".join(stderr_tail[-20:]))
         return output
     finally:
         terminate_process_tree(process, force=process.poll() is None)

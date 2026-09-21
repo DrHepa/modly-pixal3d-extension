@@ -175,7 +175,7 @@ def _run_da3(frame_paths: list[Path], da3_root: Path, params: dict):
         image=[str(path) for path in frame_paths],
         process_res=params["process_resolution"],
         process_res_method="upper_bound_resize",
-        ref_view_strategy="middle",
+        ref_view_strategy=params.get("ref_view_strategy", "saddle_balanced"),
         export_format="mini_npz",
     )
     depth = np.asarray(prediction.depth, dtype=np.float64)
@@ -271,7 +271,9 @@ def run(job: dict) -> Path:
         source_h, source_w = cv2.imread(str(frame_paths[0]), cv2.IMREAD_COLOR).shape[:2]
 
         emit({"type": "progress", "pct": 20, "step": "Running official DA3 Base multiview"})
-        depth, confidence, intrinsics_processed, w2c = _run_da3(frame_paths, da3_root, params)
+        da3_params = dict(params)
+        da3_params["ref_view_strategy"] = "middle" if manifest["kind"] == "video" else "saddle_balanced"
+        depth, confidence, intrinsics_processed, w2c = _run_da3(frame_paths, da3_root, da3_params)
         depth_hw = depth.shape[1:]
         intrinsics_source = [scale_intrinsics(k, source_hw=depth_hw, processed_hw=(source_h, source_w)) for k in intrinsics_processed]
         accepted_frames, median_k = _consistent_cameras(intrinsics_source, w2c, params["camera_consistency_tolerance"])

@@ -14,10 +14,12 @@ function python(source) {
   return JSON.parse(run.stdout)
 }
 
-test('calibrated capture node has its own real MV weight group and capture input', () => {
+test('multi-image node uses upstream ordered image ports and DA3 calibration weights', () => {
   const node = manifest.nodes.find((item) => item.id === 'generate-mv')
-  assert.equal(node?.input, 'capture')
-  assert.deepEqual(node?.weight_groups, ['pixal3d-base', 'pixal3d-mv'])
+  assert.equal(node?.input, 'image')
+  assert.deepEqual(node?.inputs, ['image', 'image', 'image', 'image'])
+  assert.deepEqual(node?.input_labels, ['Primary view', 'View 2', 'View 3', 'View 4'])
+  assert.deepEqual(node?.weight_groups, ['pixal3d-base', 'pixal3d-mv', 'da3-base'])
   const group = manifest.weight_groups.find((item) => item.id === 'pixal3d-mv')
   const source = group?.model_sources.find((item) => item.repo_id === 'TencentARC/Pixal3D')
   assert.ok(source?.checks.includes('pipeline_mv.json'))
@@ -27,6 +29,24 @@ test('calibrated capture node has its own real MV weight group and capture input
   }
   assert.equal(source.checks.length, 9)
   assert.equal(group.model_sources.length, 1)
+})
+
+test('MV docs distinguish UI-managed model weights from intentional first-use NAF bootstrap', () => {
+  const docs = readFileSync(join(root, 'README.md'), 'utf8')
+  assert.match(docs, /DA3\s+and Pixal3D MV model weights are UI-managed and local-only/i)
+  assert.match(docs, /NAF is the one\s+intentional auxiliary[\s\S]*?bootstrap atomically on first generation/i)
+  assert.match(docs, /manual bootstrap[\s\S]*?fallback/i)
+  assert.match(docs, /null gaps are ignored[\s\S]*?connected views retain port order/i)
+  assert.match(docs, /input_labels[\s\S]*?not every private or older fork renders\s+those\s+labels/i)
+  assert.doesNotMatch(docs, /No model weights are downloaded by this path/)
+})
+
+test('Windows MV custody workflow is SHA-pinned and exercises the real Windows filesystem contract', () => {
+  const workflow = readFileSync(join(root, '.github/workflows/windows-mv-path-custody.yml'), 'utf8')
+  assert.match(workflow, /runs-on:\s*windows-2022/)
+  assert.match(workflow, /actions\/checkout@11d5960a326750d5838078e36cf38b85af677262\s*#\s*v4/)
+  assert.match(workflow, /actions\/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065\s*#\s*v5/)
+  assert.match(workflow, /test_windows_multiview_custody\.py/)
 })
 
 test('WorldSculpt scene node uses pinned official adapters and the Pixal3D base group', () => {
@@ -99,11 +119,11 @@ for node_id in ('generate-mv', 'worldsculpt'):
         observed[node_id]['generate_error'] = str(exc)
 print(json.dumps(observed))
 `)
-  assert.deepEqual(result['generate-mv'].schema, ['resolution', 'low_vram', 'seed', 'num_views'])
+  assert.deepEqual(result['generate-mv'].schema, ['resolution', 'low_vram', 'seed'])
   assert.equal(result['generate-mv'].readiness, 'mv_shared_groups_unavailable')
   assert.match(result['generate-mv'].download_error, /pixal3d-mv/)
   assert.match(result['generate-mv'].load_error, /pixal3d-mv/)
-  assert.match(result['generate-mv'].generate_error, /not image bytes/)
+  assert.match(result['generate-mv'].generate_error, /reserved transport parameter/)
   assert.deepEqual(result.worldsculpt.schema, ['face_budget'])
   assert.equal(result.worldsculpt.readiness, 'worldsculpt_assets_missing')
   assert.match(result.worldsculpt.download_error, /worldsculpt-adapters/)
@@ -220,7 +240,7 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.match(result.blocked, /Pixal3D MV weights missing/)
 })
 
-test('MV generator rejects image bytes and legacy scene parameters instead of single-view fallback', () => {
+test('MV generator requires upstream extra_image_paths and rejects legacy transport parameters', () => {
   const result = python(`
 import json
 from generator import Pixal3DGenerator
@@ -228,13 +248,13 @@ gen=Pixal3DGenerator('/tmp/models/pixal3d/generate-mv','/tmp/Workspace')
 gen.MODEL_NODE_ID='generate-mv'
 gen.shared_model_dirs={'pixal3d-base':'/tmp/base','pixal3d-mv':'/tmp/mv'}
 errors=[]
-for image,params in [(b'image',{'scene_manifest_path':'/tmp/Workspace/scene.json'}),(b'',{})]:
+for image,params in [(b'image',{'scene_manifest_path':'/tmp/Workspace/scene.json'}),(b'image',{})]:
     try: gen.generate(image,params)
     except ValueError as exc: errors.append(str(exc))
 print(json.dumps(errors))
 `)
-  assert.match(result[0], /not image bytes/)
-  assert.match(result[1], /typed capture manifest/)
+  assert.match(result[0], /reserved transport parameter/)
+  assert.match(result[1], /extra_image_paths/)
 })
 
 test('normal setup verifies and installs the bundled MV core after base wheelhouse', () => {
@@ -354,9 +374,9 @@ from pixal3d_extension.multiview import run_multiview
 events=[];cancel=threading.Event()
 callback=events.append
 gen=Pixal3DGenerator('/tmp/models/pixal3d/generate-mv','/tmp/Workspace');gen.MODEL_NODE_ID='generate-mv'
-gen.shared_model_dirs={'pixal3d-base':'/tmp/base','pixal3d-mv':'/tmp/mv'}
-with patch.object(gen,'_prepare_generation_assets',return_value=Path('/tmp/models/pixal3d/auxiliary/naf/naf_release.pth')), patch('pixal3d_extension.multiview_capture.validate_mv_capture'), patch('pixal3d_extension.multiview.run_multiview',return_value=Path('/tmp/result.glb')) as mock:
-    gen.generate(Path('/tmp/Workspace/capture-manifest.json'),{},callback,cancel)
+gen.shared_model_dirs={'pixal3d-base':'/tmp/base','pixal3d-mv':'/tmp/mv','da3-base':'/tmp/da3'}
+with patch.object(gen,'_prepare_generation_assets',return_value=Path('/tmp/models/pixal3d/auxiliary/naf/naf_release.pth')), patch('pixal3d_extension.multiview_images.validate_ordered_images'), patch('pixal3d_extension.multiview_images.run_multiview_from_images',return_value=Path('/tmp/result.glb')) as mock:
+    gen.generate(b'image',{'extra_image_paths':['/tmp/Workspace/view2.png']},callback,cancel)
     forwarded=mock.call_args.kwargs['cancel_event'] is cancel and mock.call_args.kwargs['progress_cb'] is callback
 with tempfile.TemporaryDirectory() as tmp:
     root=Path(tmp);workspace=root/'Workspace';views=workspace/'views';views.mkdir(parents=True)

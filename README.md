@@ -181,10 +181,11 @@ copied or vendored here.
 
 Connect **Load Capture** to **Prepare Scene from Estimates**, or connect an
 existing typed scene to **Normalize Annotated Scene**. Connect either scene
-output to the existing **WorldSculpt** node. For Pixal3D MV, connect **Load
-Capture** directly to **Calibrated Capture to 3D** and provide the camera
-metadata described below. Typed capture/scene model generation uses the generic
-host artifact route; WorldSculpt remains a separate scene-input model.
+output to the existing **WorldSculpt** node. For Pixal3D MV, connect two to four
+image-producing nodes to **Multi-Image to 3D** in declared port order. The first
+connected port is the primary view. Modly forwards it as image bytes and forwards
+the remaining connected images as the ordered `extra_image_paths` transport
+field. WorldSculpt remains a separate scene-input model.
 
 ## Outputs
 
@@ -202,10 +203,12 @@ node intentionally exposes no inference parameters.
 ## Requirements and compatibility
 
 The primary Pixal3D, WorldSculpt, and scene-preparation environments are
-isolated from each other. Scene estimation requires Linux ARM64, Python 3.12,
-CUDA 12.6 or newer, and authenticated acceptance of the SAM License before
-Modly can download the gated SAM3 files. See the per-feature status statements
-below; support on an environment is not implied by successful static tests.
+isolated from each other. Scene estimation and the MV node's automatic DA3
+camera calibration currently require Linux ARM64, Python 3.12, and CUDA 12.6 or
+newer. Only scene estimation additionally requires authenticated acceptance of
+the SAM License before Modly can download gated SAM3 files; MV does not use or
+require SAM3 weights. See the per-feature status statements below; support on an
+environment is not implied by successful static tests.
 
 ## Limitations
 
@@ -251,65 +254,48 @@ The extension preserves Pixal3D's exported GLB orientation. Do not apply a fixed
 
 ## Remaining runtime requirement
 
-### Calibrated multi-view capture node (candidate; not yet live-accepted)
+### Ordered multi-image node
 
-`generate-mv` is a `capture -> mesh` node. It is **TencentARC Pixal3D multi-view**, not the AlayaLab WorldSculpt scene-composition pipeline. It requires both host-provided `pixal3d-base` and `pixal3d-mv` shared weight roots. The MV group contains only `pipeline_mv.json` and the four `_mv` denoiser JSON/safetensors pairs from `TencentARC/Pixal3D` revision `b0cb2e1b794cab9aa0ac38a95d794a4d9337437f`; the base group owns the three shared decoders and DINO/RMBG. The extension generates a private temporary MV config pointing decoder and matting references into the host-provided base root, without mutating downloaded weights, and validates every referenced checkpoint before importing inference. Only after every non-NAF file in both shared groups validates does MV load or first generation verify `models/pixal3d/auxiliary/naf/naf_release.pth` and download that allowlisted checkpoint when it is the sole remaining auxiliary deficiency. A valid local NAF file is never downloaded again; a corrupt file fails closed and requires the explicit forced repair command documented below.
+`generate-mv` is an `image,image,image,image -> mesh` node using Modly's
+existing ordered multiple-image manifest contract. `input: "image"` remains as
+the parser-compatible fallback; `inputs` declares four generic image ports and
+`input_labels` names them **Primary view**, **View 2**, **View 3**, and **View
+4** on current upstream main; not every private or older fork renders those
+labels. Connect at least two and at most four images. Modly may serialize an
+unconnected intermediate port as a `null` entry in `extra_image_paths`. Those
+null gaps are ignored, while connected views retain port order. Any non-null
+entry must be a workspace image path; the extension does not infer named-port
+identity beyond that positional order.
 
-Use the existing `modly.capture-manifest.v1` envelope described above: ordered
-PNG/JPEG images or a video with declared dimensions and decoded frame count.
-`num_views` selects the first N frames in manifest order or video decode order,
-without sorting filenames, duplicating views, or substituting single-view
-inference. The selected media are normalized into a disposable private view
-directory; source images, video, and downloaded weights are never rewritten.
-Image alpha is preserved. Video frame count and dimensions are checked while
-decoding, and staging is removed after success, failure, or cancellation.
+This node is **TencentARC Pixal3D multi-view**, not WorldSculpt. It requires the
+host-managed `pixal3d-base`, `pixal3d-mv`, and `da3-base` shared groups. DA3 Base
+estimates one consistent camera and horizontal FOV per raw connected image.
+Those real relative cameras are transformed by one global rigid transform and
+one uniform relative-scale gauge so the primary view matches Pixal3D's canonical
+front coordinate system. Individual poses are never guessed, replaced with a
+fixed orbit, or independently adjusted. DA3 Base does not establish metric
+scale.
 
-**Camera calibration is still required.** The pinned TencentARC MV implementation
-consumes known poses and FOVs; changing the transport to capture does not add a
-pose-estimation model. Uncalibrated captures fail with an actionable error before
-inference. Add a `multiview` object to the capture manifest, with one camera per
-image or decoded video frame, in the same contiguous zero-based order:
+The primary image bytes and remaining workspace paths are validated before NAF
+bootstrap or output creation. Inputs must be unique PNG, JPEG, or WebP images
+with matching dimensions; traversal, symlinks, non-regular files, duplicate
+paths/content, unsupported content, and more or fewer views fail actionably.
+Images are normalized into a disposable private directory, DA3 writes the
+official ordered `transforms.json` there, and the already-calibrated MV runner is
+then reused. Staging is removed after success, failure, or cancellation. DA3
+and Pixal3D MV model weights are UI-managed and local-only: DA3 uses
+`local_files_only=True` in an offline isolated runtime, and all three shared
+groups are downloaded or repaired through Modly Models UI. NAF is the one
+intentional auxiliary that may bootstrap atomically on first generation when
+it is absent. A corrupt NAF file is never replaced automatically; the documented
+manual bootstrap remains the recovery fallback.
 
-```json
-{
-  "multiview": {
-    "cameraConvention": "blender-c2w",
-    "meshScale": 1.0,
-    "cameras": [
-      {
-        "index": 0,
-        "cameraAngleX": 0.5,
-        "transformMatrix": [[1,0,0,0],[0,0,-1,-3],[0,1,0,0],[0,0,0,1]]
-      }
-    ]
-  }
-}
-```
+The low-level Python `run_multiview(scene_manifest_path=...)` and calibrated
+capture adapter remain available for internal/backward-compatible callers with
+real poses. Neither is exposed as the public workflow input and neither can
+override the multiple-image transport fields.
 
-The example shows the canonical front camera. Supply the actual calibration for
-every frame: a finite proper rigid 4×4 camera-to-world transform in Blender/NeRF
-convention (Z-up world, camera looks along -Z with +Y up), nonzero camera distance,
-and horizontal FOV in radians in `(0, pi)`. `meshScale` is a positive upstream
-scale, defaulting to 1; it is not an inferred metric calibration. Frame 0 should
-be the canonical front view. Arbitrary raw footage needs an external calibration
-step; neither guessed cameras nor SAM3/DA3 inference are silently inserted here.
-
-Submit through `/generate/from-artifact` with `input_kind: "capture"`,
-`input_path: "Captures/object/capture-manifest.json"`, and
-`model_id: "pixal3d/generate-mv"`. The existing host already validates and forwards
-this typed input; the generator trusts that input path, not path overrides in
-parameters. No new host endpoint is required.
-
-**Migration from 0.4.x:** reconnect old MV scene edges to a Load Capture node.
-Convert known `transforms.json` calibration into `multiview.cameras`, preserving
-frame order and mapping `transform_matrix`/`camera_angle_x` to
-`transformMatrix`/`cameraAngleX`. Scene manifests and image-byte calls are rejected
-by the MV generator rather than reinterpreted. The explicitly named low-level
-Python `run_multiview(scene_manifest_path=...)` compatibility entry remains for
-already-calibrated callers; it is not the Modly node input and cannot override a
-simultaneously supplied capture.
-
-**Runtime boundary:** the published native wheelhouse still contains the single-view Pixal3D core wheel. Normal setup now checksum-verifies and force-reinstalls a bundled, additive pure-Python MV core candidate after that wheelhouse; it does not change native CUDA/NATTEN packages or claim GPU compatibility. The vendored upstream `inference_mv.py` invokes the MV cascade through a private generated config and a scoped local-only loader, so downloaded shared weight files are not modified and corrupt/missing local checkpoints cannot trigger an upstream Hugging Face fallback. If the core overlay is absent or invalid, setup fails rather than leaving an inert node. Current tests cover calibrated capture contracts, real bounded image/video decoding, custody, cleanup, and a mocked inference call, **not** a real MV GLB or Modly UI end-to-end. Modly also needs typed capture routing, multi-source downloads, and shared-weight-group support before this layout can run live.
+**Runtime boundary:** the published native wheelhouse still contains the single-view Pixal3D core wheel. Normal setup checksum-verifies and force-reinstalls a bundled, additive pure-Python MV core after that wheelhouse; it does not change native CUDA/NATTEN packages or claim GPU compatibility. The vendored upstream `inference_mv.py` invokes the MV cascade through a private generated config and a scoped local-only loader, so downloaded shared weight files are not modified and corrupt/missing local checkpoints cannot trigger an upstream Hugging Face fallback. If the core overlay or isolated DA3 runtime is absent or invalid, setup fails rather than leaving an inert node. Contract tests cover ordered port reconstruction, image custody, DA3 camera conversion, cleanup, cancellation, offline loading, and the calibrated runner adapter. Real inference evidence must still be re-established after this public input-contract migration.
 
 MV NAF loading is intercepted at the exact upstream Torch Hub call and reads only the verified local checkpoint; unexpected Hub requests fail closed. MV progress is reported at stage boundaries. Direct generation checks cancellation before NAF bootstrap and immediately after it, so a pre-cancelled request performs no NAF filesystem or network mutation. Cancellation is also checked before and after later expensive stages, but the upstream model-loading, cascade, and GLB extraction calls cannot be interrupted mid-call; a cancellation request takes effect at the next boundary.
 

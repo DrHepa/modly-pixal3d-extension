@@ -1,9 +1,12 @@
 import tempfile
 import threading
 import unittest
+import io
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+from PIL import Image
 
 import generator as generator_module
 from generator import Pixal3DGenerator
@@ -18,7 +21,8 @@ class GeneratorNafBootstrapTests(unittest.TestCase):
         self.base = self.root / "weights" / "base"
         self.mv = self.root / "weights" / "mv"
         self.adapters = self.root / "weights" / "adapters"
-        for path in (self.base, self.mv, self.adapters):
+        self.da3 = self.root / "weights" / "da3"
+        for path in (self.base, self.mv, self.adapters, self.da3):
             path.mkdir(parents=True)
 
     def tearDown(self):
@@ -35,8 +39,16 @@ class GeneratorNafBootstrapTests(unittest.TestCase):
             "pixal3d-base": self.base,
             "pixal3d-mv": self.mv,
             "worldsculpt-adapters": self.adapters,
+            "da3-base": self.da3,
         }
         return generator
+
+    def _mv_input(self):
+        stream = io.BytesIO()
+        Image.new("RGB", (8, 8), (10, 20, 30)).save(stream, format="PNG")
+        extra = self.workspace / "extra.png"
+        Image.new("RGB", (8, 8), (30, 20, 10)).save(extra)
+        return stream.getvalue(), {"extra_image_paths": [str(extra)]}
 
     @property
     def naf_path(self) -> Path:
@@ -116,16 +128,15 @@ class GeneratorNafBootstrapTests(unittest.TestCase):
 
     def test_mv_direct_generate_defensively_bootstraps_missing_naf(self):
         generator = self._generator("generate-mv")
-        capture = SimpleNamespace(kind="capture", path=self.workspace / "capture-manifest.json")
-        capture.path.write_text("{}")
+        primary, params = self._mv_input()
         output = self.workspace / "mv.glb"
         with patch.object(generator, "_preflight_non_naf_shared_assets"), \
-             patch("pixal3d_extension.multiview_capture.validate_mv_capture") as input_preflight, \
+             patch("pixal3d_extension.multiview_images.validate_ordered_images") as input_preflight, \
              patch.object(generator_module, "bootstrap_auxiliary_assets", side_effect=self._successful_bootstrap) as bootstrap, \
              patch.object(generator_module, "verify_naf_checkpoint"), \
-             patch("pixal3d_extension.multiview.run_multiview", return_value=output) as run:
-            self.assertEqual(generator.generate(capture, {"num_views": "4"}), output)
-        input_preflight.assert_called_once_with(capture.path, self.workspace, 4)
+             patch("pixal3d_extension.multiview_images.run_multiview_from_images", return_value=output) as run:
+            self.assertEqual(generator.generate(primary, params), output)
+        input_preflight.assert_called_once_with(primary, params["extra_image_paths"], self.workspace)
         bootstrap.assert_called_once_with(self.root)
         self.assertEqual(run.call_args.kwargs["naf_path"], self.naf_path)
 
@@ -147,15 +158,14 @@ class GeneratorNafBootstrapTests(unittest.TestCase):
 
     def test_direct_generate_surfaces_bootstrap_network_failure_before_runner(self):
         generator = self._generator("generate-mv")
-        capture = SimpleNamespace(kind="capture", path=self.workspace / "capture-manifest.json")
-        capture.path.write_text("{}")
+        primary, params = self._mv_input()
         with patch.object(generator, "_preflight_non_naf_shared_assets"), \
-             patch("pixal3d_extension.multiview_capture.validate_mv_capture"), \
+             patch("pixal3d_extension.multiview_images.validate_ordered_images"), \
              patch.object(generator_module, "bootstrap_auxiliary_assets", return_value={
             "status": "failed", "code": "auxiliary_bootstrap_failed", "error": "connection reset"
-        }), patch("pixal3d_extension.multiview.run_multiview") as run, \
+        }), patch("pixal3d_extension.multiview_images.run_multiview_from_images") as run, \
              self.assertRaisesRegex(RuntimeError, "naf_bootstrap_failed"):
-            generator.generate(capture)
+            generator.generate(primary, params)
         run.assert_not_called()
 
     def test_load_does_not_bootstrap_when_non_naf_shared_assets_are_missing(self):
@@ -227,12 +237,11 @@ class GeneratorNafBootstrapTests(unittest.TestCase):
     def test_direct_generation_pre_cancel_never_bootstraps_or_runs(self):
         cancelled = threading.Event()
         cancelled.set()
-        capture = SimpleNamespace(kind="capture", path=self.workspace / "capture-manifest.json")
-        capture.path.write_text("{}")
+        primary, mv_params = self._mv_input()
         scene_manifest = self.workspace / "scene-manifest.json"
         scene_manifest.write_text("{}")
         for node_id, input_value, params, runner_name in (
-            ("generate-mv", capture, None, "pixal3d_extension.multiview.run_multiview"),
+            ("generate-mv", primary, mv_params, "pixal3d_extension.multiview_images.run_multiview_from_images"),
             ("worldsculpt", None, {"scene_manifest_path": str(scene_manifest)}, "pixal3d_extension.worldsculpt.run_worldsculpt"),
         ):
             with self.subTest(node_id=node_id):
@@ -267,35 +276,33 @@ class GeneratorNafBootstrapTests(unittest.TestCase):
                 run.assert_not_called()
                 self.assertFalse(self.naf_path.exists())
 
-    def test_mv_missing_or_invalid_capture_never_bootstraps_or_creates_naf(self):
-        for label, capture_path in (
-            ("missing", self.workspace / "missing" / "capture-manifest.json"),
-            ("invalid", self.workspace / "invalid" / "capture-manifest.json"),
+    def test_mv_missing_or_invalid_extra_image_never_bootstraps_or_creates_naf(self):
+        primary, _ = self._mv_input()
+        for label, image_path in (
+            ("missing", self.workspace / "missing.png"),
+            ("invalid", self.workspace / "invalid.png"),
         ):
             with self.subTest(label=label):
                 self.naf_path.unlink(missing_ok=True)
                 if label == "invalid":
-                    capture_path.parent.mkdir()
-                    capture_path.write_text("{}")
+                    image_path.write_text("not-image")
                 generator = self._generator("generate-mv")
-                capture = SimpleNamespace(kind="capture", path=capture_path)
                 with patch.object(generator, "_preflight_non_naf_shared_assets"), \
                      patch.object(generator_module, "bootstrap_auxiliary_assets", side_effect=self._successful_bootstrap) as bootstrap, \
                      patch.object(generator_module, "verify_naf_checkpoint"), \
-                     patch("pixal3d_extension.multiview.run_multiview", wraps=__import__("pixal3d_extension.multiview", fromlist=["run_multiview"]).run_multiview) as run, \
+                     patch("pixal3d_extension.multiview_images.run_multiview_from_images") as run, \
                      self.assertRaises((FileNotFoundError, ValueError)):
-                    generator.generate(capture, {"num_views": "4"})
+                    generator.generate(primary, {"extra_image_paths": [str(image_path)]})
                 bootstrap.assert_not_called()
                 run.assert_not_called()
                 self.assertFalse(self.naf_path.exists())
 
     def test_direct_generation_rechecks_cancellation_immediately_after_bootstrap(self):
-        capture = SimpleNamespace(kind="capture", path=self.workspace / "capture-manifest.json")
-        capture.path.write_text("{}")
+        primary, mv_params = self._mv_input()
         scene_manifest = self.workspace / "scene-manifest.json"
         scene_manifest.write_text("{}")
         for node_id, input_value, params, runner_name in (
-            ("generate-mv", capture, None, "pixal3d_extension.multiview.run_multiview"),
+            ("generate-mv", primary, mv_params, "pixal3d_extension.multiview_images.run_multiview_from_images"),
             ("worldsculpt", None, {"scene_manifest_path": str(scene_manifest)}, "pixal3d_extension.worldsculpt.run_worldsculpt"),
         ):
             with self.subTest(node_id=node_id):
@@ -309,7 +316,7 @@ class GeneratorNafBootstrapTests(unittest.TestCase):
                     return result
 
                 with patch.object(generator, "_preflight_non_naf_shared_assets"), \
-                     patch("pixal3d_extension.multiview_capture.validate_mv_capture"), \
+                     patch("pixal3d_extension.multiview_images.validate_ordered_images"), \
                      patch("pixal3d_extension.worldsculpt.resolve_scene_manifest", return_value=self.workspace), \
                      patch.object(generator_module, "bootstrap_auxiliary_assets", side_effect=bootstrap_then_cancel) as bootstrap, \
                      patch.object(generator_module, "verify_naf_checkpoint"), \

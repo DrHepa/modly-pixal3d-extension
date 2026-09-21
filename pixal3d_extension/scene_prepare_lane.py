@@ -47,6 +47,22 @@ def capability() -> dict:
     }
 
 
+def da3_capability() -> dict:
+    machine = platform.machine().lower()
+    supported = sys.platform == "linux" and machine in {"aarch64", "arm64"}
+    return {
+        "supported": supported,
+        "status": "supported" if supported else "unsupported-platform",
+        "platform": sys.platform,
+        "architecture": machine,
+        "reason": (
+            "Pixal3D MV DA3 camera calibration supports Linux ARM64 with Python 3.12 and CUDA >=12.6."
+            if supported
+            else f"Pixal3D MV DA3 camera calibration is unavailable on {sys.platform}/{machine}."
+        ),
+    }
+
+
 def python_path(root: Path = ROOT) -> Path:
     return Path(root) / VENV_NAME / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
@@ -263,6 +279,64 @@ def _runtime_probe_code() -> str:
         "'cuda':torch.version.cuda,'cuda_available':torch.cuda.is_available(),"
         "'sam3_revision':rev('sam3'),'da3_revision':rev('depth-anything-3')}))"
     )
+
+
+def _da3_runtime_probe_code() -> str:
+    return (
+        "import importlib.metadata as md,json,sys,torch,cv2,numpy\n"
+        "from pixal3d_extension.da3_official_adapter import load_depth_anything3\n"
+        "load_depth_anything3()\n"
+        "d=json.loads(md.distribution('depth-anything-3').read_text('direct_url.json'))\n"
+        "print(json.dumps({'python':list(sys.version_info[:2]),'torch':torch.__version__,"
+        "'cuda':torch.version.cuda,'cuda_available':torch.cuda.is_available(),"
+        "'da3_revision':d.get('vcs_info',{}).get('commit_id')}))"
+    )
+
+
+def validate_da3_runtime(root: Path = ROOT) -> dict:
+    """Validate only the DA3 capability used by ordered Pixal3D MV images."""
+    root = Path(root).resolve()
+    support = da3_capability()
+    if not support["supported"]:
+        raise RuntimeError(support["reason"])
+    interpreter = python_path(root)
+    owned, custody = _interpreter_custody(root)
+    if not owned:
+        raise RuntimeError("DA3 Python is missing or unsafe; run Repair: " + json.dumps(custody, sort_keys=True))
+    metadata = _source_metadata(root)
+    direct = metadata.get("depth-anything-3") if isinstance(metadata, dict) else None
+    vcs = direct.get("vcs_info") if isinstance(direct, dict) else None
+    url = _normalize_repository_url(direct.get("url")) if isinstance(direct, dict) else None
+    requested = vcs.get("requested_revision") if isinstance(vcs, dict) else None
+    exact = (
+        isinstance(vcs, dict)
+        and vcs.get("vcs") == "git"
+        and url == _normalize_repository_url(DA3_REPOSITORY)
+        and vcs.get("commit_id") == DA3_SOURCE_REVISION
+        and requested in (None, "", DA3_SOURCE_REVISION)
+    )
+    if not exact:
+        raise RuntimeError("Pinned DA3 source metadata is missing or mismatched; run Repair")
+    completed = subprocess.run(
+        [str(interpreter), "-c", _da3_runtime_probe_code()], cwd=root, capture_output=True, text=True,
+    )
+    if completed.returncode:
+        raise RuntimeError("DA3 runtime imports failed: " + completed.stderr[-2000:])
+    info = json.loads(completed.stdout)
+    if info.get("python") != [3, 12]:
+        raise RuntimeError("DA3 runtime must use Python 3.12")
+    try:
+        torch_major, torch_minor = (int(part) for part in str(info.get("torch", "0.0")).split("+")[0].split(".")[:2])
+    except ValueError as exc:
+        raise RuntimeError("DA3 torch version is unreadable") from exc
+    if (torch_major, torch_minor) < (2, 7) or not info.get("cuda") or not info.get("cuda_available"):
+        raise RuntimeError("DA3 camera estimation requires PyTorch >=2.7 and CUDA >=12.6")
+    cuda = tuple(int(part) for part in str(info["cuda"]).split(".")[:2])
+    if cuda < (12, 6):
+        raise RuntimeError("DA3 camera estimation requires CUDA >=12.6")
+    if info.get("da3_revision") != DA3_SOURCE_REVISION:
+        raise RuntimeError("DA3 official source revision drift; run Repair")
+    return {"status": "ready", "venv": str(root / VENV_NAME), "source_metadata": direct, **info}
 
 
 def validate_runtime(root: Path = ROOT) -> dict:

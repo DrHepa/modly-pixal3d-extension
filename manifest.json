@@ -3,10 +3,10 @@
   "kind": "model",
   "type": "model",
   "name": "Pixal3D",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "source": "https://github.com/DrHepa/modly-pixal3d-extension",
   "author": "DrHepa",
-  "description": "Pixal3D image, posed-view, and WorldSculpt workflows with clean-room capture-to-scene preparation using official SAM3 and DA3 Base runtimes.",
+  "description": "Pixal3D single-image, multi-image, and WorldSculpt workflows with official DA3 camera estimation and clean-room capture-to-scene preparation.",
   "generator_class": "Pixal3DGenerator",
   "model_identity": {
     "source_model": "TencentARC/Pixal3D",
@@ -130,9 +130,21 @@
     },
     {
       "id": "generate-mv",
-      "name": "Calibrated Capture to 3D",
+      "name": "Multi-Image to 3D",
       "type": "model.generate",
-      "input": "capture",
+      "input": "image",
+      "inputs": [
+        "image",
+        "image",
+        "image",
+        "image"
+      ],
+      "input_labels": [
+        "Primary view",
+        "View 2",
+        "View 3",
+        "View 4"
+      ],
       "output": "mesh",
       "params_schema": [
         {
@@ -177,20 +189,12 @@
           "min": -1,
           "max": 4294967295,
           "tooltip": "Seed for reproducibility. -1 uses a random seed."
-        },
-        {
-          "id": "num_views",
-          "label": "Views to Use",
-          "type": "int",
-          "default": 4,
-          "min": 1,
-          "max": 16,
-          "tooltip": "Use the first N ordered capture frames with calibrated cameras; frame 0 is the canonical front view."
         }
       ],
       "weight_groups": [
         "pixal3d-base",
-        "pixal3d-mv"
+        "pixal3d-mv",
+        "da3-base"
       ]
     },
     {
@@ -475,7 +479,8 @@
       "models/pixal3d/_shared/pixal3d-base/auxiliary/rmbg",
       "models/pixal3d/_shared/pixal3d-base/auxiliary/moge",
       "models/pixal3d/auxiliary/naf",
-      "models/pixal3d/_shared/pixal3d-mv"
+      "models/pixal3d/_shared/pixal3d-mv",
+      "models/pixal3d/_shared/da3-base"
     ]
   },
   "entrypoints": {

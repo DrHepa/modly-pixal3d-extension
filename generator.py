@@ -96,6 +96,12 @@ class Pixal3DGenerator:
             raise RuntimeError("Scene preparation requires Modly shared groups sam3 and da3-base")
         return Path(shared_dirs[SAM3_GROUP]), Path(shared_dirs[DA3_GROUP])
 
+    def _da3_source(self) -> Path:
+        shared_dirs = getattr(self, "shared_model_dirs", None)
+        if not isinstance(shared_dirs, dict) or DA3_GROUP not in shared_dirs:
+            raise RuntimeError("Pixal3D MV automatic camera calibration requires the Modly shared group da3-base")
+        return Path(shared_dirs[DA3_GROUP])
+
     def _single_view_compatibility_error(self) -> dict | None:
         from pixal3d_extension.readiness import single_view_transformers_compatibility
 
@@ -117,12 +123,16 @@ class Pixal3DGenerator:
         node_id = self._effective_node_id()
         if node_id == "generate-mv":
             from pixal3d_extension.multiview import validate_mv_pipeline_config
+            from pixal3d_extension.scene_prepare import validate_da3_weights
+            from pixal3d_extension.scene_prepare_lane import validate_da3_runtime
 
             try:
                 validate_mv_pipeline_config(self._model_source(), self._base_source())
+                validate_da3_weights(self._da3_source())
+                validate_da3_runtime(Path(__file__).resolve().parent)
             except (OSError, UnicodeError, ValueError, RuntimeError) as exc:
                 raise RuntimeError(
-                    "mv_assets_missing: download or repair the Pixal3D base and MV shared groups in Modly Models UI: "
+                    "mv_assets_missing: download or repair the Pixal3D base, MV, and DA3 Base shared groups in Modly Models UI: "
                     f"{exc}"
                 ) from exc
             return
@@ -268,8 +278,6 @@ class Pixal3DGenerator:
         ]
         if self._effective_node_id() == "generate-mv":
             schema = [item for item in schema if item["id"] not in {"manual_fov", "texture_size"}]
-            schema.append({"id": "num_views", "label": "Views to Use", "type": "int", "default": 4, "min": 1, "max": 16,
-                           "tooltip": "Use the first N ordered capture frames with calibrated cameras; frame 0 is the canonical front view."})
         return schema
 
     def readiness_status(self) -> dict:
@@ -310,21 +318,32 @@ class Pixal3DGenerator:
             return {"ok": True, "machine_code": "ready", "reason": "Local assets and imports present; GPU inference untested."}
         if self._effective_node_id() == "generate-mv":
             from pixal3d_extension.multiview import missing_mv_assets, mv_runtime_available
+            from pixal3d_extension.scene_prepare import validate_da3_weights
+            from pixal3d_extension.scene_prepare_lane import da3_capability, validate_da3_runtime
 
             try:
                 model_root = self._model_source()
                 base_root = self._base_source()
+                da3_root = self._da3_source()
             except RuntimeError as exc:
                 return {"ok": False, "machine_code": "mv_shared_groups_unavailable", "reason": str(exc)}
             modly_home = derive_modly_home(model_dir=self.model_dir, workspace_dir=self.workspace_dir)
             naf_path = (modly_home / "models/pixal3d/auxiliary/naf/naf_release.pth") if modly_home else Path("__missing_naf__")
             missing = missing_mv_assets(model_root, base_root, naf_path)
+            support = da3_capability()
+            if not support["supported"]:
+                return {"ok": False, "machine_code": "mv_calibration_unsupported_platform", "reason": support["reason"]}
+            try:
+                validate_da3_weights(da3_root)
+                validate_da3_runtime(Path(__file__).resolve().parent)
+            except (OSError, ValueError, RuntimeError) as exc:
+                missing.append(f"DA3 camera calibration: {exc}")
             runtime_ready = mv_runtime_available()
             return {"ok": not missing and runtime_ready,
                     "machine_code": "mv_assets_missing" if missing else "mv_runtime_missing" if not runtime_ready else "ready",
                     "reason": "Download the Pixal3D MV group and provision NAF before generation." if missing else
                     "An exact-stack Pixal3D MV Python wheel is required; the published wheelhouse is single-view only." if not runtime_ready else
-                    "Posed-view assets and Python module found; live GPU inference remains to be validated.",
+                    "Multi-image assets, DA3 camera calibration, and Python module found; live GPU inference remains to be validated.",
                     "missing": missing}
         compatibility_error = self._single_view_compatibility_error()
         if compatibility_error is not None:
@@ -461,36 +480,32 @@ class Pixal3DGenerator:
                 face_budget=params.get("face_budget", 1000000),
                 progress_cb=progress_cb, cancel_event=cancel_evt)
         if self._effective_node_id() == "generate-mv":
-            from pixal3d_extension.multiview import run_multiview
+            from pixal3d_extension.multiview_images import run_multiview_from_images, validate_ordered_images
 
-            if isinstance(image_or_job, (bytes, bytearray)):
-                raise ValueError("Pixal3D MV requires a typed capture manifest, not image bytes; use Modly /from-artifact")
-            if getattr(image_or_job, "kind", "capture") != "capture":
-                raise ValueError("Pixal3D MV requires capture input, not a scene manifest")
-            capture_path = getattr(image_or_job, "path", image_or_job)
-            if not isinstance(capture_path, (str, Path)):
-                raise ValueError("Pixal3D MV requires capture_manifest_path as its typed input")
-            capture_path = Path(capture_path)
-            if capture_path.name != "capture-manifest.json":
-                raise ValueError("Pixal3D MV requires capture-manifest.json; migrate legacy posed scenes to calibrated captures")
+            if not isinstance(image_or_job, (bytes, bytearray)) or not image_or_job:
+                raise ValueError("Pixal3D MV requires a primary image and at least one additional connected image")
             if self.workspace_dir is None:
-                raise RuntimeError("Modly workspace directory is required for capture input")
+                raise RuntimeError("Modly workspace directory is required for multi-image input")
+            values = dict(params or {})
+            for reserved in ("capture_manifest_path", "scene_manifest_path", "input_image", "primary_image_path", "num_views"):
+                if reserved in values:
+                    raise ValueError(f"Pixal3D MV reserved transport parameter is not allowed: {reserved}")
+            extra_image_paths = values.pop("extra_image_paths", None)
+            if not isinstance(extra_image_paths, list):
+                raise ValueError("Pixal3D MV requires extra_image_paths from Modly's ordered multiple-image ports")
             self._raise_if_generation_cancelled(cancel_evt)
-            # Match run_multiview's parameter normalization, then validate the
-            # complete capture without creating outputs before any bootstrap.
-            from pixal3d_extension.multiview_capture import validate_mv_capture
-
-            num_views = int((params or {}).get("num_views", 4))
-            validate_mv_capture(capture_path, self.workspace_dir, num_views)
+            validate_ordered_images(bytes(image_or_job), extra_image_paths, self.workspace_dir)
             mv_root = self._model_source()
             base_root = self._base_source()
+            da3_root = self._da3_source()
             naf_path = self._prepare_generation_assets(cancel_evt)
             output_dir = getattr(self, "outputs_dir", None) or self.workspace_dir / "Workflows"
-            return run_multiview(capture_manifest_path=capture_path, workspace_dir=self.workspace_dir,
-                                 mv_root=mv_root, base_root=base_root,
-                                 naf_path=naf_path,
-                                 output_dir=output_dir, params=params or {},
-                                 progress_cb=progress_cb, cancel_event=cancel_evt)
+            return run_multiview_from_images(
+                primary_image_bytes=bytes(image_or_job), extra_image_paths=extra_image_paths,
+                workspace_dir=self.workspace_dir, output_dir=output_dir, da3_root=da3_root,
+                mv_root=mv_root, base_root=base_root, naf_path=naf_path, params=values,
+                progress_cb=progress_cb, cancel_event=cancel_evt,
+            )
         compatibility_error = self._single_view_compatibility_error()
         if compatibility_error is not None:
             raise RuntimeError(f"{compatibility_error['code']}: {compatibility_error['message']}")
