@@ -22,6 +22,16 @@ from .scene_prepare_lane import python_path, validate_da3_runtime
 MAX_IMAGE_BYTES = 64 * 1024 * 1024
 MAX_IMAGE_PIXELS = 100_000_000
 SUPPORTED_FORMATS = {"PNG", "JPEG", "WEBP"}
+VIEW_ROLE_AZIMUTHS = {
+    "front": 0,
+    "front-right": 45,
+    "right": 90,
+    "back-right": 135,
+    "back": 180,
+    "back-left": 225,
+    "left": 270,
+    "front-left": 315,
+}
 FILE_SHARE_READ = 0x00000001
 FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
@@ -283,6 +293,63 @@ def _stage_pngs(images: list[ValidatedImage], target: Path) -> list[Path]:
     return paths
 
 
+def _apply_declared_view_roles(
+    images: list[ValidatedImage],
+    extra_image_paths: list[str | None],
+    params: dict[str, Any],
+) -> tuple[list[ValidatedImage], list[dict[str, Any]] | None]:
+    layout = params.get("view_layout", "auto")
+    if layout == "auto":
+        return images, None
+    if layout != "declared_roles":
+        raise ValueError("view_layout must be auto or declared_roles")
+
+    connected_slots = [1] + [
+        slot for slot, path in enumerate(extra_image_paths, start=2) if path is not None
+    ]
+    default_roles = {1: "front", 2: "right", 3: "back", 4: "left"}
+    records: list[tuple[ValidatedImage, dict[str, Any]]] = []
+    for slot, image in zip(connected_slots, images, strict=True):
+        handle = "image" if slot == 1 else f"image_{slot}"
+        role_key = "image_role" if slot == 1 else f"image_{slot}_role"
+        role = params.get(role_key, default_roles[slot])
+        if role not in VIEW_ROLE_AZIMUTHS:
+            raise ValueError(f"{role_key} must declare a supported view role")
+        records.append((image, {
+            "slot": slot,
+            "handle": handle,
+            "role": role,
+            "azimuthDegrees": VIEW_ROLE_AZIMUTHS[role],
+        }))
+
+    roles = [record[1]["role"] for record in records]
+    if len(set(roles)) != len(roles):
+        raise ValueError("connected declared view roles must be unique")
+    if roles.count("front") != 1:
+        raise ValueError("connected declared view roles must contain exactly one front")
+
+    records.sort(key=lambda record: record[1]["azimuthDegrees"])
+    return [record[0] for record in records], [record[1] for record in records]
+
+
+def _annotate_declared_role_provenance(
+    transforms_path: Path, role_provenance: list[dict[str, Any]],
+) -> None:
+    transforms = json.loads(transforms_path.read_text(encoding="utf-8"))
+    provenance = transforms.get("provenance")
+    if not isinstance(provenance, dict):
+        provenance = {}
+    provenance.update({
+        "cameraEstimator": "DA3 Base",
+        "viewLayout": "declared_roles",
+        "viewRoles": role_provenance,
+    })
+    transforms["provenance"] = provenance
+    transforms_path.write_text(
+        json.dumps(transforms, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
 def _estimate_cameras(
     frame_paths: list[Path], da3_root: Path, staging: Path, extension_root: Path,
     *, progress_cb=None, cancel_event=None,
@@ -322,7 +389,7 @@ def _estimate_cameras(
 
 
 def run_multiview_from_images(
-    *, primary_image_bytes: bytes, extra_image_paths: list[str], workspace_dir: str | Path,
+    *, primary_image_bytes: bytes, extra_image_paths: list[str | None], workspace_dir: str | Path,
     output_dir: str | Path, da3_root: str | Path, mv_root: str | Path, base_root: str | Path,
     naf_path: str | Path, params: dict[str, Any], progress_cb: Callable[[int, str], None] | None = None,
     cancel_event: Any | None = None, inference_runner: Callable[..., Any] | None = None,
@@ -331,6 +398,7 @@ def run_multiview_from_images(
 
     _check_cancel(cancel_event)
     images = validate_ordered_images(primary_image_bytes, extra_image_paths, workspace_dir)
+    images, role_provenance = _apply_declared_view_roles(images, extra_image_paths, params)
     _check_cancel(cancel_event)
     validate_da3_weights(Path(da3_root))
     extension_root = Path(__file__).resolve().parent.parent
@@ -339,19 +407,27 @@ def run_multiview_from_images(
     workspace = Path(workspace_dir).resolve(strict=True)
     output = validate_workspace_output_parent(Path(output_dir), workspace, "MV output directory")
     output.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=".pixal3d-mv-images-", dir=output) as directory:
+    with tempfile.TemporaryDirectory(prefix=".pixal3d-mv-images-", dir=workspace) as directory:
         staging = Path(directory)
         frames = _stage_pngs(images, staging)
         _check_cancel(cancel_event)
         if progress_cb:
             progress_cb(3, "Estimating consistent cameras with DA3 Base")
-        _estimate_cameras(
+        transforms_path = _estimate_cameras(
             frames, Path(da3_root), staging, extension_root,
             progress_cb=progress_cb, cancel_event=cancel_event,
         )
+        provenance: dict[str, Any] = {
+            "source": "ordered Modly image ports", "cameraEstimator": "DA3 Base",
+        }
+        if role_provenance is not None:
+            _annotate_declared_role_provenance(transforms_path, role_provenance)
+            provenance.update({
+                "viewLayout": "declared_roles", "viewRoles": role_provenance,
+            })
         (staging / "scene-manifest.json").write_text(json.dumps({
             "schema": "modly.scene-manifest.v1", "sceneRoot": ".",
-            "provenance": {"source": "ordered Modly image ports", "cameraEstimator": "DA3 Base"},
+            "provenance": provenance,
         }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         _check_cancel(cancel_event)
         from .multiview import run_multiview

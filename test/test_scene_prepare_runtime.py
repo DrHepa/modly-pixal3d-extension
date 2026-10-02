@@ -18,6 +18,7 @@ from pixal3d_extension.scene_prepare import (
     validate_scene_prepare_weights,
     worker_command,
 )
+from pixal3d_extension.scene_prepare_contract import normalize_annotated_scene
 from pixal3d_extension.da3_official_adapter import load_depth_anything3
 
 
@@ -188,6 +189,79 @@ class ScenePrepareRuntimeTests(unittest.TestCase):
         after = {path.relative_to(workspace) for path in workspace.rglob("*")}
         self.assertEqual(before, after)
         self.assertFalse((outside / "new-output").exists())
+
+    def test_scene_worker_job_cache_and_staging_are_outside_workflows(self):
+        workspace = self.root / "workspace"
+        capture = workspace / "Captures" / "capture"
+        capture.mkdir(parents=True)
+        frame = capture / "frame.png"
+        frame.write_bytes(b"frame")
+        manifest = capture / "capture-manifest.json"
+        manifest.write_text(json.dumps({
+            "schema": "modly.capture-manifest.v1", "kind": "frames", "captureRoot": ".",
+            "frames": [{"index": 0, "path": "frame.png", "byteSize": 5, "width": 1, "height": 1}],
+            "provenance": {"source": "test", "ordering": "manifest-index"},
+        }), encoding="utf-8")
+        output = workspace / "Workflows"
+        final_manifest = workspace / "private-result" / "scene-manifest.json"
+        final_manifest.parent.mkdir(parents=True)
+        final_manifest.write_text("{}", encoding="utf-8")
+        observed = {}
+
+        def worker(command, *, env, **_kwargs):
+            job_path = Path(command[-1])
+            observed["job_path"] = job_path
+            observed["job"] = json.loads(job_path.read_text(encoding="utf-8"))
+            observed["cache"] = Path(env["HF_HOME"])
+            return final_manifest
+
+        with patch("pixal3d_extension.scene_prepare.validate_scene_prepare_weights"), \
+             patch("pixal3d_extension.scene_prepare.validate_runtime"), \
+             patch("pixal3d_extension.scene_prepare.resolve_scene_manifest", return_value=final_manifest.parent), \
+             patch("pixal3d_extension.scene_prepare.validate_scene"), \
+             patch("pixal3d_extension.scene_prepare._run_worker", side_effect=worker):
+            result = run_scene_from_estimates(
+                capture_input=manifest, workspace_dir=workspace, output_dir=output,
+                sam_root=self.sam, da3_root=self.da3, params={},
+            )
+
+        self.assertEqual(result, final_manifest)
+        for path in (observed["job_path"], observed["cache"], Path(observed["job"]["staging_dir"])):
+            self.assertTrue(path.is_relative_to(workspace))
+            self.assertFalse(path.is_relative_to(output))
+        self.assertFalse(observed["job_path"].exists())
+        self.assertEqual(list(output.iterdir()), [])
+
+    def test_normalize_private_staging_leaves_only_canonical_scene_assets(self):
+        workspace = self.root / "workspace"
+        source = workspace / "source-scene"
+        output = workspace / "Workflows"
+        (source / "masks" / "obj01").mkdir(parents=True)
+        (source / "views").mkdir()
+        (source / "views" / "front.png").write_bytes(b"frame")
+        (source / "masks" / "obj01" / "0000.png").write_bytes(b"mask")
+        transforms = {
+            "frames": [{"file_path": "views/front.png"}],
+            "instances": [{"pass_index": 1}],
+            "provenance": {"scale": {"mode": "relative"}},
+        }
+        (source / "transforms.json").write_text(json.dumps(transforms), encoding="utf-8")
+        manifest = source / "scene-manifest.json"
+        manifest.write_text(json.dumps({"schema": "modly.scene-manifest.v1", "sceneRoot": "."}), encoding="utf-8")
+
+        with patch("pixal3d_extension.scene_prepare_contract.resolve_scene_manifest", return_value=source), \
+             patch("pixal3d_extension.scene_prepare_contract.validate_scene", return_value=("obj01",)):
+            result = normalize_annotated_scene(manifest, workspace, output)
+
+        self.assertEqual({path.name for path in output.iterdir()}, {result.parent.name})
+        self.assertEqual(
+            {path.relative_to(result.parent).as_posix() for path in result.parent.rglob("*") if path.is_file()},
+            {"0000.png", "masks/obj01/0000.png", "transforms.json", "scene-manifest.json"},
+        )
+        normalized = json.loads((result.parent / "transforms.json").read_text(encoding="utf-8"))
+        self.assertEqual(normalized["frames"][0]["file_path"], "0000.png")
+        runtime_root = workspace / ".pixal3d-runtime" / "scene-prep"
+        self.assertFalse(any(path.name.startswith(".scene-normalize-") for path in runtime_root.rglob("*")))
 
 
 if __name__ == "__main__":

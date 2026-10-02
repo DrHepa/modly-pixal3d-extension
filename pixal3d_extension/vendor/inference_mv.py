@@ -288,9 +288,13 @@ def run_inference(
     config_file: str = CONFIG_FILE,
     low_vram: bool = False,
     resolution: int = -1,
+    texture_size: int = 1024,
     progress_cb=None,
     cancel_event=None,
 ):
+    if texture_size not in (1024, 2048):
+        raise ValueError("texture_size must be 1024 or 2048")
+
     def stage(percent, label):
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("Pixal3D MV generation cancelled")
@@ -343,7 +347,7 @@ def run_inference(
         vertices=mesh.vertices, faces=mesh.faces, attr_volume=mesh.attrs,
         coords=mesh.coords, attr_layout=pipeline.pbr_attr_layout,
         grid_size=res, aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-        decimation_target=1000000, texture_size=4096,
+        decimation_target=1000000, texture_size=texture_size,
         remesh=True, remesh_band=1, remesh_project=0, use_tqdm=True,
     )
 
@@ -377,6 +381,8 @@ if __name__ == "__main__":
                         help="Enable low-VRAM mode: models stay on CPU and are loaded to GPU on-demand per stage.")
     parser.add_argument("--resolution", type=int, default=-1,
                         help="Pipeline resolution (1024 or 1536). Default: 1024 if --low_vram, else 1536.")
+    parser.add_argument("--texture_size", type=int, choices=(1024, 2048), default=1024,
+                        help="Final GLB texture atlas size (default: 1024).")
 
     args = parser.parse_args()
 
@@ -389,4 +395,5 @@ if __name__ == "__main__":
         config_file=args.config_file,
         low_vram=args.low_vram,
         resolution=args.resolution,
+        texture_size=args.texture_size,
     )

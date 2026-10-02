@@ -10,7 +10,11 @@ import tempfile
 import threading
 from pathlib import Path
 
-from .scene_prepare_contract import load_capture_manifest, validate_workspace_output_parent
+from .scene_prepare_contract import (
+    load_capture_manifest,
+    private_scene_runtime_root,
+    validate_workspace_output_parent,
+)
 from .scene_prepare_lane import python_path, validate_runtime
 from .process_tree import popen_process_group_kwargs, terminate_process_tree
 from .worldsculpt import resolve_scene_manifest
@@ -186,8 +190,15 @@ def _run_scene_from_capture(
     destination = destination.resolve(strict=True)
     if not destination.is_relative_to(workspace):
         raise ValueError("Scene-prep output directory must be inside the workspace")
-    cache = destination / ".scene-prep-cache"
-    cache.mkdir(exist_ok=True)
+    runtime_root = private_scene_runtime_root(workspace)
+    if (destination == runtime_root or destination.is_relative_to(runtime_root)
+            or runtime_root.is_relative_to(destination)):
+        raise ValueError("Scene-prep output directory must not overlap private runtime state")
+    cache = runtime_root / "cache"
+    jobs = runtime_root / "jobs"
+    staging = runtime_root / "worker-staging"
+    for directory in (cache, jobs, staging):
+        directory.mkdir(exist_ok=True)
     job = {
         "schema": "modly.scene-prep-job.v1",
         "capture_manifest_path": str(capture_manifest),
@@ -195,9 +206,12 @@ def _run_scene_from_capture(
         "output_dir": str(destination),
         "sam_root": str(Path(sam_root).resolve(strict=True)),
         "da3_root": str(Path(da3_root).resolve(strict=True)),
+        "staging_dir": str(staging),
         "params": dict(params),
     }
-    handle = tempfile.NamedTemporaryFile("w", prefix=".scene-prep-job-", suffix=".json", dir=destination, delete=False, encoding="utf-8")
+    handle = tempfile.NamedTemporaryFile(
+        "w", prefix=".scene-prep-job-", suffix=".json", dir=jobs, delete=False, encoding="utf-8"
+    )
     job_path = Path(handle.name)
     try:
         json.dump(job, handle, sort_keys=True)
@@ -251,7 +265,7 @@ def run_scene_from_images(
     output = validate_workspace_output_parent(output_dir, workspace, "scene-prep output directory")
     output.mkdir(parents=True, exist_ok=True)
     connected_ports = [1, *[index for index, value in enumerate(extra_image_paths, start=2) if value is not None]]
-    with tempfile.TemporaryDirectory(prefix=".scene-images-", dir=output) as directory:
+    with tempfile.TemporaryDirectory(prefix=".scene-images-", dir=workspace) as directory:
         staging = Path(directory)
         frame_paths = _stage_pngs(images, staging)
         if cancel_event is not None and cancel_event.is_set():
@@ -317,7 +331,7 @@ def run_scene_from_video(
     output = validate_workspace_output_parent(output_dir, workspace, "scene-prep output directory")
     output.mkdir(parents=True, exist_ok=True)
     extension_root = Path(__file__).resolve().parent.parent
-    with tempfile.TemporaryDirectory(prefix=".scene-video-", dir=output) as directory:
+    with tempfile.TemporaryDirectory(prefix=".scene-video-", dir=workspace) as directory:
         staging = Path(directory)
         staged_video = stage_video_input(video_input, workspace, staging, cancel_event)
         validate_scene_prepare_weights(sam_root, da3_root)

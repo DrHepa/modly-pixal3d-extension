@@ -82,10 +82,14 @@ public contracts; annotated-scene normalization remains weightless.
 
 ### Prepare Scene from Images (`image x 8 -> scene`)
 
-`scene-from-images` declares eight fixed positional image ports named **Primary
-view** and **View 2** through **View 8**. At least two images must be connected.
-Modly supplies the first as bytes and the other seven as ordered
-`extra_image_paths`; `null` holes are ignored without reordering later ports.
+`scene-from-images` declares eight fixed positional image ports. Its supported
+`input_contract` keeps the canonical handles `image`, `image_2`, …, `image_8`,
+labels them **Primary view** and **View 2** through **View 8**, and marks only
+the primary port as required; all secondary ports are optional. The legacy
+string `inputs` array is retained for compatible host discovery. At least two
+images must be connected for scene preparation to run. Modly supplies the first
+as bytes and the other seven as ordered `extra_image_paths`; `null` holes are
+ignored without reordering later ports.
 Eight is the practical UI bound: it gives DA3 and SAM3 useful multiview coverage
 without exposing the worker's much larger video-frame limit as an unwieldy node.
 Images must be unique, workspace-owned PNG/JPEG/WebP files with matching
@@ -210,8 +214,11 @@ includes typed-video PR #358. Existing datasets can use **Normalize Annotated Sc
 Connect any scene output to **WorldSculpt**. For Pixal3D MV, connect two to four
 image-producing nodes to **Multi-Image to 3D** in declared port order. The first
 connected port is the primary view. Modly forwards it as image bytes and forwards
-the remaining connected images as the ordered `extra_image_paths` transport
-field. WorldSculpt remains a separate scene-input model.
+the remaining connected images as multipart bytes with their physical slot
+indexes. The API places those bytes in a mode-0700 job-owned directory inside
+the workspace and injects only the resulting private paths into
+`extra_image_paths`; it removes that custody directory on success, error, or
+cancellation. WorldSculpt remains a separate scene-input model.
 
 ## Outputs
 
@@ -284,14 +291,27 @@ The extension preserves Pixal3D's exported GLB orientation. Do not apply a fixed
 
 `generate-mv` is an `image,image,image,image -> mesh` node using Modly's
 existing ordered multiple-image manifest contract. `input: "image"` remains as
-the parser-compatible fallback; `inputs` declares four generic image ports and
-`input_labels` names them **Primary view**, **View 2**, **View 3**, and **View
-4** on current upstream main; not every private or older fork renders those
-labels. Connect at least two and at most four images. Modly may serialize an
-unconnected intermediate port as a `null` entry in `extra_image_paths`. Those
-null gaps are ignored, while connected views retain port order. Any non-null
-entry must be a workspace image path; the extension does not infer named-port
-identity beyond that positional order.
+the parser-compatible fallback; the legacy string `inputs` array remains for
+compatible host discovery. The supported `input_contract` preserves canonical
+handles `image`, `image_2`, `image_3`, and `image_4`, labels them **Primary
+view**, **View 2**, **View 3**, and **View 4**, and marks only the primary port
+as required; all secondary ports are optional. Connect at least two and at most
+four images. Modly may serialize an unconnected intermediate port as a `null`
+entry in the private
+`extra_image_paths` runner contract. Those null gaps are ignored, while
+connected views retain port order. New UI runs upload every secondary image as
+bytes, so an external source path never crosses the API boundary. Legacy
+headless callers may still provide `extra_image_paths`, but every non-null entry
+must already be a workspace image path.
+
+`view_layout=auto` is the compatibility default and preserves connected input
+order. `view_layout=declared_roles` enables per-physical-slot roles from front,
+front-right, right, back-right, back, back-left, left, and front-left. Only
+connected slots participate; roles must be unique and exactly one connected
+slot must be front. The adapter reorders staged image records by declared
+azimuth with front first, then records slot/handle/role provenance in its
+private transforms and scene manifest. DA3 still estimates every camera matrix;
+the role declarations never synthesize or replace camera poses.
 
 This node is **TencentARC Pixal3D multi-view**, not WorldSculpt. It requires the
 host-managed `pixal3d-base`, `pixal3d-mv`, and `da3-base` shared groups. DA3 Base
@@ -315,6 +335,12 @@ groups are downloaded or repaired through Modly Models UI. NAF is the one
 intentional auxiliary that may bootstrap atomically on first generation when
 it is absent. A corrupt NAF file is never replaced automatically; the documented
 manual bootstrap remains the recovery fallback.
+
+The MV node exposes the same final texture-atlas selector as the base node:
+1024 (default) or 2048. The selected value is passed explicitly through the MV
+runner into `o_voxel.postprocess.to_glb`. The tracked base runtime also scopes a
+cross-platform exporter override, because the installed Linux upstream path
+does not consume the older environment-only compatibility setting.
 
 The low-level Python `run_multiview(scene_manifest_path=...)` and calibrated
 capture adapter remain available for internal/backward-compatible callers with

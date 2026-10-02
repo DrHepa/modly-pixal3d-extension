@@ -283,22 +283,35 @@ def validate_output(case_root: Path, eligible: tuple[str, ...]) -> Path:
         if isinstance(transform, torch.Tensor):
             transform = transform.numpy()
         _matrix(transform, f"{name} metric transform")
-    glb = _local_file(case_root, case_root / "_scene" / "scene.glb", "scene.glb")
-    if glb.stat().st_mtime_ns < marker.stat().st_mtime_ns:
-        raise ValueError("stale scene.glb")
-    with glb.open("rb") as stream:
-        header = stream.read(12)
-    if len(header) != 12:
-        raise ValueError("WorldSculpt scene.glb has an invalid GLB header")
-    magic, version, length = struct.unpack("<4sII", header)
-    if magic != b"glTF" or version != 2 or length != glb.stat().st_size:
-        raise ValueError("WorldSculpt scene.glb has an invalid GLB header")
-    try:
-        loaded = trimesh.load(glb, force="scene")
-    except Exception as exc:
-        raise ValueError("WorldSculpt scene.glb is not loadable") from exc
-    if not loaded.geometry:
-        raise ValueError("WorldSculpt scene.glb has no geometry")
+    def load_structural_glb(name: str):
+        glb_path = _local_file(case_root, case_root / "_scene" / name, name)
+        if glb_path.stat().st_mtime_ns < marker.stat().st_mtime_ns:
+            raise ValueError(f"stale {name}")
+        with glb_path.open("rb") as stream:
+            header = stream.read(12)
+        if len(header) != 12:
+            raise ValueError(f"WorldSculpt {name} has an invalid GLB header")
+        magic, version, length = struct.unpack("<4sII", header)
+        if magic != b"glTF" or version != 2 or length != glb_path.stat().st_size:
+            raise ValueError(f"WorldSculpt {name} has an invalid GLB header")
+        try:
+            scene = trimesh.load(glb_path, force="scene")
+        except Exception as exc:
+            raise ValueError(f"WorldSculpt {name} is not loadable") from exc
+        if not getattr(scene, "geometry", None):
+            raise ValueError(f"WorldSculpt {name} has no geometry")
+        for geometry_name, surface in scene.geometry.items():
+            if (not isinstance(surface, trimesh.Trimesh) or len(surface.vertices) < 3
+                    or len(surface.faces) < 1 or not np.isfinite(surface.vertices).all()
+                    or not np.isfinite(surface.faces).all() or surface.faces.min() < 0
+                    or surface.faces.max() >= len(surface.vertices)):
+                raise ValueError(f"WorldSculpt {name} has invalid geometry for {geometry_name}")
+        return glb_path, scene
+
+    # The merged mesh is a separate user-facing artifact. Validate it rather
+    # than treating non-empty bytes as sufficient proof of a successful compose.
+    load_structural_glb("scene_mesh.glb")
+    glb, loaded = load_structural_glb("scene.glb")
     names = set(loaded.geometry)
     unexpected = {geometry for geometry in names if not any(
         geometry == name or geometry.startswith(name + "__") for name in eligible)}
@@ -308,13 +321,6 @@ def validate_output(case_root: Path, eligible: tuple[str, ...]) -> Path:
         matched = [geometry for geometry in names if geometry == name or geometry.startswith(name + "__")]
         if not matched:
             raise ValueError(f"WorldSculpt scene.glb omits {name}")
-        for geometry in matched:
-            surface = loaded.geometry[geometry]
-            if (not isinstance(surface, trimesh.Trimesh) or len(surface.vertices) < 3
-                    or len(surface.faces) < 1 or not np.isfinite(surface.vertices).all()
-                    or not np.isfinite(surface.faces).all() or surface.faces.min() < 0
-                    or surface.faces.max() >= len(surface.vertices)):
-                raise ValueError(f"WorldSculpt scene.glb has invalid geometry for {geometry}")
     return glb
 
 

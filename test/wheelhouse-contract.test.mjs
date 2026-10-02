@@ -305,9 +305,11 @@ with tempfile.TemporaryDirectory() as tmp:
     output_dir = root / 'workspace' / 'Workflows'
     output_dir.mkdir(parents=True)
     captured = {}
+    cancel = object()
 
-    def fake_run_job(job, *, pipeline_factory=None):
+    def fake_run_job(job, *, pipeline_factory=None, cancel_event=None):
         del pipeline_factory
+        captured['cancel_event_matches'] = cancel_event is cancel
         captured['job'] = dict(job)
         captured['input_exists_during_run'] = Path(job['input_image']).is_file()
         glb = Path(job['output_dir']) / 'generated-job.glb'
@@ -317,7 +319,9 @@ with tempfile.TemporaryDirectory() as tmp:
     original_run_job = runtime.run_job
     runtime.run_job = fake_run_job
     try:
-        returned = Pixal3DGenerator(model_dir=model_dir, workspace_dir=output_dir).generate(b'png-bytes', params={'seed': 7})
+        returned = Pixal3DGenerator(model_dir=model_dir, workspace_dir=output_dir).generate(
+            b'png-bytes', params={'seed': 7}, cancel_evt=cancel
+        )
     finally:
         runtime.run_job = original_run_job
 
@@ -327,15 +331,17 @@ with tempfile.TemporaryDirectory() as tmp:
         'workspace_root_matches': Path(job['workspace_root']) == root,
         'model_source_matches': Path(job['model_source']) == model_dir,
         'output_dir_matches': Path(job['output_dir']) == output_dir,
-        'input_parent_matches_output': Path(job['input_image']).parent == output_dir,
+        'input_is_private_sibling': Path(job['input_image']).parent == output_dir.parent and Path(job['input_image']).parent != output_dir,
         'input_exists_during_run': captured['input_exists_during_run'],
         'seed': job['params']['seed'],
+        'cancel_event_matches': captured['cancel_event_matches'],
     }, sort_keys=True))
 `)
 
   assert.deepEqual(result, {
+    cancel_event_matches: true,
     input_exists_during_run: true,
-    input_parent_matches_output: true,
+    input_is_private_sibling: true,
     model_source_matches: true,
     output_dir_matches: true,
     returned_name: 'generated-job.glb',
@@ -2188,12 +2194,24 @@ with tempfile.TemporaryDirectory() as tmp:
     output.mkdir()
     captured = {}
 
+    fake_o_voxel = types.ModuleType('o_voxel')
+    fake_postprocess = types.ModuleType('o_voxel.postprocess')
+    def original_to_glb(*args, **kwargs):
+        captured['export_texture_size'] = kwargs.get('texture_size')
+        return object()
+    fake_postprocess.to_glb = original_to_glb
+    fake_o_voxel.postprocess = fake_postprocess
+    sys.modules['o_voxel'] = fake_o_voxel
+    sys.modules['o_voxel.postprocess'] = fake_postprocess
+
     fake_inference = types.ModuleType('inference')
     def run_inference(*, image_path, output_path, seed, model_path, manual_fov, low_vram, resolution):
         del image_path, seed, model_path, manual_fov, low_vram, resolution
         captured['env_during'] = os.environ.get(PIXAL3D_TEXTURE_SIZE_ENV)
+        fake_postprocess.to_glb(texture_size=4096)
         Path(output_path).write_bytes(b'raw')
     fake_inference.run_inference = run_inference
+    fake_inference.o_voxel = fake_o_voxel
     fake_inference.IMAGE_COND_CONFIGS = {}
     fake_inference.build_image_cond_model = lambda config: None
     fake_inference.load_moge_model = lambda *args, **kwargs: None
@@ -2225,6 +2243,8 @@ print(json.dumps({
     'status': result['status'],
     'env_during': captured['env_during'],
     'env_after': env_after,
+    'export_texture_size': captured['export_texture_size'],
+    'export_restored': fake_postprocess.to_glb is original_to_glb,
     'params_texture_size': result['params']['texture_size'],
 }, sort_keys=True))
 `)
@@ -2232,6 +2252,8 @@ print(json.dumps({
   assert.equal(result.status, 'completed')
   assert.equal(result.env_during, '1024')
   assert.equal(result.env_after, '2048')
+  assert.equal(result.export_texture_size, 1024)
+  assert.equal(result.export_restored, true)
   assert.equal(result.params_texture_size, 1024)
 })
 
@@ -4437,7 +4459,9 @@ with tempfile.TemporaryDirectory() as tmp:
         return {'status': 'installed', 'code': 'dependencies_installed', 'wheelhouse': str(wheelhouse_path), 'commands': []}
     setup._prepare_wheelhouse_for_setup = fake_prepare
     setup._install_prepare_dependencies = fake_install
-    result = setup.run_setup(['--workspace-root', str(root), '--prepare', '--json'])
+    result = setup.run_setup([
+        '--workspace-root', str(root), '--prepare', '--skip-scene-prep', '--json'
+    ])
     print(json.dumps({'status': result['status'], 'installs_started': result['installs_started'], 'wheelhouse': result['dependency_install']['wheelhouse'], 'wheelhouse_prepare': result['wheelhouse_prepare'], 'calls': calls}, sort_keys=True))
 `)
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import importlib
 import importlib.machinery
+import inspect
 import faulthandler
 import math
 import os
@@ -11,6 +12,8 @@ import re
 import sys
 import time
 import traceback
+import tempfile
+import threading
 import types
 import uuid
 from pathlib import Path
@@ -24,6 +27,7 @@ PIXAL3D_MODEL_SOURCE = "TencentARC/Pixal3D"
 PIXAL3D_TEXTURE_SIZE_ENV = "PIXAL3D_TEXTURE_SIZE"
 SUPPORTED_TEXTURE_SIZES = (1024, 2048)
 DEFAULT_TEXTURE_SIZE = 1024
+_TEXTURE_EXPORT_LOCK = threading.RLock()
 SUPPORTED_MANUAL_FOVS = (-1.0, 0.2, 0.35, 0.5)
 DEFAULT_MANUAL_FOV = -1.0
 SUPPORTED_RUNTIME_LANES = {
@@ -469,15 +473,63 @@ def _parse_manual_fov(value: Any, default: float = DEFAULT_MANUAL_FOV) -> float:
 @contextmanager
 def _scoped_texture_size_env(texture_size: Any):
     parsed_texture_size = _parse_texture_size(texture_size)
-    previous = os.environ.get(PIXAL3D_TEXTURE_SIZE_ENV)
-    os.environ[PIXAL3D_TEXTURE_SIZE_ENV] = str(parsed_texture_size)
-    try:
+    # The environment is process-global and the exporter override below is
+    # process-global module state. Serialize both with one re-entrant lock so
+    # concurrent jobs cannot observe each other's requested texture size.
+    with _TEXTURE_EXPORT_LOCK:
+        previous = os.environ.get(PIXAL3D_TEXTURE_SIZE_ENV)
+        os.environ[PIXAL3D_TEXTURE_SIZE_ENV] = str(parsed_texture_size)
+        try:
+            yield
+        finally:
+            if previous is None:
+                os.environ.pop(PIXAL3D_TEXTURE_SIZE_ENV, None)
+            else:
+                os.environ[PIXAL3D_TEXTURE_SIZE_ENV] = previous
+
+
+@contextmanager
+def _scoped_to_glb_texture_size(texture_size: Any, inference_module: Any | None = None):
+    """Force the tracked selector into the upstream Linux and Windows exporter."""
+
+    parsed_texture_size = _parse_texture_size(texture_size)
+    o_voxel_module = getattr(inference_module, "o_voxel", None)
+    postprocess = getattr(o_voxel_module, "postprocess", None)
+    if postprocess is None:
+        # Contract tests and custom inference shims do not load o_voxel. The
+        # real upstream inference module imports it before this context starts.
         yield
-    finally:
-        if previous is None:
-            os.environ.pop(PIXAL3D_TEXTURE_SIZE_ENV, None)
-        else:
-            os.environ[PIXAL3D_TEXTURE_SIZE_ENV] = previous
+        return
+    if not callable(getattr(postprocess, "to_glb", None)):
+        raise RuntimeError("Loaded o_voxel runtime does not expose postprocess.to_glb")
+
+    with _TEXTURE_EXPORT_LOCK:
+        original = postprocess.to_glb
+
+        def selected_to_glb(*args, **kwargs):
+            kwargs["texture_size"] = parsed_texture_size
+            return original(*args, **kwargs)
+
+        postprocess.to_glb = selected_to_glb
+        try:
+            yield
+        finally:
+            postprocess.to_glb = original
+
+
+@contextmanager
+def _scoped_single_view_texture_export(texture_size: Any, inference_module: Any | None = None):
+    """Serialize base export state against the complete multiview runtime."""
+    from pixal3d_extension.multiview import _MV_RUN_LOCK
+
+    # Both requests patch the same process-global environment/module state.
+    # Acquire the outer MV lock first so a base request cannot install its
+    # wrapper while multiview inference is still exporting. The nested scopes
+    # use RLocks because single-view NAF setup re-enters _MV_RUN_LOCK below.
+    with _MV_RUN_LOCK, _scoped_texture_size_env(texture_size), _scoped_to_glb_texture_size(
+        texture_size, inference_module
+    ):
+        yield
 
 
 def _resolve_glb(output_dir: Path, pipeline_result: Any) -> Path | None:
@@ -486,6 +538,34 @@ def _resolve_glb(output_dir: Path, pipeline_result: Any) -> Path | None:
         return candidate if candidate.is_file() and is_contained_path(output_dir, candidate) else None
     matches = sorted(output_dir.glob("*.glb"))
     return matches[0] if matches else None
+
+
+def _check_cancel(cancel_event: Any | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("Pixal3D generation cancelled")
+
+
+def _accepts_keyword(callable_object: Any, keyword: str) -> bool:
+    """Return whether a runtime callable can receive an optional host keyword."""
+    try:
+        parameters = inspect.signature(callable_object).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(parameter.kind is inspect.Parameter.VAR_KEYWORD or parameter.name == keyword for parameter in parameters)
+
+
+def _publish_staged_glb(staged: Path, output_dir: Path) -> Path:
+    """Atomically promote one regular, non-empty GLB from private staging."""
+    if staged.is_symlink():
+        raise RuntimeError("Pixal3D runtime produced a symlinked GLB output")
+    staged = staged.resolve(strict=True)
+    if not staged.is_file() or staged.stat().st_size <= 0:
+        raise RuntimeError("Pixal3D runtime produced an invalid GLB output")
+    final = output_dir / staged.name
+    if final.exists() or final.is_symlink():
+        raise RuntimeError(f"Pixal3D output already exists: {final.name}")
+    os.replace(staged, final)
+    return final
 
 
 def _resolve_workspace_output_dir(workspace_root: str | Path, output_dir: str) -> Path | dict:
@@ -806,7 +886,12 @@ def _scoped_single_view_naf_extractors(inference_module: Any, auxiliary_source: 
         yield
 
 
-def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) -> dict:
+def run_job(
+    job: dict,
+    *,
+    pipeline_factory: Callable[[str], Any] | None = None,
+    cancel_event: Any | None = None,
+) -> dict:
     _enable_crash_diagnostics()
     _diagnostic_checkpoint("run_job:start")
     resolved_paths = _resolve_job_paths(job)
@@ -823,79 +908,93 @@ def run_job(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None) 
 
     checkpoint = "runtime_block"
     try:
+        _check_cancel(cancel_event)
         checkpoint = "preflight_ok"
         _diagnostic_checkpoint("run_job:preflight:ok")
         params = job.get("params") or {}
         parsed_low_vram = _parse_low_vram(params.get("low_vram"), default=True)
         parsed_texture_size = _parse_texture_size(params.get("texture_size"), default=DEFAULT_TEXTURE_SIZE)
         parsed_manual_fov = _parse_manual_fov(params.get("manual_fov"), default=DEFAULT_MANUAL_FOV)
-        if pipeline_factory is not None:
-            checkpoint = "pipeline_factory_create"
-            _diagnostic_checkpoint("pipeline_factory:create:start")
-            pipeline = pipeline_factory(job.get("model_source") or PIXAL3D_MODEL_SOURCE)
-            _diagnostic_checkpoint("pipeline_factory:create:done")
-            checkpoint = "pipeline_factory_call"
-            _diagnostic_checkpoint("pipeline_factory:call:start")
-            result = pipeline(
-                image_path=str(image_path),
-                output_dir=str(output_dir),
-                seed=params.get("seed"),
-                resolution=params.get("resolution", 1024),
-                low_vram=parsed_low_vram,
-                texture_size=parsed_texture_size,
-                manual_fov=parsed_manual_fov,
-            )
-            _diagnostic_checkpoint("pipeline_factory:call:done")
-        else:
-            checkpoint = "runtime_compat"
-            _diagnostic_checkpoint("runtime_compat:start")
-            _prepare_runtime_compat()
-            _diagnostic_checkpoint("runtime_compat:done")
-            checkpoint = "windows_aliases"
-            _diagnostic_checkpoint("windows_aliases:start")
-            _install_windows_native_module_aliases()
-            _diagnostic_checkpoint("windows_aliases:done")
-            checkpoint = "natten"
-            _diagnostic_checkpoint("natten:start")
-            _install_natten_fallback()
-            _diagnostic_checkpoint("natten:done")
-            checkpoint = "import_inference"
-            _diagnostic_checkpoint("import_inference:start")
-            inference_module = importlib.import_module("inference")
-            _patch_inference_auxiliary_sources(inference_module, auxiliary_source)
-            run_inference = inference_module.run_inference
-            _diagnostic_checkpoint("import_inference:done")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".pixal3d-run-", dir=output_dir.parent) as temporary:
+            staging = Path(temporary)
+            if pipeline_factory is not None:
+                checkpoint = "pipeline_factory_create"
+                _diagnostic_checkpoint("pipeline_factory:create:start")
+                pipeline = pipeline_factory(job.get("model_source") or PIXAL3D_MODEL_SOURCE)
+                _diagnostic_checkpoint("pipeline_factory:create:done")
+                checkpoint = "pipeline_factory_call"
+                _diagnostic_checkpoint("pipeline_factory:call:start")
+                pipeline_kwargs = {
+                    "image_path": str(image_path),
+                    "output_dir": str(staging),
+                    "seed": params.get("seed"),
+                    "resolution": params.get("resolution", 1024),
+                    "low_vram": parsed_low_vram,
+                    "texture_size": parsed_texture_size,
+                    "manual_fov": parsed_manual_fov,
+                }
+                if _accepts_keyword(pipeline, "cancel_event"):
+                    pipeline_kwargs["cancel_event"] = cancel_event
+                result = pipeline(**pipeline_kwargs)
+                _diagnostic_checkpoint("pipeline_factory:call:done")
+            else:
+                checkpoint = "runtime_compat"
+                _diagnostic_checkpoint("runtime_compat:start")
+                _prepare_runtime_compat()
+                _diagnostic_checkpoint("runtime_compat:done")
+                checkpoint = "windows_aliases"
+                _diagnostic_checkpoint("windows_aliases:start")
+                _install_windows_native_module_aliases()
+                _diagnostic_checkpoint("windows_aliases:done")
+                checkpoint = "natten"
+                _diagnostic_checkpoint("natten:start")
+                _install_natten_fallback()
+                _diagnostic_checkpoint("natten:done")
+                checkpoint = "import_inference"
+                _diagnostic_checkpoint("import_inference:start")
+                inference_module = importlib.import_module("inference")
+                _patch_inference_auxiliary_sources(inference_module, auxiliary_source)
+                run_inference = inference_module.run_inference
+                _diagnostic_checkpoint("import_inference:done")
 
-            checkpoint = "flex_gemm_silence"
-            _silence_flex_gemm_autotuners()
-            _diagnostic_checkpoint("flex_gemm_silence:done")
+                checkpoint = "flex_gemm_silence"
+                _silence_flex_gemm_autotuners()
+                _diagnostic_checkpoint("flex_gemm_silence:done")
 
-            checkpoint = "prepare_inference_args"
-            seed = int(params.get("seed", -1))
-            if seed == -1:
-                seed = random.randint(0, 2**32 - 1)
-            glb_path = output_dir / f"{int(time.time())}_{uuid.uuid4().hex[:8]}_pixal3d.glb"
-            checkpoint = "run_inference"
-            _diagnostic_checkpoint("run_inference:start")
-            with _scoped_texture_size_env(parsed_texture_size), _scoped_single_view_naf_extractors(inference_module, auxiliary_source):
-                run_inference(
-                    image_path=str(image_path),
-                    output_path=str(glb_path),
-                    seed=seed,
-                    model_path=job.get("model_source") or PIXAL3D_MODEL_SOURCE,
-                    manual_fov=parsed_manual_fov,
-                    low_vram=parsed_low_vram,
-                    resolution=int(params.get("resolution", 1024)),
-                )
-            _diagnostic_checkpoint("run_inference:done")
-            result = {"glb_path": str(glb_path), "pbr": {}}
+                checkpoint = "prepare_inference_args"
+                seed = int(params.get("seed", -1))
+                if seed == -1:
+                    seed = random.randint(0, 2**32 - 1)
+                staged_glb = staging / f"{int(time.time())}_{uuid.uuid4().hex[:8]}_pixal3d.glb"
+                checkpoint = "run_inference"
+                _diagnostic_checkpoint("run_inference:start")
+                inference_kwargs = {
+                    "image_path": str(image_path),
+                    "output_path": str(staged_glb),
+                    "seed": seed,
+                    "model_path": job.get("model_source") or PIXAL3D_MODEL_SOURCE,
+                    "manual_fov": parsed_manual_fov,
+                    "low_vram": parsed_low_vram,
+                    "resolution": int(params.get("resolution", 1024)),
+                }
+                if _accepts_keyword(run_inference, "cancel_event"):
+                    inference_kwargs["cancel_event"] = cancel_event
+                with _scoped_single_view_texture_export(
+                    parsed_texture_size, inference_module
+                ), _scoped_single_view_naf_extractors(inference_module, auxiliary_source):
+                    run_inference(**inference_kwargs)
+                _diagnostic_checkpoint("run_inference:done")
+                result = {"glb_path": str(staged_glb), "pbr": {}}
+
+            _check_cancel(cancel_event)
+            staged_glb = _resolve_glb(staging, result)
+            if staged_glb is None:
+                raise RuntimeError("Pixal3D runtime did not produce a GLB output")
+            glb_path = _publish_staged_glb(staged_glb, output_dir)
     except Exception as exc:  # pragma: no cover - contract retained for real runtime failures.
         _diagnostic_checkpoint(f"runtime_exception:{type(exc).__name__}")
         return _runtime_failure(exc, checkpoint, job, image_path, output_dir)
-
-    glb_path = _resolve_glb(output_dir, result)
-    if glb_path is None:
-        return _failure("output_missing", "Pixal3D runtime did not produce a GLB output")
 
     pbr = result.get("pbr", {}) if isinstance(result, dict) else {}
     return {

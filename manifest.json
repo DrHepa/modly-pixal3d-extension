@@ -139,11 +139,31 @@
         "image",
         "image"
       ],
-      "input_labels": [
-        "Primary view",
-        "View 2",
-        "View 3",
-        "View 4"
+      "input_contract": [
+        {
+          "name": "image",
+          "label": "Primary view",
+          "type": "image",
+          "required": true
+        },
+        {
+          "name": "image_2",
+          "label": "View 2",
+          "type": "image",
+          "required": false
+        },
+        {
+          "name": "image_3",
+          "label": "View 3",
+          "type": "image",
+          "required": false
+        },
+        {
+          "name": "image_4",
+          "label": "View 4",
+          "type": "image",
+          "required": false
+        }
       ],
       "output": "mesh",
       "params_schema": [
@@ -180,6 +200,96 @@
             }
           ],
           "tooltip": "Prefer low-VRAM mode for safer Pixal3D generation; Standard loads all models on GPU."
+        },
+        {
+          "id": "texture_size",
+          "label": "Texture Size",
+          "type": "select",
+          "default": 1024,
+          "options": [
+            { "value": 1024, "label": "1024" },
+            { "value": 2048, "label": "2048" }
+          ],
+          "tooltip": "Final GLB texture atlas size. 1024 reduces VRAM during final texturing; 2048 is higher quality and uses higher VRAM."
+        },
+        {
+          "id": "view_layout",
+          "label": "View Layout",
+          "type": "select",
+          "default": "auto",
+          "options": [
+            { "value": "auto", "label": "Auto" },
+            { "value": "declared_roles", "label": "Declared roles" }
+          ],
+          "tooltip": "Auto preserves connected-port order. Declared roles reorders connected views around the subject while DA3 still estimates every camera matrix."
+        },
+        {
+          "id": "image_role",
+          "label": "Primary View Role",
+          "type": "select",
+          "default": "front",
+          "options": [
+            { "value": "front", "label": "Front" },
+            { "value": "front-right", "label": "Front-right" },
+            { "value": "right", "label": "Right" },
+            { "value": "back-right", "label": "Back-right" },
+            { "value": "back", "label": "Back" },
+            { "value": "back-left", "label": "Back-left" },
+            { "value": "left", "label": "Left" },
+            { "value": "front-left", "label": "Front-left" }
+          ],
+          "show_if": { "view_layout": "declared_roles" }
+        },
+        {
+          "id": "image_2_role",
+          "label": "View 2 Role",
+          "type": "select",
+          "default": "right",
+          "options": [
+            { "value": "front", "label": "Front" },
+            { "value": "front-right", "label": "Front-right" },
+            { "value": "right", "label": "Right" },
+            { "value": "back-right", "label": "Back-right" },
+            { "value": "back", "label": "Back" },
+            { "value": "back-left", "label": "Back-left" },
+            { "value": "left", "label": "Left" },
+            { "value": "front-left", "label": "Front-left" }
+          ],
+          "show_if": { "view_layout": "declared_roles" }
+        },
+        {
+          "id": "image_3_role",
+          "label": "View 3 Role",
+          "type": "select",
+          "default": "back",
+          "options": [
+            { "value": "front", "label": "Front" },
+            { "value": "front-right", "label": "Front-right" },
+            { "value": "right", "label": "Right" },
+            { "value": "back-right", "label": "Back-right" },
+            { "value": "back", "label": "Back" },
+            { "value": "back-left", "label": "Back-left" },
+            { "value": "left", "label": "Left" },
+            { "value": "front-left", "label": "Front-left" }
+          ],
+          "show_if": { "view_layout": "declared_roles" }
+        },
+        {
+          "id": "image_4_role",
+          "label": "View 4 Role",
+          "type": "select",
+          "default": "left",
+          "options": [
+            { "value": "front", "label": "Front" },
+            { "value": "front-right", "label": "Front-right" },
+            { "value": "right", "label": "Right" },
+            { "value": "back-right", "label": "Back-right" },
+            { "value": "back", "label": "Back" },
+            { "value": "back-left", "label": "Back-left" },
+            { "value": "left", "label": "Left" },
+            { "value": "front-left", "label": "Front-left" }
+          ],
+          "show_if": { "view_layout": "declared_roles" }
         },
         {
           "id": "seed",
@@ -234,15 +344,55 @@
         "image",
         "image"
       ],
-      "input_labels": [
-        "Primary view",
-        "View 2",
-        "View 3",
-        "View 4",
-        "View 5",
-        "View 6",
-        "View 7",
-        "View 8"
+      "input_contract": [
+        {
+          "name": "image",
+          "label": "Primary view",
+          "type": "image",
+          "required": true
+        },
+        {
+          "name": "image_2",
+          "label": "View 2",
+          "type": "image",
+          "required": false
+        },
+        {
+          "name": "image_3",
+          "label": "View 3",
+          "type": "image",
+          "required": false
+        },
+        {
+          "name": "image_4",
+          "label": "View 4",
+          "type": "image",
+          "required": false
+        },
+        {
+          "name": "image_5",
+          "label": "View 5",
+          "type": "image",
+          "required": false
+        },
+        {
+          "name": "image_6",
+          "label": "View 6",
+          "type": "image",
+          "required": false
+        },
+        {
+          "name": "image_7",
+          "label": "View 7",
+          "type": "image",
+          "required": false
+        },
+        {
+          "name": "image_8",
+          "label": "View 8",
+          "type": "image",
+          "required": false
+        }
       ],
       "output": "scene",
       "params_schema": [

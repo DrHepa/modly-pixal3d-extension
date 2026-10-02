@@ -133,6 +133,11 @@ class WorldSculptRuntimeTests(unittest.TestCase):
                 mesh = Path(args[args.index("--case_root") + 1]) / "_recon/obj01/mesh.pt"
                 mesh.parent.mkdir(parents=True)
                 mesh.write_bytes(b"stage artifact")
+            if args[0] == "compose_scene.py":
+                scene_output = Path(args[args.index("--output_dir") + 1])
+                scene_output.mkdir(parents=True)
+                (scene_output / "scene_mesh.glb").write_bytes(b"mesh")
+                (scene_output / "scene.glb").write_bytes(b"scene")
             return "stage complete"
         with patch.dict(os.environ, {"ATTN_BACKEND": "flash_attn", "SPARSE_ATTN_BACKEND": "flash_attn"}), \
              patch.object(ws, "missing_runtime", return_value=[]), patch.object(ws, "validate_scene", return_value=("obj01",)), \
@@ -141,10 +146,15 @@ class WorldSculptRuntimeTests(unittest.TestCase):
              patch.object(ws, "_local_adapter_config", side_effect=lambda source, destination, base: destination), \
             patch.object(ws, "validate_crops"), patch.object(ws, "validate_output", return_value=self.root / "scene.glb"), \
             patch.object(ws, "_run", side_effect=stage):
-            self.assertEqual(ws.run_worldsculpt(scene_dir=scene, adapter_root=adapters, base_root=base,
-                             naf_path=naf, output_dir=output, workspace_dir=self.root,
-                             face_budget=50000,
-                             progress_cb=lambda pct, step: progress.append((pct, step))), self.root / "scene.glb")
+            result = ws.run_worldsculpt(scene_dir=scene, adapter_root=adapters, base_root=base,
+                                        naf_path=naf, output_dir=output, workspace_dir=self.root,
+                                        face_budget=50000,
+                                        progress_cb=lambda pct, step: progress.append((pct, step)))
+        self.assertEqual(result.parent.parent, output)
+        self.assertEqual(result.name, "scene.glb")
+        self.assertEqual({entry.name for entry in result.parent.iterdir()}, {"scene.glb", "scene_mesh.glb"})
+        self.assertEqual(result.read_bytes(), b"scene")
+        self.assertEqual((result.parent / "scene_mesh.glb").read_bytes(), b"mesh")
         self.assertEqual([command[0] for command in calls],
                          ["prepare_crops_scene.py", "reconstruct_batch.py", "compose_scene.py"])
         self.assertIn("--no_tex", calls[1])
@@ -155,6 +165,26 @@ class WorldSculptRuntimeTests(unittest.TestCase):
         self.assertEqual([pct for pct, _ in progress], [5, 30, 75, 100])
         for command in calls[1:]:
             self.assertEqual(command[command.index("--instances") + 1], "obj01")
+
+    def test_cancellation_during_final_copy_cleans_partial_publication(self):
+        case = self.root / "case"
+        scene = case / "_scene"
+        scene.mkdir(parents=True)
+        (scene / "scene.glb").write_bytes(b"x" * (ws._COPY_CHUNK_SIZE * 2))
+        (scene / "scene_mesh.glb").write_bytes(b"y" * (ws._COPY_CHUNK_SIZE * 2))
+        output = self.root / "output"
+        output.mkdir()
+
+        class CancelDuringCopy:
+            def __init__(self):
+                self.checks = 0
+            def is_set(self):
+                self.checks += 1
+                return self.checks >= 3
+
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            ws._publish_final_glbs(case, output, CancelDuringCopy())
+        self.assertEqual(list(output.iterdir()), [])
 
     def test_output_parent_may_contain_normalized_scene_but_not_overlap_it(self):
         workflows = self.root / "workspace" / "Workflows"
@@ -309,11 +339,13 @@ class WorldSculptRuntimeTests(unittest.TestCase):
                     naf = self.root / "naf.pth"
                     naf.write_bytes(b"local")
                     with self.assertRaisesRegex(RuntimeError, "ROOT_CAUSE") as raised:
+                        output = self.root / f"output-{failed_stage}"
                         ws.run_worldsculpt(scene_dir=scene, adapter_root=self.root,
                                            base_root=self.root, naf_path=naf,
-                                           output_dir=self.root / f"output-{failed_stage}",
+                                           output_dir=output,
                                            workspace_dir=self.root)
                     self.assertLess(len(str(raised.exception)), 3600)
+                    self.assertEqual(list(output.iterdir()), [])
                     if failed_stage != "compose":
                         self.assertNotIn("compose_scene.py", calls)
                         validate_output.assert_not_called()

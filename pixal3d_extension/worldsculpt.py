@@ -12,6 +12,7 @@ import selectors
 import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -44,6 +45,7 @@ _NAF_LOCAL = '''from src.model.naf import NAF
             checkpoint = os.environ["WORLDSCULPT_NAF_CHECKPOINT"]
             self.naf_model = NAF().to(device)
             self.naf_model.load_state_dict(torch.load(checkpoint, map_location=device, weights_only=True))'''
+_COPY_CHUNK_SIZE = 1024 * 1024
 
 
 def missing_runtime() -> list[str]:
@@ -215,6 +217,46 @@ def _artifact_error(stage: str, tail: str, exc: Exception) -> RuntimeError:
     return RuntimeError(f"WorldSculpt stage {stage} produced invalid artifacts: {exc}\n{tail[-3000:]}")
 
 
+def _copy_file_cancelable(source: Path, destination: Path, cancel_event=None) -> None:
+    """Copy a potentially large GLB while honoring host cancellation."""
+    with source.open("rb") as reader, destination.open("xb") as writer:
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("WorldSculpt cancelled")
+            chunk = reader.read(_COPY_CHUNK_SIZE)
+            if not chunk:
+                break
+            writer.write(chunk)
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("WorldSculpt cancelled")
+        writer.flush()
+        os.fsync(writer.fileno())
+    shutil.copystat(source, destination, follow_symlinks=False)
+
+
+def _publish_final_glbs(case: Path, output: Path, cancel_event=None) -> Path:
+    """Publish only the user-facing mesh and scene GLBs."""
+    scene_root = case / "_scene"
+    final_sources = {
+        "scene_mesh.glb": _regular(_under(case, scene_root / "scene_mesh.glb", "scene mesh"), "scene mesh"),
+        "scene.glb": _regular(_under(case, scene_root / "scene.glb", "scene"), "scene"),
+    }
+    final = output / f"worldsculpt-{uuid.uuid4().hex}"
+    publishing = output / f".worldsculpt-publish-{uuid.uuid4().hex}"
+    publishing.mkdir(parents=False, exist_ok=False)
+    try:
+        for name, source in final_sources.items():
+            _copy_file_cancelable(source, publishing / name, cancel_event)
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("WorldSculpt cancelled")
+        publishing.replace(final)
+    except BaseException:
+        shutil.rmtree(publishing, ignore_errors=True)
+        shutil.rmtree(final, ignore_errors=True)
+        raise
+    return final / "scene.glb"
+
+
 def resolve_scene_manifest(scene_manifest_path: str | Path, workspace_dir: str | Path) -> Path:
     """Accept only a workspace-scoped Modly sceneRoot, never an arbitrary path."""
     workspace = Path(workspace_dir).resolve(strict=True)
@@ -264,46 +306,50 @@ def run_worldsculpt(*, scene_dir: Path, adapter_root: Path, base_root: Path,
     validate_base(base, naf_path)
     adapters = Path(adapter_root).resolve(strict=True)
     output.mkdir(parents=True, exist_ok=True)
-    case = prepare_case_root(output / f"worldsculpt-{uuid.uuid4().hex}")
-    overlay = _private_overlay(case, base)
-    env = os.environ.copy()
-    env.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", HF_DATASETS_OFFLINE="1",
-               WORLDSCULPT_NAF_CHECKPOINT=str(Path(naf_path).resolve(strict=True)),
-               HF_HOME=str(case / "hf-cache"), TORCH_HOME=str(case / "torch-cache"),
-               PYTHONNOUSERSITE="1", ATTN_BACKEND="sdpa", SPARSE_ATTN_BACKEND="sdpa")
-    env.pop("PYTHONPATH", None)
-    if progress_cb: progress_cb(5, "WorldSculpt: crop")
-    crop_tail = _run(["prepare_crops_scene.py", "--scene_dir", str(scene), "--case_root", str(case),
-          "--crop_resolution", "1024", "--save_alignments", "--alpha_erode_kernel", "0",
-          "--alpha_erode_iters", "0", "--min_mask_ratio", "0.001", "--max_crop_ratio", "3.0",
-          "--mask_fit_scale"], overlay, env, cancel_event)
-    try:
-        validate_crops(case, eligible)
-    except (OSError, ValueError) as exc:
-        raise _artifact_error("prepare_crops_scene.py", crop_tail, exc) from exc
-    if progress_cb: progress_cb(30, "WorldSculpt: reconstruct")
-    ss, shape = (adapters / name for name in ADAPTER_DIRS)
-    ss_config = _local_adapter_config(ss / "config.json", case / "ss-config.json", base)
-    shape_config = _local_adapter_config(shape / "config.json", case / "shape-config.json", base)
-    recon_tail = _run(["reconstruct_batch.py", "--case_root", str(case), "--views", "all",
-          "--recon_subdir", "_recon", "--instances", ",".join(eligible), "--no-ema", "--sampler", "official", "--no_tex", "--no_glb",
-          "--ss_config", str(ss_config), "--ss_ckpt_dir", str(ss / "ckpts"), "--ss_step", "15000",
-          "--shape_config", str(shape_config), "--shape_ckpt_dir", str(shape / "ckpts"),
-          "--shape_step", "15000"], overlay, env, cancel_event)
-    try:
-        for name in eligible:
-            mesh = case / "_recon" / name / "mesh.pt"
-            _regular(_under(case, mesh, f"{name} mesh.pt"), f"{name} mesh.pt")
-    except (OSError, ValueError) as exc:
-        raise _artifact_error("reconstruct_batch.py", recon_tail, exc) from exc
-    if progress_cb: progress_cb(75, "WorldSculpt: compose")
-    compose_tail = _run(["compose_scene.py", "--case_root", str(case), "--recon_dir", str(case / "_recon"),
-          "--face_budget", str(face_budget), "--glb_decimation", str(face_budget),
-          "--output_dir", str(case / "_scene"),
-          "--instances", ",".join(eligible), "--normal", "--no_render", "--no_video"], overlay, env, cancel_event)
-    try:
-        glb = validate_output(case, eligible)
-    except (OSError, ValueError) as exc:
-        raise _artifact_error("compose_scene.py", compose_tail, exc) from exc
+    with tempfile.TemporaryDirectory(prefix="modly-worldsculpt-") as temporary:
+        case = prepare_case_root(Path(temporary) / "case")
+        overlay = _private_overlay(case, base)
+        env = os.environ.copy()
+        env.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", HF_DATASETS_OFFLINE="1",
+                   WORLDSCULPT_NAF_CHECKPOINT=str(Path(naf_path).resolve(strict=True)),
+                   HF_HOME=str(case / "hf-cache"), TORCH_HOME=str(case / "torch-cache"),
+                   PYTHONNOUSERSITE="1", ATTN_BACKEND="sdpa", SPARSE_ATTN_BACKEND="sdpa")
+        env.pop("PYTHONPATH", None)
+        if progress_cb: progress_cb(5, "WorldSculpt: crop")
+        crop_tail = _run(["prepare_crops_scene.py", "--scene_dir", str(scene), "--case_root", str(case),
+              "--crop_resolution", "1024", "--save_alignments", "--alpha_erode_kernel", "0",
+              "--alpha_erode_iters", "0", "--min_mask_ratio", "0.001", "--max_crop_ratio", "3.0",
+              "--mask_fit_scale"], overlay, env, cancel_event)
+        try:
+            validate_crops(case, eligible)
+        except (OSError, ValueError) as exc:
+            raise _artifact_error("prepare_crops_scene.py", crop_tail, exc) from exc
+        if progress_cb: progress_cb(30, "WorldSculpt: reconstruct")
+        ss, shape = (adapters / name for name in ADAPTER_DIRS)
+        ss_config = _local_adapter_config(ss / "config.json", case / "ss-config.json", base)
+        shape_config = _local_adapter_config(shape / "config.json", case / "shape-config.json", base)
+        recon_tail = _run(["reconstruct_batch.py", "--case_root", str(case), "--views", "all",
+              "--recon_subdir", "_recon", "--instances", ",".join(eligible), "--no-ema", "--sampler", "official", "--no_tex", "--no_glb",
+              "--ss_config", str(ss_config), "--ss_ckpt_dir", str(ss / "ckpts"), "--ss_step", "15000",
+              "--shape_config", str(shape_config), "--shape_ckpt_dir", str(shape / "ckpts"),
+              "--shape_step", "15000"], overlay, env, cancel_event)
+        try:
+            for name in eligible:
+                mesh = case / "_recon" / name / "mesh.pt"
+                _regular(_under(case, mesh, f"{name} mesh.pt"), f"{name} mesh.pt")
+        except (OSError, ValueError) as exc:
+            raise _artifact_error("reconstruct_batch.py", recon_tail, exc) from exc
+        if progress_cb: progress_cb(75, "WorldSculpt: compose")
+        compose_tail = _run(["compose_scene.py", "--case_root", str(case), "--recon_dir", str(case / "_recon"),
+              "--face_budget", str(face_budget), "--glb_decimation", str(face_budget),
+              "--output_dir", str(case / "_scene"),
+              "--instances", ",".join(eligible), "--normal", "--no_render", "--no_video"], overlay, env, cancel_event)
+        try:
+            validate_output(case, eligible)
+        except (OSError, ValueError) as exc:
+            raise _artifact_error("compose_scene.py", compose_tail, exc) from exc
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("WorldSculpt cancelled")
+        glb = _publish_final_glbs(case, output, cancel_event)
     if progress_cb: progress_cb(100, "WorldSculpt: complete")
     return glb

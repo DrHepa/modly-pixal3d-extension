@@ -215,7 +215,7 @@ class Pixal3DGenerator:
         return checkpoint
 
     def params_schema(self) -> list[dict[str, Any]]:
-        if self._effective_node_id() in {*SCENE_PREP_NODES, SCENE_NORMALIZE_NODE}:
+        if self._effective_node_id() in {*SCENE_PREP_NODES, SCENE_NORMALIZE_NODE, "generate-mv"}:
             manifest = json.loads((Path(__file__).resolve().parent / "manifest.json").read_text(encoding="utf-8"))
             node_id = self._effective_node_id()
             if node_id == SCENE_ESTIMATE_NODE:
@@ -282,8 +282,6 @@ class Pixal3DGenerator:
                 "tooltip": "Seed for reproducibility. -1 uses a random seed.",
             },
         ]
-        if self._effective_node_id() == "generate-mv":
-            schema = [item for item in schema if item["id"] not in {"manual_fov", "texture_size"}]
         return schema
 
     def readiness_status(self) -> dict:
@@ -650,7 +648,9 @@ class Pixal3DGenerator:
                 raise RuntimeError("Pixal3D output directory is not configured")
             output_dir = Path(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
-            temp_input = tempfile.NamedTemporaryFile(prefix="pixal3d-input-", suffix=".png", dir=output_dir, delete=False)
+            temp_input = tempfile.NamedTemporaryFile(
+                prefix=".pixal3d-input-", suffix=".png", dir=output_dir.parent, delete=False
+            )
             input_path = Path(temp_input.name)
             temp_input.write(image_or_job)
             temp_input.close()
@@ -667,7 +667,7 @@ class Pixal3DGenerator:
 
         try:
             with shared_base_root(model_source if getattr(self, "shared_model_dirs", None) else None):
-                result = run_job(job, pipeline_factory=self.pipeline_factory)
+                result = run_job(job, pipeline_factory=self.pipeline_factory, cancel_event=cancel_evt)
             if result.get("status") != "completed":
                 raise RuntimeError(json.dumps(result, sort_keys=True))
             return Path(result["output"]["glb_path"])

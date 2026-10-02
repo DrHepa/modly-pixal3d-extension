@@ -129,6 +129,7 @@ class WorldSculptContractTests(unittest.TestCase):
                         "mode": "offcenter_mv_geom"}, folder / "mesh.pt")
         (case / "_scene").mkdir()
         scene.export(case / "_scene" / "scene.glb")
+        scene.export(case / "_scene" / "scene_mesh.glb")
         return case
 
     def test_valid_real_output_and_omitted_instance(self):
@@ -149,6 +150,12 @@ class WorldSculptContractTests(unittest.TestCase):
         scene.add_geometry(trimesh.creation.box(), geom_name="obj99")
         scene.export(case / "_scene" / "scene.glb")
         with self.assertRaisesRegex(ValueError, "unexpected geometry"):
+            validate_output(case, ("obj01",))
+
+    def test_rejects_structurally_invalid_merged_scene_mesh(self):
+        case = self.make_output()
+        (case / "_scene" / "scene_mesh.glb").write_bytes(b"arbitrary non-empty bytes")
+        with self.assertRaisesRegex(ValueError, "scene_mesh.glb"):
             validate_output(case, ("obj01",))
 
     def test_rejects_invalid_mesh_and_glb_symlink(self):

@@ -479,6 +479,16 @@ def _check_cancel(cancel_event: Any | None) -> None:
         raise RuntimeError("Pixal3D MV generation cancelled")
 
 
+def _parse_texture_size(value: Any) -> int:
+    if isinstance(value, bool):
+        return 1024
+    try:
+        parsed = int(value) if value is not None else 1024
+    except (TypeError, ValueError):
+        return 1024
+    return parsed if parsed in (1024, 2048) else 1024
+
+
 def run_multiview(
     *, capture_manifest_path: str | Path | None = None,
     scene_manifest_path: str | Path | None = None, workspace_dir: str | Path,
@@ -525,11 +535,16 @@ def run_multiview(
     if not 0 <= seed <= 2**32 - 1:
         raise ValueError("seed is out of range")
     low_vram = params.get("low_vram", "low_vram") in ("low_vram", True)
+    texture_size = _parse_texture_size(params.get("texture_size"))
     output.mkdir(parents=True, exist_ok=True)
-    glb_path = output / f"{int(time.time())}_{uuid.uuid4().hex[:8]}_pixal3d_mv.glb"
+    final_name = f"{int(time.time())}_{uuid.uuid4().hex[:8]}_pixal3d_mv.glb"
 
     real_inference = inference_runner is None
-    with views as views_dir, tempfile.TemporaryDirectory(prefix="pixal3d-mv-config-", dir=output) as temporary:
+    with views as views_dir, tempfile.TemporaryDirectory(
+        prefix=".pixal3d-mv-run-", dir=output.parent
+    ) as temporary:
+        staging = Path(temporary)
+        staged_glb = staging / final_name
         with _MV_RUN_LOCK:
             if real_inference:
                 configure_mv_hf_cache(workspace_dir)
@@ -550,18 +565,23 @@ def run_multiview(
             _check_cancel(cancel_event)
             if progress_cb is not None:
                 progress_cb(8, "Preparing local model configuration")
-            private_config = prepare_mv_pipeline_config(root, base, Path(temporary) / "pipeline_mv.local.json")
+            private_config = prepare_mv_pipeline_config(root, base, staging / "pipeline_mv.local.json")
             loader = _private_local_loader(root, private_config) if real_inference else nullcontext()
             naf_loader = _local_naf_extractors(inference_mv, Path(naf_path).resolve()) if real_inference else nullcontext()
             with loader, naf_loader:
                 _check_cancel(cancel_event)
                 inference_runner(
-                    views_dir=str(views_dir), output_path=str(glb_path), num_views=num_views,
+                    views_dir=str(views_dir), output_path=str(staged_glb), num_views=num_views,
                     seed=seed, model_path=str(root), config_file=str(private_config),
                     low_vram=low_vram, resolution=resolution,
+                    texture_size=texture_size,
                     progress_cb=progress_cb, cancel_event=cancel_event,
                 )
-    _check_cancel(cancel_event)
-    if not glb_path.is_file():
-        raise RuntimeError("Pixal3D MV runtime did not produce a GLB")
+        _check_cancel(cancel_event)
+        if staged_glb.is_symlink() or not staged_glb.is_file() or staged_glb.stat().st_size <= 0:
+            raise RuntimeError("Pixal3D MV runtime did not produce a valid GLB")
+        glb_path = output / final_name
+        if glb_path.exists() or glb_path.is_symlink():
+            raise RuntimeError(f"Pixal3D MV output already exists: {final_name}")
+        os.replace(staged_glb, glb_path)
     return glb_path

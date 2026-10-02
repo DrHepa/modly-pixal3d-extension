@@ -178,6 +178,7 @@ class MultiviewCaptureTests(unittest.TestCase):
                 result = run_multiview(**kwargs, inference_runner=inference)
                 self.assertTrue(result.is_file())
                 self.assertEqual(calls[0]["num_views"], 2)
+                self.assertEqual(calls[0]["texture_size"], 1024)
                 self.assertFalse(Path(calls[0]["views_dir"]).exists())
 
                 def failure(**values):
@@ -187,6 +188,28 @@ class MultiviewCaptureTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "deliberate"):
                     run_multiview(**kwargs, inference_runner=failure)
                 self.assertFalse(Path(calls[-1]["views_dir"]).exists())
+
+                def partial_failure(**values):
+                    calls.append(values)
+                    Path(values["output_path"]).write_bytes(b"partial")
+                    raise RuntimeError("partial MV failure")
+
+                with self.assertRaisesRegex(RuntimeError, "partial MV failure"):
+                    run_multiview(**kwargs, inference_runner=partial_failure)
+                self.assertFalse(Path(calls[-1]["output_path"]).exists())
+                self.assertNotEqual(Path(calls[-1]["output_path"]).parent, kwargs["output_dir"])
+                self.assertEqual([path.name for path in kwargs["output_dir"].iterdir()], [result.name])
+
+                cancel = threading.Event()
+                def cancelled_after_write(**values):
+                    calls.append(values)
+                    Path(values["output_path"]).write_bytes(b"complete-but-cancelled")
+                    cancel.set()
+
+                with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                    run_multiview(**kwargs, inference_runner=cancelled_after_write, cancel_event=cancel)
+                self.assertFalse(Path(calls[-1]["output_path"]).exists())
+                self.assertEqual([path.name for path in kwargs["output_dir"].iterdir()], [result.name])
 
     def test_mv_dynamic_modules_use_workspace_cache_when_home_cache_is_read_only(self):
         code = r'''

@@ -24,10 +24,28 @@ class MultiviewImageContractTests(unittest.TestCase):
         node = next(item for item in manifest["nodes"] if item["id"] == "generate-mv")
         self.assertEqual(node["input"], "image")
         self.assertEqual(node["inputs"], ["image", "image", "image", "image"])
-        self.assertEqual(node["input_labels"], ["Primary view", "View 2", "View 3", "View 4"])
+        self.assertEqual(
+            node["input_contract"],
+            [
+                {
+                    "name": "image" if index == 1 else f"image_{index}",
+                    "label": "Primary view" if index == 1 else f"View {index}",
+                    "type": "image",
+                    "required": index == 1,
+                }
+                for index in range(1, 5)
+            ],
+        )
+        self.assertNotIn("input_labels", node)
         self.assertEqual(node["output"], "mesh")
         self.assertEqual(node["weight_groups"], ["pixal3d-base", "pixal3d-mv", "da3-base"])
-        self.assertNotIn("num_views", {item["id"] for item in node["params_schema"]})
+        params = {item["id"]: item for item in node["params_schema"]}
+        self.assertNotIn("num_views", params)
+        self.assertEqual(params["texture_size"]["default"], 1024)
+        self.assertEqual([item["value"] for item in params["texture_size"]["options"]], [1024, 2048])
+        self.assertEqual(params["view_layout"]["default"], "auto")
+        for role_id in ("image_role", "image_2_role", "image_3_role", "image_4_role"):
+            self.assertEqual(params[role_id]["show_if"], {"view_layout": "declared_roles"})
 
     def test_generator_preserves_host_connection_order_and_invokes_da3_calibration(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -215,6 +233,98 @@ class MultiviewImageContractTests(unittest.TestCase):
             self.assertEqual(calibrated.call_args.kwargs["params"]["num_views"], 2)
             staged_manifest = Path(calibrated.call_args.kwargs["scene_manifest_path"])
             self.assertFalse(staged_manifest.parent.exists())
+
+    def test_declared_roles_reorder_connected_slots_anchor_front_and_annotate_da3_provenance(self):
+        from pixal3d_extension.multiview_images import run_multiview_from_images
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            inputs = workspace / "Workflows" / "inputs"
+            inputs.mkdir(parents=True)
+            third = inputs / "third.png"
+            fourth = inputs / "fourth.png"
+            third.write_bytes(png_bytes((3, 0, 0, 255)))
+            fourth.write_bytes(png_bytes((4, 0, 0, 255)))
+            da3 = root / "da3"
+            da3.mkdir()
+            for name in ("config.json", "model.safetensors"):
+                (da3 / name).write_bytes(b"local")
+            observed = {}
+
+            def calibrate(frame_paths, _da3_root, staging, _extension_root, **_kwargs):
+                observed["order"] = [Image.open(path).getpixel((0, 0))[0] for path in frame_paths]
+                transforms = staging / "transforms.json"
+                transforms.write_text(json.dumps({
+                    "mesh_scale": 1.0,
+                    "frames": [
+                        {"file_path": f"{index:04d}.png", "camera_angle_x": 0.5,
+                         "transform_matrix": [[1, 0, 0, index], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]}
+                        for index in range(3)
+                    ],
+                }))
+                return transforms
+
+            def calibrated(**kwargs):
+                observed["transforms"] = json.loads(
+                    (Path(kwargs["scene_manifest_path"]).parent / "transforms.json").read_text()
+                )
+                observed["manifest"] = json.loads(Path(kwargs["scene_manifest_path"]).read_text())
+                return workspace / "Workflows" / "result.glb"
+
+            with patch("pixal3d_extension.multiview_images.validate_da3_runtime"), \
+                 patch("pixal3d_extension.multiview_images._estimate_cameras", side_effect=calibrate), \
+                 patch("pixal3d_extension.multiview.run_multiview", side_effect=calibrated):
+                run_multiview_from_images(
+                    primary_image_bytes=png_bytes((1, 0, 0, 255)),
+                    extra_image_paths=[None, str(third), str(fourth)],
+                    workspace_dir=workspace, output_dir=workspace / "Workflows", da3_root=da3,
+                    mv_root=root / "mv", base_root=root / "base", naf_path=root / "naf.pth",
+                    params={
+                        "view_layout": "declared_roles",
+                        "image_role": "back",
+                        "image_3_role": "front",
+                        "image_4_role": "left",
+                    },
+                )
+
+            self.assertEqual(observed["order"], [3, 1, 4])
+            expected_roles = [
+                {"slot": 3, "handle": "image_3", "role": "front", "azimuthDegrees": 0},
+                {"slot": 1, "handle": "image", "role": "back", "azimuthDegrees": 180},
+                {"slot": 4, "handle": "image_4", "role": "left", "azimuthDegrees": 270},
+            ]
+            self.assertEqual(observed["transforms"]["provenance"]["viewRoles"], expected_roles)
+            self.assertEqual(observed["manifest"]["provenance"]["viewRoles"], expected_roles)
+            self.assertEqual(
+                [frame["transform_matrix"][0][3] for frame in observed["transforms"]["frames"]],
+                [0, 1, 2],
+            )
+
+    def test_declared_roles_reject_duplicate_roles_and_missing_front_for_connected_slots(self):
+        from pixal3d_extension.multiview_images import _apply_declared_view_roles, _decode
+
+        images = [_decode(png_bytes((index, 0, 0, 255)), f"view {index}") for index in (1, 2)]
+        with self.assertRaisesRegex(ValueError, "unique"):
+            _apply_declared_view_roles(
+                images, ["connected"],
+                {"view_layout": "declared_roles", "image_role": "front", "image_2_role": "front"},
+            )
+        with self.assertRaisesRegex(ValueError, "exactly one front"):
+            _apply_declared_view_roles(
+                images, ["connected"],
+                {"view_layout": "declared_roles", "image_role": "left", "image_2_role": "right"},
+            )
+
+    def test_auto_layout_keeps_connected_order_and_has_no_role_provenance(self):
+        from pixal3d_extension.multiview_images import _apply_declared_view_roles, _decode
+
+        images = [_decode(png_bytes((index, 0, 0, 255)), f"view {index}") for index in (1, 3)]
+        ordered, provenance = _apply_declared_view_roles(
+            images, [None, "connected"], {"view_layout": "auto"},
+        )
+        self.assertIs(ordered, images)
+        self.assertIsNone(provenance)
 
     def test_calibration_worker_produces_ordered_valid_transforms_from_da3(self):
         import numpy as np

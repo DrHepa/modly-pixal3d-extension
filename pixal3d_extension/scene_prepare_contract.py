@@ -18,6 +18,24 @@ CAPTURE_MANIFEST = "capture-manifest.json"
 SCENE_SCHEMA = "modly.scene-manifest.v1"
 
 
+def private_scene_runtime_root(workspace_dir: Path) -> Path:
+    """Return a workspace-owned runtime root that is never a durable output."""
+    workspace = Path(workspace_dir).resolve(strict=True)
+    root = workspace / ".pixal3d-runtime" / "scene-prep"
+    current = workspace
+    for part in root.relative_to(workspace).parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError("Scene-prep runtime directory must not use symlinks")
+        if current.exists() and not current.is_dir():
+            raise ValueError("Scene-prep runtime path components must be directories")
+    root.mkdir(parents=True, exist_ok=True)
+    resolved = root.resolve(strict=True)
+    if not resolved.is_relative_to(workspace):
+        raise ValueError("Scene-prep runtime directory escapes the workspace")
+    return resolved
+
+
 def validate_workspace_output_parent(output_dir: Path, workspace_dir: Path, label: str) -> Path:
     """Validate workspace authority without creating or following output paths."""
     workspace = Path(workspace_dir).resolve(strict=True)
@@ -132,9 +150,16 @@ def load_capture_manifest(manifest_path: Path, workspace_dir: Path) -> tuple[dic
     return data, root
 
 
-def _copy_file(source_root: Path, destination_root: Path, relative: Path, label: str) -> None:
+def _copy_file(
+    source_root: Path,
+    destination_root: Path,
+    relative: Path,
+    label: str,
+    *,
+    destination_relative: Path | None = None,
+) -> None:
     source = _inside(source_root / relative, source_root, label, require_file=True)
-    destination = destination_root / relative
+    destination = destination_root / (destination_relative or relative)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.is_symlink():
         raise ValueError(f"{label} destination cannot be a symlink")
@@ -154,12 +179,24 @@ def normalize_annotated_scene(scene_manifest_path: Path, workspace_dir: Path, ou
         raise ValueError("scene output directory must not overlap the input scene")
     output_parent.mkdir(parents=True, exist_ok=True)
     output_parent = _inside(output_parent, workspace, "scene output directory", require_file=False)
-    staging = Path(tempfile.mkdtemp(prefix=".scene-normalize-", dir=output_parent))
+    runtime_root = private_scene_runtime_root(workspace)
+    if (output_parent == runtime_root or output_parent.is_relative_to(runtime_root)
+            or runtime_root.is_relative_to(output_parent)):
+        raise ValueError("scene output directory must not overlap private runtime state")
+    normalize_root = runtime_root / "normalize-staging"
+    normalize_root.mkdir(exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".scene-normalize-", dir=normalize_root))
     final = output_parent / f"scene-normalized-{uuid.uuid4().hex}"
     try:
         _copy_file(scene_root, staging, Path("transforms.json"), "transforms.json")
+        canonical_frames = []
         for frame_index, frame in enumerate(transforms["frames"]):
-            _copy_file(scene_root, staging, _safe_relative(frame["file_path"], f"frame {frame_index}"), f"frame {frame_index}")
+            relative = _safe_relative(frame["file_path"], f"frame {frame_index}")
+            canonical = Path(f"{frame_index:04d}{relative.suffix.lower()}")
+            _copy_file(
+                scene_root, staging, relative, f"frame {frame_index}", destination_relative=canonical
+            )
+            canonical_frames.append(canonical.as_posix())
         for instance in transforms["instances"]:
             obj = f"obj{instance['pass_index']:02d}"
             for frame_index in range(len(transforms["frames"])):
@@ -168,6 +205,8 @@ def normalize_annotated_scene(scene_manifest_path: Path, workspace_dir: Path, ou
                 if candidate.exists() or candidate.is_symlink():
                     _copy_file(scene_root, staging, relative, f"{obj} mask {frame_index}")
         normalized = json.loads((staging / "transforms.json").read_text(encoding="utf-8"))
+        for frame, canonical in zip(normalized["frames"], canonical_frames, strict=True):
+            frame["file_path"] = canonical
         provenance = normalized.get("provenance")
         if not isinstance(provenance, dict):
             provenance = {}

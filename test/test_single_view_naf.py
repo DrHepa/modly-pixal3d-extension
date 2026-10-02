@@ -1,6 +1,7 @@
 import hashlib
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -10,6 +11,65 @@ from pixal3d_extension import multiview, naf_checkpoint, runtime
 
 
 class SingleViewLocalNafTests(unittest.TestCase):
+    def test_run_job_uses_private_staging_and_never_publishes_partial_failures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / "image.png"
+            image.write_bytes(b"image")
+            output = root / "Workflows"
+            output.mkdir()
+            observed = {}
+
+            def factory(_model_source):
+                def pipeline(*, output_dir, cancel_event=None, **_kwargs):
+                    observed["staging"] = Path(output_dir)
+                    observed["cancel_event"] = cancel_event
+                    (Path(output_dir) / "partial.glb").write_bytes(b"partial")
+                    raise RuntimeError("deliberate partial-write failure")
+                return pipeline
+
+            cancel = threading.Event()
+            with patch.object(runtime, "_preflight_runtime", return_value=(None, {})):
+                result = runtime.run_job({
+                    "input_image": str(image), "output_dir": str(output),
+                    "readiness": {"generation_allowed": True}, "params": {},
+                }, pipeline_factory=factory, cancel_event=cancel)
+
+            self.assertEqual(result["status"], "failed")
+            self.assertIn("deliberate partial-write failure", result["message"])
+            self.assertIs(observed["cancel_event"], cancel)
+            self.assertNotEqual(observed["staging"], output)
+            self.assertNotEqual(observed["staging"].parent, output)
+            self.assertFalse(observed["staging"].exists())
+            self.assertEqual(list(output.iterdir()), [])
+
+    def test_run_job_cancellation_after_write_publishes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = root / "image.png"
+            image.write_bytes(b"image")
+            output = root / "Workflows"
+            output.mkdir()
+            cancel = threading.Event()
+
+            def factory(_model_source):
+                def pipeline(*, output_dir, **_kwargs):
+                    path = Path(output_dir) / "cancelled.glb"
+                    path.write_bytes(b"complete-but-cancelled")
+                    cancel.set()
+                    return {"glb_path": str(path)}
+                return pipeline
+
+            with patch.object(runtime, "_preflight_runtime", return_value=(None, {})):
+                result = runtime.run_job({
+                    "input_image": str(image), "output_dir": str(output),
+                    "readiness": {"generation_allowed": True}, "params": {},
+                }, pipeline_factory=factory, cancel_event=cancel)
+
+            self.assertEqual(result["status"], "failed")
+            self.assertIn("cancelled", result["message"].lower())
+            self.assertEqual(list(output.iterdir()), [])
+
     def test_official_checkpoint_size_and_hash_are_enforced(self):
         self.assertEqual(multiview.NAF_SIZE, 2664431)
         self.assertEqual(multiview.NAF_SHA256, "c096c1ab2217a5c3ac136365f721685e2201379cb69d509cfb0261183847c98f")

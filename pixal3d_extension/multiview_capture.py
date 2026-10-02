@@ -97,7 +97,9 @@ def prepare_capture_views(manifest_path: Path, workspace_dir: Path, output_dir: 
     from PIL import Image
 
     output.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=".pixal3d-mv-views-", dir=output) as temporary:
+    with tempfile.TemporaryDirectory(
+        prefix=".pixal3d-mv-views-", dir=Path(workspace_dir).resolve(strict=True)
+    ) as temporary:
         staged = Path(temporary)
         if capture["kind"] == "frames":
             for index, frame in enumerate(capture["frames"][:num_views]):

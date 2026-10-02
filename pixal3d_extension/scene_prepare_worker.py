@@ -258,11 +258,15 @@ def run(job: dict) -> Path:
     output = Path(job["output_dir"]).resolve(strict=True)
     if not output.is_relative_to(workspace):
         raise ValueError("Scene-prep output escapes workspace")
+    staging_root = Path(job["staging_dir"]).resolve(strict=True)
+    if (not staging_root.is_dir() or not staging_root.is_relative_to(workspace)
+            or staging_root == output or staging_root.is_relative_to(output)):
+        raise ValueError("Scene-prep staging must be a private workspace directory outside durable outputs")
     sam_root = Path(job["sam_root"]).resolve(strict=True)
     da3_root = Path(job["da3_root"]).resolve(strict=True)
     params = _parameters(job.get("params"))
     manifest, capture_root = load_capture_manifest(Path(job["capture_manifest_path"]), workspace)
-    staging = Path(tempfile.mkdtemp(prefix=".scene-estimate-", dir=output))
+    staging = Path(tempfile.mkdtemp(prefix=".scene-estimate-", dir=staging_root))
     final = output / f"scene-estimated-{uuid.uuid4().hex}"
     try:
         emit({"type": "progress", "pct": 5, "step": "Selecting deterministic capture frames"})

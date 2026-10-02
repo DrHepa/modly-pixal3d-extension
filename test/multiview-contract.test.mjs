@@ -1,12 +1,16 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8'))
+const modlyRoot = process.env.MODLY_ROOT ? resolve(process.env.MODLY_ROOT) : null
+const modlyParserPath = modlyRoot
+  ? join(modlyRoot, 'electron', 'main', 'automation-capabilities.ts')
+  : null
 
 function python(source) {
   const run = spawnSync('python3', ['-c', source], { cwd: root, encoding: 'utf8' })
@@ -18,8 +22,21 @@ test('multi-image node uses upstream ordered image ports and DA3 calibration wei
   const node = manifest.nodes.find((item) => item.id === 'generate-mv')
   assert.equal(node?.input, 'image')
   assert.deepEqual(node?.inputs, ['image', 'image', 'image', 'image'])
-  assert.deepEqual(node?.input_labels, ['Primary view', 'View 2', 'View 3', 'View 4'])
+  assert.deepEqual(node?.input_contract, [
+    { name: 'image', label: 'Primary view', type: 'image', required: true },
+    { name: 'image_2', label: 'View 2', type: 'image', required: false },
+    { name: 'image_3', label: 'View 3', type: 'image', required: false },
+    { name: 'image_4', label: 'View 4', type: 'image', required: false },
+  ])
+  assert.equal(node?.input_labels, undefined)
   assert.deepEqual(node?.weight_groups, ['pixal3d-base', 'pixal3d-mv', 'da3-base'])
+  const params = Object.fromEntries(node.params_schema.map((item) => [item.id, item]))
+  assert.deepEqual(params.texture_size.options.map((item) => item.value), [1024, 2048])
+  assert.equal(params.texture_size.default, 1024)
+  assert.equal(params.view_layout.default, 'auto')
+  for (const id of ['image_role', 'image_2_role', 'image_3_role', 'image_4_role']) {
+    assert.deepEqual(params[id].show_if, { view_layout: 'declared_roles' })
+  }
   const group = manifest.weight_groups.find((item) => item.id === 'pixal3d-mv')
   const source = group?.model_sources.find((item) => item.repo_id === 'TencentARC/Pixal3D')
   assert.ok(source?.checks.includes('pipeline_mv.json'))
@@ -31,13 +48,45 @@ test('multi-image node uses upstream ordered image ports and DA3 calibration wei
   assert.equal(group.model_sources.length, 1)
 })
 
+test('deployed Modly parser exposes canonical labels and optional secondary image slots', async (t) => {
+  if (!modlyParserPath || !existsSync(modlyParserPath)) {
+    t.skip('set MODLY_ROOT to run the cross-repository parser integration check')
+    return
+  }
+  const { parseExtensionManifest } = await import(pathToFileURL(modlyParserPath).href)
+  const parsed = parseExtensionManifest(manifest, 'pixal3d', new Set(), false)
+  const nodes = new Map(parsed.nodes.map((node) => [node.id, node]))
+
+  assert.deepEqual(nodes.get('generate-mv')?.inputs, [
+    { name: 'image', label: 'Primary view', type: 'image', required: true },
+    { name: 'image_2', label: 'View 2', type: 'image', required: false },
+    { name: 'image_3', label: 'View 3', type: 'image', required: false },
+    { name: 'image_4', label: 'View 4', type: 'image', required: false },
+  ])
+  assert.deepEqual(nodes.get('scene-from-images')?.inputs, Array.from({ length: 8 }, (_, index) => ({
+    name: index === 0 ? 'image' : `image_${index + 1}`,
+    label: index === 0 ? 'Primary view' : `View ${index + 1}`,
+    type: 'image',
+    required: index === 0,
+  })))
+})
+
+test('MV texture size is propagated explicitly into the tracked GLB exporter', () => {
+  const runtime = readFileSync(join(root, 'pixal3d_extension', 'multiview.py'), 'utf8')
+  const inference = readFileSync(join(root, 'pixal3d_extension', 'vendor', 'inference_mv.py'), 'utf8')
+  assert.match(runtime, /texture_size=texture_size/)
+  assert.match(inference, /texture_size:\s*int\s*=\s*1024/)
+  assert.match(inference, /texture_size=texture_size/)
+  assert.doesNotMatch(inference, /texture_size=4096/)
+})
+
 test('MV docs distinguish UI-managed model weights from intentional first-use NAF bootstrap', () => {
   const docs = readFileSync(join(root, 'README.md'), 'utf8')
   assert.match(docs, /DA3\s+and Pixal3D MV model weights are UI-managed and local-only/i)
   assert.match(docs, /NAF is the one\s+intentional auxiliary[\s\S]*?bootstrap atomically on first generation/i)
   assert.match(docs, /manual bootstrap[\s\S]*?fallback/i)
   assert.match(docs, /null gaps are ignored[\s\S]*?connected views retain port order/i)
-  assert.match(docs, /input_labels[\s\S]*?not every private or older fork renders\s+those\s+labels/i)
+  assert.match(docs, /input_contract[\s\S]*?secondary ports are optional/i)
   assert.doesNotMatch(docs, /No model weights are downloaded by this path/)
 })
 
@@ -119,7 +168,10 @@ for node_id in ('generate-mv', 'worldsculpt'):
         observed[node_id]['generate_error'] = str(exc)
 print(json.dumps(observed))
 `)
-  assert.deepEqual(result['generate-mv'].schema, ['resolution', 'low_vram', 'seed'])
+  assert.deepEqual(result['generate-mv'].schema, [
+    'resolution', 'low_vram', 'texture_size', 'view_layout',
+    'image_role', 'image_2_role', 'image_3_role', 'image_4_role', 'seed',
+  ])
   assert.equal(result['generate-mv'].readiness, 'mv_shared_groups_unavailable')
   assert.match(result['generate-mv'].download_error, /pixal3d-mv/)
   assert.match(result['generate-mv'].load_error, /pixal3d-mv/)
@@ -209,7 +261,7 @@ with tempfile.TemporaryDirectory() as tmp:
     calls=[]
     def runner(**kwargs): calls.append(kwargs);Path(kwargs['output_path']).write_bytes(b'glb')
     original=(mv/'pipeline_mv.json').read_bytes()
-    output=run_multiview(scene_manifest_path=scene,workspace_dir=workspace,mv_root=mv,base_root=base,naf_path=naf,output_dir=workspace/'out',params={'num_views':1,'resolution':1024},inference_runner=runner)
+    output=run_multiview(scene_manifest_path=scene,workspace_dir=workspace,mv_root=mv,base_root=base,naf_path=naf,output_dir=workspace/'out',params={'num_views':1,'resolution':1024,'texture_size':2048},inference_runner=runner)
     untouched=(mv/'pipeline_mv.json').read_bytes()==original
     patched=json.loads((mv/'pipeline_mv.json').read_text())
     (mv/'ckpts'/f'{MV_MODEL_FILES[0]}.safetensors').unlink()
@@ -232,6 +284,7 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.calls.length, 1)
   assert.match(result.calls[0].config_file, /pipeline_mv\.local\.json$/)
   assert.match(result.calls[0].views_dir, /\/Workspace\/views$/)
+  assert.equal(result.calls[0].texture_size, 2048)
   assert.equal(result.models.filter((path) => path.includes('/moved-base/ckpts/')).length, 3)
   assert.equal(result.models.filter((path) => path.endsWith('_mv')).length, 4)
   assert.match(result.rmbg, /\/moved-base\/auxiliary\/rmbg$/)

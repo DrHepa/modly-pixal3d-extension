@@ -15,7 +15,19 @@ class ScenePrepareManifestTests(unittest.TestCase):
         images = nodes["scene-from-images"]
         self.assertEqual((images["input"], images["output"]), ("image", "scene"))
         self.assertEqual(images["inputs"], ["image"] * 8)
-        self.assertEqual(images["input_labels"], ["Primary view", *[f"View {index}" for index in range(2, 9)]])
+        self.assertEqual(
+            images["input_contract"],
+            [
+                {
+                    "name": "image" if index == 1 else f"image_{index}",
+                    "label": "Primary view" if index == 1 else f"View {index}",
+                    "type": "image",
+                    "required": index == 1,
+                }
+                for index in range(1, 9)
+            ],
+        )
+        self.assertNotIn("input_labels", images)
         self.assertEqual(images["weight_groups"], ["sam3", "da3-base"])
         video = nodes["scene-from-video"]
         self.assertEqual((video["input"], video["output"]), ("video", "scene"))
