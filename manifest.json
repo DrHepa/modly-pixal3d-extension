@@ -221,7 +221,20 @@
             { "value": "auto", "label": "Auto" },
             { "value": "declared_roles", "label": "Declared roles" }
           ],
-          "tooltip": "Auto preserves connected-port order. Declared roles reorders connected views around the subject while DA3 still estimates every camera matrix."
+          "tooltip": "Auto uses DA3 camera estimates and rejects collapsed camera coverage. Declared roles builds a canonical orbit from the selected directions, anchored to the declared Front view."
+        },
+        {
+          "id": "view_fov",
+          "label": "View FOV",
+          "type": "float",
+          "default": 20.0,
+          "min": 1.0,
+          "max": 170.0,
+          "step": 0.1,
+          "tooltip": "Horizontal field of view for Declared roles. Use 20 degrees for rig renders and most generated multi-view sets; all views must use the same framing and scale.",
+          "show_if": {
+            "view_layout": "declared_roles"
+          }
         },
         {
           "id": "image_role",

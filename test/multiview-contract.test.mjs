@@ -82,7 +82,7 @@ test('MV texture size is propagated explicitly into the tracked GLB exporter', (
 
 test('MV docs distinguish UI-managed model weights from intentional first-use NAF bootstrap', () => {
   const docs = readFileSync(join(root, 'README.md'), 'utf8')
-  assert.match(docs, /DA3\s+and Pixal3D MV model weights are UI-managed and local-only/i)
+  assert.match(docs, /DA3\s+and Pixal3D MV model\s+weights are UI-managed and local-only/i)
   assert.match(docs, /NAF is the one\s+intentional auxiliary[\s\S]*?bootstrap atomically on first generation/i)
   assert.match(docs, /manual bootstrap[\s\S]*?fallback/i)
   assert.match(docs, /null gaps are ignored[\s\S]*?connected views retain port order/i)
@@ -170,7 +170,7 @@ print(json.dumps(observed))
 `)
   assert.deepEqual(result['generate-mv'].schema, [
     'resolution', 'low_vram', 'texture_size', 'view_layout',
-    'image_role', 'image_2_role', 'image_3_role', 'image_4_role', 'seed',
+    'view_fov', 'image_role', 'image_2_role', 'image_3_role', 'image_4_role', 'seed',
   ])
   assert.equal(result['generate-mv'].readiness, 'mv_shared_groups_unavailable')
   assert.match(result['generate-mv'].download_error, /pixal3d-mv/)

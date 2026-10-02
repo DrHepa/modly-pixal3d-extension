@@ -1,10 +1,11 @@
-"""Ordered Modly multiple-image adapter with offline DA3 camera estimation."""
+"""Ordered Modly multiple-image adapter with fixed or DA3-estimated cameras."""
 
 from __future__ import annotations
 
 import hashlib
 import io
 import json
+import math
 import os
 import stat
 import tempfile
@@ -483,22 +484,111 @@ def _apply_declared_view_roles(
     return [record[0] for record in records], [record[1] for record in records]
 
 
-def _annotate_declared_role_provenance(
-    transforms_path: Path, role_provenance: list[dict[str, Any]],
+def _write_declared_role_transforms(
+    transforms_path: Path, role_provenance: list[dict[str, Any]], view_fov: object,
 ) -> None:
-    transforms = json.loads(transforms_path.read_text(encoding="utf-8"))
-    provenance = transforms.get("provenance")
-    if not isinstance(provenance, dict):
-        provenance = {}
-    provenance.update({
-        "cameraEstimator": "DA3 Base",
-        "viewLayout": "declared_roles",
-        "viewRoles": role_provenance,
-    })
-    transforms["provenance"] = provenance
+    if isinstance(view_fov, bool):
+        raise ValueError("view_fov must be a number of degrees between 1 and 170")
+    try:
+        fov_degrees = float(view_fov)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("view_fov must be a number of degrees between 1 and 170") from exc
+    if not math.isfinite(fov_degrees) or not 1.0 <= fov_degrees <= 170.0:
+        raise ValueError("view_fov must be a number of degrees between 1 and 170")
+    camera_angle_x = math.radians(fov_degrees)
+    # Upstream's fixed rig frames an object in [-0.5, 0.5] with 10% padding.
+    # For the default 20-degree FOV this is the official 3.119204998 distance.
+    camera_distance = 0.55 / math.tan(camera_angle_x / 2.0)
+
+    front = (
+        (1.0, 0.0, 0.0, 0.0),
+        (0.0, 0.0, -1.0, -camera_distance),
+        (0.0, 1.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+    frames = []
+    for index, role in enumerate(role_provenance):
+        angle = math.radians(float(role["azimuthDegrees"]))
+        cosine = math.cos(angle)
+        sine = math.sin(angle)
+        rotation_z = (
+            (cosine, -sine, 0.0),
+            (sine, cosine, 0.0),
+            (0.0, 0.0, 1.0),
+        )
+        matrix = [
+            [
+                sum(rotation_z[row][axis] * front[axis][column] for axis in range(3))
+                for column in range(4)
+            ]
+            for row in range(3)
+        ] + [[0.0, 0.0, 0.0, 1.0]]
+        frames.append({
+            "file_path": f"{index:04d}.png",
+            "camera_angle_x": camera_angle_x,
+            "transform_matrix": matrix,
+        })
+
+    transforms = {
+        "mesh_scale": 1.0,
+        "frames": frames,
+        "provenance": {
+            "cameraEstimator": "declared fixed orbit",
+            "cameraPosePolicy": "declared-role-canonical-orbit",
+            "cameraConvention": "blender-c2w",
+            "cameraDistance": camera_distance,
+            "viewFovDegrees": fov_degrees,
+            "framing": "object spans approximately 1/1.1 of every square view",
+            "viewLayout": "declared_roles",
+            "viewRoles": role_provenance,
+        },
+    }
     transforms_path.write_text(
         json.dumps(transforms, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+
+
+def _validate_auto_camera_coverage(transforms_path: Path) -> None:
+    transforms = json.loads(transforms_path.read_text(encoding="utf-8"))
+    frames = transforms.get("frames")
+    if not isinstance(frames, list) or len(frames) < 3:
+        return
+
+    azimuths: list[float] = []
+    for frame in frames:
+        if not isinstance(frame, dict):
+            raise ValueError("DA3 transforms contain an invalid camera frame")
+        matrix = frame.get("transform_matrix")
+        if (
+            not isinstance(matrix, list) or len(matrix) != 4
+            or any(not isinstance(row, list) or len(row) != 4 for row in matrix)
+        ):
+            raise ValueError("DA3 transforms contain an invalid camera matrix")
+        try:
+            x = float(matrix[0][3])
+            y = float(matrix[1][3])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("DA3 transforms contain a non-numeric camera position") from exc
+        if not math.isfinite(x) or not math.isfinite(y) or math.hypot(x, y) <= 1e-6:
+            raise ValueError("DA3 transforms contain an invalid camera position")
+        azimuths.append(math.degrees(math.atan2(x, -y)) % 360.0)
+
+    def separation(left: float, right: float) -> float:
+        return abs((left - right + 180.0) % 360.0 - 180.0)
+
+    maximum_from_primary = max(separation(value, azimuths[0]) for value in azimuths[1:])
+    minimum_pair = min(
+        separation(azimuths[left], azimuths[right])
+        for left in range(len(azimuths))
+        for right in range(left + 1, len(azimuths))
+    )
+    if maximum_from_primary < 90.0 or minimum_pair < 8.0:
+        rendered = ", ".join(f"{value:.1f}°" for value in azimuths)
+        raise ValueError(
+            "DA3 camera estimation collapsed the multiview orbit "
+            f"(estimated azimuths: {rendered}). Use Declared roles and assign each connected view "
+            "its real camera direction."
+        )
 
 
 def _estimate_cameras(
@@ -545,15 +635,16 @@ def run_multiview_from_images(
     naf_path: str | Path, params: dict[str, Any], progress_cb: Callable[[int, str], None] | None = None,
     cancel_event: Any | None = None, inference_runner: Callable[..., Any] | None = None,
 ) -> Path:
-    """Estimate real ordered cameras, then reuse the calibrated MV cascade."""
+    """Build declared or estimated ordered cameras, then run the calibrated MV cascade."""
 
     _check_cancel(cancel_event)
     images = validate_ordered_images(primary_image_bytes, extra_image_paths, workspace_dir)
     images, role_provenance = _apply_declared_view_roles(images, extra_image_paths, params)
     _check_cancel(cancel_event)
-    validate_da3_weights(Path(da3_root))
     extension_root = Path(__file__).resolve().parent.parent
-    validate_da3_runtime(extension_root)
+    if role_provenance is None:
+        validate_da3_weights(Path(da3_root))
+        validate_da3_runtime(extension_root)
     _check_cancel(cancel_event)
     workspace = Path(workspace_dir).resolve(strict=True)
     output = validate_workspace_output_parent(Path(output_dir), workspace, "MV output directory")
@@ -562,20 +653,29 @@ def run_multiview_from_images(
         staging = Path(directory)
         frames = _stage_pngs(images, staging)
         _check_cancel(cancel_event)
-        if progress_cb:
-            progress_cb(3, "Estimating consistent cameras with DA3 Base")
-        transforms_path = _estimate_cameras(
-            frames, Path(da3_root), staging, extension_root,
-            progress_cb=progress_cb, cancel_event=cancel_event,
-        )
-        provenance: dict[str, Any] = {
-            "source": "ordered Modly image ports", "cameraEstimator": "DA3 Base",
-        }
         if role_provenance is not None:
-            _annotate_declared_role_provenance(transforms_path, role_provenance)
-            provenance.update({
+            if progress_cb:
+                progress_cb(3, "Building declared fixed-orbit cameras")
+            transforms_path = staging / "transforms.json"
+            _write_declared_role_transforms(
+                transforms_path, role_provenance, params.get("view_fov", 20.0),
+            )
+            provenance: dict[str, Any] = {
+                "source": "ordered Modly image ports",
+                "cameraEstimator": "declared fixed orbit",
                 "viewLayout": "declared_roles", "viewRoles": role_provenance,
-            })
+            }
+        else:
+            if progress_cb:
+                progress_cb(3, "Estimating consistent cameras with DA3 Base")
+            transforms_path = _estimate_cameras(
+                frames, Path(da3_root), staging, extension_root,
+                progress_cb=progress_cb, cancel_event=cancel_event,
+            )
+            _validate_auto_camera_coverage(transforms_path)
+            provenance = {
+                "source": "ordered Modly image ports", "cameraEstimator": "DA3 Base",
+            }
         (staging / "scene-manifest.json").write_text(json.dumps({
             "schema": "modly.scene-manifest.v1", "sceneRoot": ".",
             "provenance": provenance,

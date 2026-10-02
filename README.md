@@ -305,31 +305,39 @@ headless callers may still provide `extra_image_paths`, but every non-null entry
 must already be a workspace image path.
 
 `view_layout=auto` is the compatibility default and preserves connected input
-order. `view_layout=declared_roles` enables per-physical-slot roles from front,
+order. It uses DA3 camera estimates and rejects camera solutions whose azimuth
+coverage collapses; in that case the error asks the user to select Declared
+roles instead of spending a full generation on an invalid rig.
+
+`view_layout=declared_roles` enables per-physical-slot roles from front,
 front-right, right, back-right, back, back-left, left, and front-left. Only
 connected slots participate; roles must be unique and exactly one connected
 slot must be front. The adapter reorders staged image records by declared
-azimuth with front first, then records slot/handle/role provenance in its
-private transforms and scene manifest. DA3 still estimates every camera matrix;
-the role declarations never synthesize or replace camera poses.
+azimuth with front first and builds the fixed Blender/NeRF orbit used by
+Pixal3D's reference multi-view path. Declared roles do not run DA3. `view_fov`
+sets their shared horizontal field of view and defaults to 20 degrees for rig
+renders and most generated multi-view sets. Camera distance is derived as
+`0.55 / tan(fov / 2)`, which leaves the upstream 10% framing margin. Every view
+must show the same rigid object at the same scale and framing.
 
 This node is **TencentARC Pixal3D multi-view**, not WorldSculpt. It requires the
-host-managed `pixal3d-base`, `pixal3d-mv`, and `da3-base` shared groups. DA3 Base
-estimates one consistent camera and horizontal FOV per raw connected image.
-Those real relative cameras are transformed by one global rigid transform and
-one uniform relative-scale gauge so the primary view matches Pixal3D's canonical
-front coordinate system. Individual poses are never guessed, replaced with a
-fixed orbit, or independently adjusted. DA3 Base does not establish metric
-scale.
+host-managed `pixal3d-base`, `pixal3d-mv`, and `da3-base` shared groups. In Auto
+mode, DA3 Base estimates one consistent camera and horizontal FOV per raw
+connected image. Those real relative cameras are transformed by one global
+rigid transform and one uniform relative-scale gauge so the primary view
+matches Pixal3D's canonical front coordinate system. DA3 Base does not
+establish metric scale, so generated turntables with known directions should
+use Declared roles and its fixed rig.
 
 The primary image bytes and remaining workspace paths are validated before NAF
 bootstrap or output creation. Inputs must be unique PNG, JPEG, or WebP images
 with matching dimensions; traversal, symlinks, non-regular files, duplicate
 paths/content, unsupported content, and more or fewer views fail actionably.
-Images are normalized into a disposable private directory, DA3 writes the
-official ordered `transforms.json` there, and the already-calibrated MV runner is
-then reused. Staging is removed after success, failure, or cancellation. DA3
-and Pixal3D MV model weights are UI-managed and local-only: DA3 uses
+Images are normalized into a disposable private directory. Auto mode asks DA3
+to write the ordered `transforms.json`; Declared roles writes the fixed-orbit
+equivalent directly. The already-calibrated MV runner is then reused. Staging
+is removed after success, failure, or cancellation. DA3 and Pixal3D MV model weights are UI-managed and local-only:
+DA3 uses
 `local_files_only=True` in an offline isolated runtime, and all three shared
 groups are downloaded or repaired through Modly Models UI. NAF is the one
 intentional auxiliary that may bootstrap atomically on first generation when
@@ -347,7 +355,7 @@ capture adapter remain available for internal/backward-compatible callers with
 real poses. Neither is exposed as the public workflow input and neither can
 override the multiple-image transport fields.
 
-**Runtime boundary:** the published native wheelhouse still contains the single-view Pixal3D core wheel. Normal setup checksum-verifies and force-reinstalls a bundled, additive pure-Python MV core after that wheelhouse; it does not change native CUDA/NATTEN packages or claim GPU compatibility. The vendored upstream `inference_mv.py` invokes the MV cascade through a private generated config and a scoped local-only loader, so downloaded shared weight files are not modified and corrupt/missing local checkpoints cannot trigger an upstream Hugging Face fallback. If the core overlay or isolated DA3 runtime is absent or invalid, setup fails rather than leaving an inert node. Contract tests cover ordered port reconstruction, image custody, DA3 camera conversion, cleanup, cancellation, offline loading, and the calibrated runner adapter. Real ordered-image MV inference passed on Linux ARM64 / GB10 after the public input-contract migration and produced a structurally valid GLB.
+**Runtime boundary:** the published native wheelhouse still contains the single-view Pixal3D core wheel. Normal setup checksum-verifies and force-reinstalls a bundled, additive pure-Python MV core after that wheelhouse; it does not change native CUDA/NATTEN packages or claim GPU compatibility. The vendored upstream `inference_mv.py` invokes the MV cascade through a private generated config and a scoped local-only loader, so downloaded shared weight files are not modified and corrupt/missing local checkpoints cannot trigger an upstream Hugging Face fallback. If the core overlay or isolated DA3 runtime is absent or invalid, setup fails rather than leaving an inert node. Contract tests cover ordered port reconstruction, image custody, DA3 camera conversion, declared fixed-rig construction, cleanup, cancellation, offline loading, and the calibrated runner adapter. Real declared-role inference at 1536 resolution with four generated character views passed on Linux ARM64 / GB10 and produced a coherent textured character mesh; this is runtime evidence for that input, not a universal quality guarantee.
 
 MV NAF loading is intercepted at the exact upstream Torch Hub call and reads only the verified local checkpoint; unexpected Hub requests fail closed. MV progress is reported at stage boundaries. Direct generation checks cancellation before NAF bootstrap and immediately after it, so a pre-cancelled request performs no NAF filesystem or network mutation. Cancellation is also checked before and after later expensive stages, but the upstream model-loading, cascade, and GLB extraction calls cannot be interrupted mid-call; a cancellation request takes effect at the next boundary.
 

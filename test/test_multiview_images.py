@@ -1,4 +1,5 @@
 import json
+import math
 import tempfile
 import threading
 import unittest
@@ -99,6 +100,8 @@ class MultiviewImageContractTests(unittest.TestCase):
         self.assertEqual(params["texture_size"]["default"], 1024)
         self.assertEqual([item["value"] for item in params["texture_size"]["options"]], [1024, 2048])
         self.assertEqual(params["view_layout"]["default"], "auto")
+        self.assertEqual(params["view_fov"]["default"], 20.0)
+        self.assertEqual(params["view_fov"]["show_if"], {"view_layout": "declared_roles"})
         for role_id in ("image_role", "image_2_role", "image_3_role", "image_4_role"):
             self.assertEqual(params[role_id]["show_if"], {"view_layout": "declared_roles"})
 
@@ -289,7 +292,7 @@ class MultiviewImageContractTests(unittest.TestCase):
             staged_manifest = Path(calibrated.call_args.kwargs["scene_manifest_path"])
             self.assertFalse(staged_manifest.parent.exists())
 
-    def test_declared_roles_reorder_connected_slots_anchor_front_and_annotate_da3_provenance(self):
+    def test_declared_roles_reorder_connected_slots_and_build_fixed_rig_without_da3(self):
         from pixal3d_extension.multiview_images import run_multiview_from_images
 
         with tempfile.TemporaryDirectory() as directory:
@@ -301,39 +304,27 @@ class MultiviewImageContractTests(unittest.TestCase):
             fourth = inputs / "fourth.png"
             third.write_bytes(png_bytes((3, 0, 0, 255)))
             fourth.write_bytes(png_bytes((4, 0, 0, 255)))
-            da3 = root / "da3"
-            da3.mkdir()
-            for name in ("config.json", "model.safetensors"):
-                (da3 / name).write_bytes(b"local")
             observed = {}
-
-            def calibrate(frame_paths, _da3_root, staging, _extension_root, **_kwargs):
-                observed["order"] = [Image.open(path).getpixel((0, 0))[0] for path in frame_paths]
-                transforms = staging / "transforms.json"
-                transforms.write_text(json.dumps({
-                    "mesh_scale": 1.0,
-                    "frames": [
-                        {"file_path": f"{index:04d}.png", "camera_angle_x": 0.5,
-                         "transform_matrix": [[1, 0, 0, index], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]}
-                        for index in range(3)
-                    ],
-                }))
-                return transforms
 
             def calibrated(**kwargs):
                 observed["transforms"] = json.loads(
                     (Path(kwargs["scene_manifest_path"]).parent / "transforms.json").read_text()
                 )
                 observed["manifest"] = json.loads(Path(kwargs["scene_manifest_path"]).read_text())
+                observed["order"] = [
+                    Image.open(Path(kwargs["scene_manifest_path"]).parent / frame["file_path"])
+                    .getpixel((0, 0))[0]
+                    for frame in observed["transforms"]["frames"]
+                ]
                 return workspace / "Workflows" / "result.glb"
 
             with patch("pixal3d_extension.multiview_images.validate_da3_runtime"), \
-                 patch("pixal3d_extension.multiview_images._estimate_cameras", side_effect=calibrate), \
+                 patch("pixal3d_extension.multiview_images._estimate_cameras") as estimator, \
                  patch("pixal3d_extension.multiview.run_multiview", side_effect=calibrated):
                 run_multiview_from_images(
                     primary_image_bytes=png_bytes((1, 0, 0, 255)),
                     extra_image_paths=[None, str(third), str(fourth)],
-                    workspace_dir=workspace, output_dir=workspace / "Workflows", da3_root=da3,
+                    workspace_dir=workspace, output_dir=workspace / "Workflows", da3_root=root / "missing-da3",
                     mv_root=root / "mv", base_root=root / "base", naf_path=root / "naf.pth",
                     params={
                         "view_layout": "declared_roles",
@@ -343,6 +334,7 @@ class MultiviewImageContractTests(unittest.TestCase):
                     },
                 )
 
+            estimator.assert_not_called()
             self.assertEqual(observed["order"], [3, 1, 4])
             expected_roles = [
                 {"slot": 3, "handle": "image_3", "role": "front", "azimuthDegrees": 0},
@@ -351,10 +343,96 @@ class MultiviewImageContractTests(unittest.TestCase):
             ]
             self.assertEqual(observed["transforms"]["provenance"]["viewRoles"], expected_roles)
             self.assertEqual(observed["manifest"]["provenance"]["viewRoles"], expected_roles)
+            frames = observed["transforms"]["frames"]
+            expected_fov = math.radians(20.0)
+            expected_distance = 0.55 / math.tan(expected_fov / 2.0)
+            self.assertEqual([frame["camera_angle_x"] for frame in frames], [expected_fov] * 3)
+            expected_positions = [
+                (0, -expected_distance, 0),
+                (0, expected_distance, 0),
+                (-expected_distance, 0, 0),
+            ]
+            expected_matrices = [
+                [[1, 0, 0, 0], [0, 0, -1, -expected_distance], [0, 1, 0, 0], [0, 0, 0, 1]],
+                [[-1, 0, 0, 0], [0, 0, 1, expected_distance], [0, 1, 0, 0], [0, 0, 0, 1]],
+                [[0, 0, -1, -expected_distance], [-1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1]],
+            ]
+            for frame, expected_position, expected_matrix in zip(
+                frames, expected_positions, expected_matrices, strict=True,
+            ):
+                actual = tuple(frame["transform_matrix"][axis][3] for axis in range(3))
+                for value, wanted in zip(actual, expected_position, strict=True):
+                    self.assertAlmostEqual(value, wanted, places=7)
+                for actual_row, expected_row in zip(frame["transform_matrix"], expected_matrix, strict=True):
+                    for value, wanted in zip(actual_row, expected_row, strict=True):
+                        self.assertAlmostEqual(value, wanted, places=7)
             self.assertEqual(
-                [frame["transform_matrix"][0][3] for frame in observed["transforms"]["frames"]],
-                [0, 1, 2],
+                observed["transforms"]["provenance"]["cameraPosePolicy"],
+                "declared-role-canonical-orbit",
             )
+            self.assertEqual(observed["transforms"]["provenance"]["cameraEstimator"], "declared fixed orbit")
+
+    def test_declared_view_fov_rejects_non_numeric_non_finite_and_out_of_range_values(self):
+        from pixal3d_extension.multiview_images import _write_declared_role_transforms
+
+        roles = [{"slot": 1, "handle": "image", "role": "front", "azimuthDegrees": 0}]
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "transforms.json"
+            for value in (True, "invalid", float("nan"), 0, 171):
+                with self.subTest(value=value), self.assertRaisesRegex(ValueError, "between 1 and 170"):
+                    _write_declared_role_transforms(target, roles, value)
+                self.assertFalse(target.exists())
+
+    def test_auto_layout_rejects_collapsed_da3_camera_coverage(self):
+        from pixal3d_extension.multiview_images import run_multiview_from_images
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            inputs = workspace / "Workflows" / "inputs"
+            inputs.mkdir(parents=True)
+            extras = []
+            for index in range(1, 4):
+                path = inputs / f"view-{index}.png"
+                path.write_bytes(png_bytes((index + 1, 0, 0, 255)))
+                extras.append(str(path))
+            da3 = root / "da3"
+            da3.mkdir()
+            for name in ("config.json", "model.safetensors"):
+                (da3 / name).write_bytes(b"local")
+
+            def calibrate(_frame_paths, _da3_root, staging, _extension_root, **_kwargs):
+                transforms = staging / "transforms.json"
+                transforms.write_text(json.dumps({
+                    "mesh_scale": 1.0,
+                    "frames": [
+                        {
+                            "file_path": f"{index:04d}.png",
+                            "camera_angle_x": 0.5,
+                            "transform_matrix": [
+                                [1, 0, 0, offset],
+                                [0, 0, -1, -3],
+                                [0, 1, 0, 0],
+                                [0, 0, 0, 1],
+                            ],
+                        }
+                        for index, offset in enumerate((0.0, 0.02, 0.001, -0.02))
+                    ],
+                }))
+                return transforms
+
+            with patch("pixal3d_extension.multiview_images.validate_da3_runtime"), \
+                 patch("pixal3d_extension.multiview_images._estimate_cameras", side_effect=calibrate), \
+                 patch("pixal3d_extension.multiview.run_multiview") as inference:
+                with self.assertRaisesRegex(ValueError, "collapsed.*Declared roles"):
+                    run_multiview_from_images(
+                        primary_image_bytes=png_bytes((1, 0, 0, 255)),
+                        extra_image_paths=extras,
+                        workspace_dir=workspace, output_dir=workspace / "Workflows", da3_root=da3,
+                        mv_root=root / "mv", base_root=root / "base", naf_path=root / "naf.pth",
+                        params={"view_layout": "auto"},
+                    )
+            inference.assert_not_called()
 
     def test_declared_roles_reject_duplicate_roles_and_missing_front_for_connected_slots(self):
         from pixal3d_extension.multiview_images import _apply_declared_view_roles, _decode
