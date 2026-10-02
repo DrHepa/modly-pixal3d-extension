@@ -50,7 +50,6 @@ jobs:
     runs-on: [self-hosted, windows, x64, rtx50]
     timeout-minutes: 180
     env:
-      EVIDENCE_DIR: ${{ runner.temp }}/pixal3d-blackwell-validation-evidence
       INPUT_CANDIDATE_ARTIFACT_PATH: ${{ inputs.candidate_artifact_path }}
       INPUT_EXPECTED_ARTIFACT_SHA256: ${{ inputs.expected_artifact_sha256 }}
       INPUT_EXPECTED_ARTIFACT_SIZE_BYTES: ${{ inputs.expected_artifact_size_bytes }}
@@ -66,6 +65,8 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Run Blackwell RTX50 validation harness
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/pixal3d-blackwell-validation-evidence
         run: |
           New-Item -ItemType Directory -Force -Path $env:EVIDENCE_DIR | Out-Null
           $arguments = @(

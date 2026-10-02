@@ -3108,7 +3108,18 @@ test('Blackwell RTX50 hardware workflow is manual, self-hosted, SHA-pinned, and 
   for (const input of ['candidate_artifact_path', 'expected_artifact_sha256', 'expected_artifact_size_bytes', 'modly_weights_path', 'fixture_image_path']) {
     assert.match(workflow, new RegExp(`${input}:[\\s\\S]*required:\\s*true`))
   }
+  const jobEnv = workflow.match(/^    env:\s*\n([\s\S]*?)(?=^    steps:\s*$)/m)
+  assert.ok(jobEnv, 'Blackwell validation job must declare its non-runner inputs in job env')
+  assert.doesNotMatch(
+    jobEnv[0],
+    /\$\{\{\s*runner\./,
+    'runner context is unavailable while GitHub evaluates a job-level env block',
+  )
   assert.match(workflow, /tools\/validation\/validate-blackwell-rtx50\.ps1/)
+  assert.match(
+    workflow,
+    /- name: Run Blackwell RTX50 validation harness[\s\S]*?env:\s*\n\s+EVIDENCE_DIR:\s*\$\{\{\s*runner\.temp\s*\}\}\/pixal3d-blackwell-validation-evidence[\s\S]*?run:\s*\|/,
+  )
   assert.match(workflow, /blackwell-validation-evidence-\$\{\{ github\.run_id \}\}/)
   assert.match(workflow, /path:\s*\$\{\{\s*runner\.temp\s*\}\}\/pixal3d-blackwell-validation-evidence/)
   assert.match(workflow, /INPUT_CANDIDATE_ARTIFACT_PATH:\s*\$\{\{\s*inputs\.candidate_artifact_path\s*\}\}/)

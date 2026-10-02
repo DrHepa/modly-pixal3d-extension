@@ -37,26 +37,98 @@ FILE_ATTRIBUTE_DIRECTORY = 0x00000010
 FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 
 
-def _windows_native_path(value: str) -> str:
-    if value.startswith("\\\\?\\UNC\\"):
-        value = "\\\\" + value[8:]
-    elif value.startswith("\\\\?\\"):
-        value = value[4:]
-    return os.path.normcase(os.path.abspath(value))
+@dataclass(frozen=True)
+class _WindowsFileIdentity:
+    volume_serial: int
+    file_id: bytes
+
+
+def _windows_file_identity_is_valid(identity: _WindowsFileIdentity) -> bool:
+    return (
+        len(identity.file_id) == 16
+        and identity.file_id != bytes(16)
+        and identity.file_id != bytes([0xFF]) * 16
+    )
+
+
+def _windows_extended_path(value: str) -> str:
+    """Return an absolute Win32 extended path without textual case folding."""
+
+    value = value.replace("/", "\\")
+    lowered = value.lower()
+    if lowered.startswith("\\\\.\\"):
+        raise ValueError("Windows device paths are not accepted")
+    if lowered.startswith("\\\\?\\unc\\"):
+        plain = "\\\\" + value[8:]
+        extended = value
+    elif lowered.startswith("\\\\?\\"):
+        plain = value[4:]
+        extended = value
+    else:
+        plain = value
+        extended = None
+    parsed = PureWindowsPath(plain)
+    if not parsed.is_absolute() or any(part in {".", ".."} for part in parsed.parts):
+        raise ValueError("Windows custody paths must be absolute without traversal segments")
+    if extended is not None:
+        if plain.startswith("\\\\") or (len(parsed.drive) == 2 and parsed.drive[1] == ":"):
+            return extended
+        raise ValueError("Unsupported Windows extended path namespace")
+    if plain.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + plain[2:]
+    if len(parsed.drive) != 2 or parsed.drive[1] != ":":
+        raise ValueError("Unsupported Windows absolute path")
+    return "\\\\?\\" + plain
+
+
+def _windows_display_path(value: str) -> str:
+    lowered = value.lower()
+    if lowered.startswith("\\\\?\\unc\\"):
+        return "\\\\" + value[8:]
+    if lowered.startswith("\\\\?\\"):
+        return value[4:]
+    return value
+
+
+def _windows_parent_paths(value: str):
+    current = PureWindowsPath(_windows_display_path(_windows_extended_path(value))).parent
+    while True:
+        yield str(current)
+        parent = current.parent
+        if parent == current:
+            return
+        current = parent
+
+
+def _windows_identity_chain_contains(
+    workspace: _WindowsFileIdentity,
+    candidate: _WindowsFileIdentity,
+    ancestors: list[_WindowsFileIdentity],
+) -> bool:
+    return (
+        _windows_file_identity_is_valid(workspace)
+        and _windows_file_identity_is_valid(candidate)
+        and candidate.volume_serial == workspace.volume_serial
+        and any(_windows_file_identity_is_valid(item) and item == workspace for item in ancestors)
+    )
 
 
 def _windows_stable_read(
     candidate: Path, workspace: Path, label: str, *, _opened_hook: Callable[[Path], None] | None = None,
 ) -> tuple[Path, bytes]:
-    """Read through one locked Win32 handle and prove its final path custody."""
+    """Read from a locked file while locked directory handles prove workspace custody."""
 
     import ctypes
     from ctypes import wintypes
 
     GENERIC_READ = 0x80000000
+    FILE_READ_ATTRIBUTES = 0x00000080
+    FILE_SHARE_WRITE = 0x00000002
     OPEN_EXISTING = 3
+    FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
     FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
     FILE_FLAG_SEQUENTIAL_SCAN = 0x08000000
+    FileIdInfo = 0x12
     INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
     class FILETIME(ctypes.Structure):
@@ -76,6 +148,12 @@ def _windows_stable_read(
             ("nFileIndexLow", wintypes.DWORD),
         ]
 
+    class FILE_ID_128(ctypes.Structure):
+        _fields_ = [("Identifier", ctypes.c_ubyte * 16)]
+
+    class FILE_ID_INFO(ctypes.Structure):
+        _fields_ = [("VolumeSerialNumber", ctypes.c_ulonglong), ("FileId", FILE_ID_128)]
+
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     create_file = kernel32.CreateFileW
     create_file.argtypes = [
@@ -86,6 +164,9 @@ def _windows_stable_read(
     get_info = kernel32.GetFileInformationByHandle
     get_info.argtypes = [wintypes.HANDLE, ctypes.POINTER(BY_HANDLE_FILE_INFORMATION)]
     get_info.restype = wintypes.BOOL
+    get_info_ex = kernel32.GetFileInformationByHandleEx
+    get_info_ex.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    get_info_ex.restype = wintypes.BOOL
     get_final_path = kernel32.GetFinalPathNameByHandleW
     get_final_path.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
     get_final_path.restype = wintypes.DWORD
@@ -96,10 +177,47 @@ def _windows_stable_read(
     close_handle.argtypes = [wintypes.HANDLE]
     close_handle.restype = wintypes.BOOL
 
-    # Share only reads. Existing or new writers/deleters/renamers conflict with
-    # this handle, so metadata, path custody, and bytes refer to one stable file.
+    def metadata(open_handle, description: str) -> BY_HANDLE_FILE_INFORMATION:
+        info = BY_HANDLE_FILE_INFORMATION()
+        if not get_info(open_handle, ctypes.byref(info)):
+            raise OSError(ctypes.get_last_error(), f"{description} handle metadata cannot be read")
+        return info
+
+    def identity(open_handle, description: str) -> _WindowsFileIdentity:
+        info = FILE_ID_INFO()
+        if not get_info_ex(open_handle, FileIdInfo, ctypes.byref(info), ctypes.sizeof(info)):
+            raise OSError(ctypes.get_last_error(), f"{description} stable file identity cannot be read")
+        result = _WindowsFileIdentity(int(info.VolumeSerialNumber), bytes(info.FileId.Identifier))
+        if not _windows_file_identity_is_valid(result):
+            raise ValueError(f"{description} stable file identity is unavailable")
+        return result
+
+    def final_path(open_handle, description: str) -> str:
+        capacity = 32768
+        buffer = ctypes.create_unicode_buffer(capacity)
+        length = get_final_path(open_handle, buffer, capacity, 0)
+        if not length or length >= capacity:
+            raise OSError(ctypes.get_last_error(), f"{description} final handle path cannot be resolved")
+        return buffer.value
+
+    custody_handles = []
+
+    def open_directory(path: str, description: str):
+        directory_handle = create_file(
+            _windows_extended_path(path), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        if directory_handle == INVALID_HANDLE_VALUE:
+            raise OSError(ctypes.get_last_error(), f"{description} directory handle cannot be opened")
+        custody_handles.append(directory_handle)
+        return directory_handle
+
+    # Share only reads for the file. Existing or new writers/deleters/renamers
+    # conflict, while directory handles below keep the verified ancestry stable.
     handle = create_file(
-        str(candidate), GENERIC_READ, FILE_SHARE_READ, None, OPEN_EXISTING,
+        _windows_extended_path(str(candidate)), GENERIC_READ, FILE_SHARE_READ, None, OPEN_EXISTING,
         FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, None,
     )
     if handle == INVALID_HANDLE_VALUE:
@@ -107,9 +225,7 @@ def _windows_stable_read(
     try:
         if _opened_hook is not None:
             _opened_hook(candidate)
-        info = BY_HANDLE_FILE_INFORMATION()
-        if not get_info(handle, ctypes.byref(info)):
-            raise OSError(ctypes.get_last_error(), f"{label} handle metadata cannot be read")
+        info = metadata(handle, label)
         if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT:
             raise ValueError(f"{label} must not be a Windows reparse point")
         if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY:
@@ -118,22 +234,54 @@ def _windows_stable_read(
         if size > MAX_IMAGE_BYTES:
             raise ValueError(f"{label} must be no larger than 64 MiB")
 
-        capacity = 32768
-        buffer = ctypes.create_unicode_buffer(capacity)
-        length = get_final_path(handle, buffer, capacity, 0)
-        if not length or length >= capacity:
-            raise OSError(ctypes.get_last_error(), f"{label} final handle path cannot be resolved")
-        final_path = _windows_native_path(buffer.value)
-        lexical_path = _windows_native_path(str(candidate))
-        workspace_path = _windows_native_path(str(workspace))
-        try:
-            inside = os.path.commonpath([workspace_path, final_path]) == workspace_path
-        except ValueError:
-            inside = False
-        if not inside:
+        candidate_identity = identity(handle, label)
+        final_candidate_path = final_path(handle, label)
+        workspace_handle = open_directory(str(workspace), f"{label} workspace")
+        workspace_info = metadata(workspace_handle, f"{label} workspace")
+        if workspace_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT:
+            raise ValueError(f"{label} workspace must not be a Windows reparse point")
+        if not workspace_info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY:
+            raise ValueError(f"{label} workspace must be a directory")
+        workspace_identity = identity(workspace_handle, f"{label} workspace")
+        if candidate_identity.volume_serial != workspace_identity.volume_serial:
+            raise ValueError(f"{label} must remain on the Modly workspace volume or share")
+
+        def locked_ancestor_identities(path: str, description: str) -> list[_WindowsFileIdentity]:
+            identities = []
+            for parent in _windows_parent_paths(path):
+                parent_handle = open_directory(parent, description)
+                parent_info = metadata(parent_handle, description)
+                if parent_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT:
+                    raise ValueError(f"{label} must not traverse a Windows reparse point")
+                if not parent_info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY:
+                    raise ValueError(f"{label} ancestor must remain a directory")
+                parent_identity = identity(parent_handle, description)
+                identities.append(parent_identity)
+                if parent_identity == workspace_identity:
+                    break
+            return identities
+
+        # The handle-resolved chain proves the opened bytes are below the workspace,
+        # even if a lexical junction is swapped after the file handle is acquired.
+        actual_ancestor_identities = locked_ancestor_identities(
+            final_candidate_path, f"{label} final-path ancestor",
+        )
+        if not _windows_identity_chain_contains(
+            workspace_identity, candidate_identity, actual_ancestor_identities,
+        ):
             raise ValueError(f"{label} final handle path escapes the Modly workspace")
-        if final_path != lexical_path:
-            raise ValueError(f"{label} must not traverse a Windows reparse point")
+
+        # The lexical chain separately rejects junctions/reparse points, including
+        # aliases that resolve to an otherwise in-workspace target.
+        lexical_ancestor_identities = locked_ancestor_identities(
+            str(candidate), f"{label} lexical ancestor",
+        )
+        if not _windows_identity_chain_contains(
+            workspace_identity, candidate_identity, lexical_ancestor_identities,
+        ):
+            raise ValueError(f"{label} path does not descend from the Modly workspace")
+        if final_path(handle, label) != final_candidate_path:
+            raise ValueError(f"{label} final handle path changed during custody validation")
 
         chunks: list[bytes] = []
         remaining = size
@@ -147,8 +295,10 @@ def _windows_stable_read(
                 raise OSError(f"{label} changed size during locked handle read")
             chunks.append(chunk.raw[:count.value])
             remaining -= count.value
-        return Path(final_path), b"".join(chunks)
+        return Path(_windows_display_path(final_candidate_path)), b"".join(chunks)
     finally:
+        for custody_handle in reversed(custody_handles):
+            close_handle(custody_handle)
         close_handle(handle)
 
 
@@ -190,15 +340,16 @@ def _workspace_file(raw: object, workspace: Path, label: str) -> tuple[Path, byt
     if any(part in {".", ".."} for part in parsed.parts):
         raise ValueError(f"{label} must not contain traversal segments")
     candidate = parsed if parsed.is_absolute() else workspace / parsed
-    try:
-        relative = candidate.relative_to(workspace)
-    except ValueError as exc:
-        raise ValueError(f"{label} must remain inside the Modly workspace") from exc
     if os.name == "nt":
         try:
             return _windows_stable_read(candidate, workspace, label)
         except OSError as exc:
             raise ValueError(f"{label} must remain a locked regular file inside the Modly workspace") from exc
+
+    try:
+        relative = candidate.relative_to(workspace)
+    except ValueError as exc:
+        raise ValueError(f"{label} must remain inside the Modly workspace") from exc
 
     current = workspace
     for part in relative.parts:

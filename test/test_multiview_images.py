@@ -19,6 +19,61 @@ def png_bytes(color=(30, 40, 50, 255)) -> bytes:
 
 
 class MultiviewImageContractTests(unittest.TestCase):
+    def test_windows_extended_paths_and_identity_containment_are_structural(self):
+        import pixal3d_extension.multiview_images as multiview_images
+
+        self.assertEqual(
+            multiview_images._windows_extended_path(r"C:\Users\runneradmin\workspace\view.png"),
+            r"\\?\C:\Users\runneradmin\workspace\view.png",
+        )
+        self.assertEqual(
+            multiview_images._windows_extended_path(r"\\server\share\workspace\view.png"),
+            r"\\?\UNC\server\share\workspace\view.png",
+        )
+        self.assertEqual(
+            multiview_images._windows_extended_path(r"\\?\C:\deep\view.png"),
+            r"\\?\C:\deep\view.png",
+        )
+        self.assertEqual(
+            multiview_images._windows_extended_path(r"\\?\UNC\server\share\view.png"),
+            r"\\?\UNC\server\share\view.png",
+        )
+        for unsafe in (r"relative\view.png", r"\\.\PhysicalDrive0", r"\\?\GLOBALROOT\Device\HarddiskVolume1"):
+            with self.subTest(unsafe=unsafe), self.assertRaises(ValueError):
+                multiview_images._windows_extended_path(unsafe)
+
+        identity = multiview_images._WindowsFileIdentity
+        workspace = identity(10, bytes.fromhex("01" * 16))
+        candidate = identity(10, bytes.fromhex("02" * 16))
+        case_only_distinct = identity(10, bytes.fromhex("03" * 16))
+        other_volume_or_share = identity(11, bytes.fromhex("02" * 16))
+        unavailable = identity(10, bytes(16))
+        no_unique_id = identity(10, bytes([0xFF]) * 16)
+        self.assertTrue(multiview_images._windows_file_identity_is_valid(workspace))
+        self.assertFalse(multiview_images._windows_file_identity_is_valid(unavailable))
+        self.assertFalse(multiview_images._windows_file_identity_is_valid(no_unique_id))
+        self.assertTrue(multiview_images._windows_identity_chain_contains(
+            workspace, candidate, [case_only_distinct, workspace],
+        ))
+        self.assertFalse(multiview_images._windows_identity_chain_contains(
+            workspace, candidate, [case_only_distinct],
+        ))
+        self.assertFalse(multiview_images._windows_identity_chain_contains(
+            workspace, other_volume_or_share, [workspace],
+        ))
+        self.assertFalse(multiview_images._windows_identity_chain_contains(
+            unavailable, candidate, [unavailable],
+        ))
+        self.assertFalse(multiview_images._windows_identity_chain_contains(
+            no_unique_id, candidate, [no_unique_id],
+        ))
+        self.assertFalse(multiview_images._windows_identity_chain_contains(
+            workspace, unavailable, [workspace],
+        ))
+        self.assertFalse(multiview_images._windows_identity_chain_contains(
+            workspace, no_unique_id, [workspace],
+        ))
+
     def test_manifest_uses_upstream_ordered_image_ports_and_da3(self):
         manifest = json.loads((Path(__file__).parents[1] / "manifest.json").read_text())
         node = next(item for item in manifest["nodes"] if item["id"] == "generate-mv")
@@ -393,14 +448,22 @@ class MultiviewImageContractTests(unittest.TestCase):
         self.assertEqual(observed["inference"]["ref_view_strategy"], "saddle_balanced")
         self.assertNotEqual(observed["inference"]["ref_view_strategy"], "middle")
 
-    def test_windows_reader_uses_one_locked_handle_and_final_path_custody(self):
+    def test_windows_reader_uses_locked_handle_identity_and_final_path_custody(self):
         source = (Path(__file__).parents[1] / "pixal3d_extension" / "multiview_images.py").read_text()
         self.assertIn("CreateFileW", source)
         self.assertIn("GetFileInformationByHandle", source)
         self.assertIn("GetFinalPathNameByHandleW", source)
+        self.assertIn("GetFileInformationByHandleEx", source)
+        self.assertIn("FileIdInfo", source)
         self.assertIn("ReadFile", source)
         self.assertIn("FILE_ATTRIBUTE_REPARSE_POINT", source)
         self.assertIn("FILE_SHARE_READ", source)
+        self.assertIn("FILE_FLAG_BACKUP_SEMANTICS", source)
+        self.assertIn("actual_ancestor_identities", source)
+        self.assertIn("lexical_ancestor_identities", source)
+        self.assertNotIn("GetLongPathNameW", source)
+        self.assertNotIn("normcase", source)
+        self.assertNotIn("commonpath", source)
         workspace_file = source.split("def _workspace_file", 1)[1].split("def validate_ordered_images", 1)[0]
         self.assertLess(workspace_file.index('if os.name == "nt":'), workspace_file.index("resolve(strict=True)"))
         windows_branch = source.split('if os.name == "nt":', 1)[1].split("# Open every component", 1)[0]
