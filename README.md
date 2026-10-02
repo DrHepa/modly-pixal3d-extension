@@ -86,7 +86,8 @@ public contracts; annotated-scene normalization remains weightless.
 `input_contract` keeps the canonical handles `image`, `image_2`, …, `image_8`,
 labels them **Primary view** and **View 2** through **View 8**, and marks only
 the primary port as required; all secondary ports are optional. The legacy
-string `inputs` array is retained for compatible host discovery. At least two
+string `inputs` and `input_labels` arrays are retained for stock upstream host
+discovery and labels. At least two
 images must be connected for scene preparation to run. Modly supplies the first
 as bytes and the other seven as ordered `extra_image_paths`; `null` holes are
 ignored without reordering later ports.
@@ -291,8 +292,8 @@ The extension preserves Pixal3D's exported GLB orientation. Do not apply a fixed
 
 `generate-mv` is an `image,image,image,image -> mesh` node using Modly's
 existing ordered multiple-image manifest contract. `input: "image"` remains as
-the parser-compatible fallback; the legacy string `inputs` array remains for
-compatible host discovery. The supported `input_contract` preserves canonical
+the parser-compatible fallback; the legacy string `inputs` and `input_labels`
+arrays remain for stock upstream host discovery and labels. The supported `input_contract` preserves canonical
 handles `image`, `image_2`, `image_3`, and `image_4`, labels them **Primary
 view**, **View 2**, **View 3**, and **View 4**, and marks only the primary port
 as required; all secondary ports are optional. Connect at least two and at most

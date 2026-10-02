@@ -11,6 +11,12 @@ const modlyRoot = process.env.MODLY_ROOT ? resolve(process.env.MODLY_ROOT) : nul
 const modlyParserPath = modlyRoot
   ? join(modlyRoot, 'electron', 'main', 'automation-capabilities.ts')
   : null
+const stockModlyParserPath = modlyRoot
+  ? join(modlyRoot, 'electron', 'main', 'ipc-handlers.ts')
+  : null
+const stockExtensionNodePath = modlyRoot
+  ? join(modlyRoot, 'src', 'areas', 'workflows', 'nodes', 'ExtensionNode.tsx')
+  : null
 
 function python(source) {
   const run = spawnSync('python3', ['-c', source], { cwd: root, encoding: 'utf8' })
@@ -28,7 +34,7 @@ test('multi-image node uses upstream ordered image ports and DA3 calibration wei
     { name: 'image_3', label: 'View 3', type: 'image', required: false },
     { name: 'image_4', label: 'View 4', type: 'image', required: false },
   ])
-  assert.equal(node?.input_labels, undefined)
+  assert.deepEqual(node?.input_labels, ['Primary view', 'View 2', 'View 3', 'View 4'])
   assert.deepEqual(node?.weight_groups, ['pixal3d-base', 'pixal3d-mv', 'da3-base'])
   const params = Object.fromEntries(node.params_schema.map((item) => [item.id, item]))
   assert.deepEqual(params.texture_size.options.map((item) => item.value), [1024, 2048])
@@ -69,6 +75,31 @@ test('deployed Modly parser exposes canonical labels and optional secondary imag
     type: 'image',
     required: index === 0,
   })))
+})
+
+test('stock upstream Modly preserves legacy labels for ordered image ports', (t) => {
+  if (modlyParserPath && existsSync(modlyParserPath)) {
+    t.skip('host uses the structured input_contract parser checked above')
+    return
+  }
+  if (!stockModlyParserPath || !stockExtensionNodePath
+    || !existsSync(stockModlyParserPath) || !existsSync(stockExtensionNodePath)) {
+    t.skip('set MODLY_ROOT to run the stock-upstream label compatibility check')
+    return
+  }
+
+  const parser = readFileSync(stockModlyParserPath, 'utf8')
+  const extensionNode = readFileSync(stockExtensionNodePath, 'utf8')
+  assert.match(parser, /inputLabels:\s+n\.input_labels/)
+  assert.match(extensionNode, /ext\?\.inputLabels\?\.\[i\]\s*\?\?\s*inputType/)
+  assert.deepEqual(
+    manifest.nodes.find((item) => item.id === 'generate-mv')?.input_labels,
+    ['Primary view', 'View 2', 'View 3', 'View 4'],
+  )
+  assert.deepEqual(
+    manifest.nodes.find((item) => item.id === 'scene-from-images')?.input_labels,
+    ['Primary view', 'View 2', 'View 3', 'View 4', 'View 5', 'View 6', 'View 7', 'View 8'],
+  )
 })
 
 test('MV texture size is propagated explicitly into the tracked GLB exporter', () => {

@@ -92,7 +92,7 @@ class MultiviewImageContractTests(unittest.TestCase):
                 for index in range(1, 5)
             ],
         )
-        self.assertNotIn("input_labels", node)
+        self.assertEqual(node["input_labels"], ["Primary view", "View 2", "View 3", "View 4"])
         self.assertEqual(node["output"], "mesh")
         self.assertEqual(node["weight_groups"], ["pixal3d-base", "pixal3d-mv", "da3-base"])
         params = {item["id"]: item for item in node["params_schema"]}

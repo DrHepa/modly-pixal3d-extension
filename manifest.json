@@ -139,6 +139,12 @@
         "image",
         "image"
       ],
+      "input_labels": [
+        "Primary view",
+        "View 2",
+        "View 3",
+        "View 4"
+      ],
       "input_contract": [
         {
           "name": "image",
@@ -356,6 +362,16 @@
         "image",
         "image",
         "image"
+      ],
+      "input_labels": [
+        "Primary view",
+        "View 2",
+        "View 3",
+        "View 4",
+        "View 5",
+        "View 6",
+        "View 7",
+        "View 8"
       ],
       "input_contract": [
         {
