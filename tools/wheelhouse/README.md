@@ -4,7 +4,7 @@ This directory documents the maintainer workflow for publishing release-backed w
 
 ## Pixal3D multi-view candidate provenance
 
-`build-pixal3d-mv-python-wheel.py` creates the bundled **pure-Python candidate overlay**, not a published native wheelhouse asset. It requires a local TencentARC/Pixal3D checkout at immutable commit `f7cf38429b0bd264f1995f0f8743a88b1c728b94` and the existing base `pixal3d-core` wheel with SHA256 `c46502c5ed195351efd150a229856095119435d356511f9343f71b8974a872f2`. It verifies the four patched Python source hashes, regenerates wheel RECORD hashes, and uses fixed ZIP timestamps for reproducibility. The resulting candidate SHA256 is `3ad32043cc429091d2bb2435e3e4256406f94da2dadfe92c4d36a44aa7c2309c` with those inputs. `setup.py` verifies this hash and reinstalls `wheels/mv/pixal3d_core-0.1.0+modly-py3-none-any.whl` after the release-backed wheelhouse's base wheel; this preserves the original single-view modules while adding the MV pipeline class.
+`build-pixal3d-mv-python-wheel.py` creates the bundled **pure-Python candidate overlay**, not a published native wheelhouse asset. It requires a local TencentARC/Pixal3D checkout at immutable commit `f7cf38429b0bd264f1995f0f8743a88b1c728b94` and the existing base `pixal3d-core` wheel with SHA256 `c46502c5ed195351efd150a229856095119435d356511f9343f71b8974a872f2`. It verifies the four patched Python source hashes, regenerates wheel RECORD hashes, and uses fixed ZIP timestamps for reproducibility. The resulting candidate SHA256 is `49d61a5f83c57b0d6670d1446a47a0cd7a2a8baf40b3d207fee60e90ee683cd0` with those inputs. `setup.py` verifies this hash and reinstalls `wheels/mv/pixal3d_core-0.1.0+modly-py3-none-any.whl` after the release-backed wheelhouse's base wheel; this preserves the original single-view modules while adding the MV pipeline class.
 
 ```bash
 python3 tools/wheelhouse/build-pixal3d-mv-python-wheel.py \
@@ -16,6 +16,16 @@ python3 tools/wheelhouse/build-pixal3d-mv-python-wheel.py \
 The vendored `pixal3d_extension/vendor/inference_mv.py`, LICENSE and NOTICE are copied from the same immutable source; the inference file SHA256 is `875144f73fdf083e92717dcee260035c7391de09fe48f02316ce3ad3bf7aedf9`. The MV weight revision is separately pinned in `manifest.json` to Hugging Face commit `b0cb2e1b794cab9aa0ac38a95d794a4d9337437f`.
 
 The candidate is deliberately outside `wheelhouse.manifest.json`: it is pure Python and installed from the extension's own hash-verified artifact, while existing native lanes stay unchanged. This is **not** a claim that MV inference works on any GPU or on Blackwell. The native release archive must still be rebuilt and live-tested for each future exact platform/Python/CUDA lane before any MV support claim. Modly's host multi-source/shared-weight changes and a real posed-view UI→GPU→GLB test remain required.
+
+The overlay uses `platform_system` markers for the four native distribution differences: Windows requires `o-voxel-vb-ap==0.0.1`, `cumesh-vb==1.0`, `flex-gemm-ap==1.0.0`, and `nvdiffrec-render==0.0.1`; non-Windows retains the original names and pins. Every other requirement, including unconditional `natten==0.21.0`, is unchanged. Only METADATA and its RECORD entry differ from the previous overlay; the 103 other archive payloads are unchanged.
+
+## Clean Windows dependency-install evidence
+
+`.github/workflows/windows-dependency-install.yml` runs on relevant pull requests and manual dispatch. It creates an isolated, weights-free copy under `RUNNER_TEMP`, invokes ordinary `setup.py` with one Modly JSON payload (`cuda_version=128`, `gpu_sm=86`), downloads and verifies the stable cp311 release archive, and runs the real venv/pip dependency/native/overlay installations. These routing values are not detected hardware evidence. It checks every install command, actual `pip check`, installed versions, and the unchanged native import probe; full pip logs and JSON evidence upload even on failure.
+
+Hosted Windows has no NVIDIA GPU: full setup must remain **FAIL**, hardware **NOT_QUALIFIED**, and inference **NOT_RUN**. A native import blocked specifically by the absent NVIDIA driver is **BLOCKED**, never PASS; dependency installation is then **NOT_QUALIFIED**, although the installed dependency graph may PASS. Unexpected installation, metadata, ABI, or import errors fail the job. CI execution is not established by committing this workflow; inspect an actual run's evidence before making any platform claim.
+
+The cp311 metadata fix does **not** qualify cp312. Its stable archive excludes NATTEN, and setup installs NATTEN only when a curated wheel is present. Because the overlay still requires `natten==0.21.0` and no verified Windows cp312 alternative exists, that dependency graph remains **NOT_QUALIFIED**. Do not remove the requirement or weaken `pip check` to make it green.
 
 ## Local build recipe
 

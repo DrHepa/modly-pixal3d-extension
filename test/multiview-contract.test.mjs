@@ -18,6 +18,27 @@ const stockExtensionNodePath = modlyRoot
   ? join(modlyRoot, 'src', 'areas', 'workflows', 'nodes', 'ExtensionNode.tsx')
   : null
 
+test('Windows dependency CI executes real setup with pinned actions and always uploads evidence', () => {
+  const workflow = readFileSync(join(root, '.github/workflows/windows-dependency-install.yml'), 'utf8')
+  const helper = readFileSync(join(root, 'tools/validation/windows_dependency_install.py'), 'utf8')
+  assert.match(workflow, /pull_request:/)
+  assert.match(workflow, /workflow_dispatch:/)
+  for (const path of ['setup.py', 'requirements.txt', 'tools/wheelhouse/**', 'wheels/**', 'test/**']) {
+    assert.ok(workflow.includes(`'${path}'`))
+  }
+  assert.match(workflow, /runs-on:\s*windows-2022/)
+  assert.match(workflow, /python-version:\s*'3\.11'/)
+  for (const action of workflow.matchAll(/uses:\s*([^\s]+)/g)) {
+    assert.match(action[1], /@[a-f0-9]{40}$/)
+  }
+  assert.match(workflow, /if:\s*always\(\)/)
+  assert.match(workflow, /path:\s*\$\{\{ runner\.temp \}\}/)
+  assert.match(helper, /str\(extension \/ "setup\.py"\), json\.dumps\(payload\)/)
+  assert.match(helper, /\[python, "-m", "pip", "check"\]/)
+  assert.match(helper, /"PIP_LOG"/)
+  assert.doesNotMatch(helper, /unittest\.mock|mock\.patch|--skip-install|--skip-scene-prep/)
+})
+
 function python(source) {
   const run = spawnSync('python3', ['-c', source], { cwd: root, encoding: 'utf8' })
   assert.equal(run.status, 0, run.stderr)

@@ -26,10 +26,31 @@ SOURCE_HASHES = {
     "pixal3d/trainers/flow_matching/mixins/image_conditioned_proj.py": "3e02246e00a047d1bc8be170a4313632c32a4077b22447f044956b9810340f56",
 }
 RECORD = "pixal3d_core-0.1.0+modly.dist-info/RECORD"
+METADATA = "pixal3d_core-0.1.0+modly.dist-info/METADATA"
+PLATFORM_REQUIREMENTS = {
+    "o-voxel==0.0.1": "o-voxel-vb-ap==0.0.1",
+    "cumesh==0.0.1": "cumesh-vb==1.0",
+    "flex-gemm==1.0.0": "flex-gemm-ap==1.0.0",
+    "nvdiffrec-render==0.0.0": "nvdiffrec-render==0.0.1",
+}
 
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def platform_metadata(data: bytes) -> bytes:
+    """Select the real Windows distributions without weakening other requirements."""
+    for linux, windows in PLATFORM_REQUIREMENTS.items():
+        original = f"Requires-Dist: {linux}\n".encode()
+        if data.count(original) != 1:
+            raise ValueError(f"unexpected base dependency metadata: {linux}")
+        replacement = (
+            f'Requires-Dist: {linux}; platform_system != "Windows"\n'
+            f'Requires-Dist: {windows}; platform_system == "Windows"\n'
+        ).encode()
+        data = data.replace(original, replacement)
+    return data
 
 
 def build(source: Path, base: Path, output: Path) -> str:
@@ -40,6 +61,7 @@ def build(source: Path, base: Path, output: Path) -> str:
         raise ValueError("base pixal3d-core wheel checksum mismatch")
     with ZipFile(base) as archive:
         entries = {name: archive.read(name) for name in archive.namelist() if name != RECORD}
+    entries[METADATA] = platform_metadata(entries[METADATA])
     for name, expected in SOURCE_HASHES.items():
         data = (source / name).read_bytes()
         if digest(data) != expected:

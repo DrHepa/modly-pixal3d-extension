@@ -41,7 +41,7 @@ VENV_MARKER = ".modly-prepared"
 WHEELHOUSE_DIR = "wheels"
 WHEELHOUSE_MANIFEST = "wheelhouse.manifest.json"
 MV_CORE_WHEEL = "wheels/mv/pixal3d_core-0.1.0+modly-py3-none-any.whl"
-MV_CORE_WHEEL_SHA256 = "3ad32043cc429091d2bb2435e3e4256406f94da2dadfe92c4d36a44aa7c2309c"
+MV_CORE_WHEEL_SHA256 = "49d61a5f83c57b0d6670d1446a47a0cd7a2a8baf40b3d207fee60e90ee683cd0"
 
 LOCAL_WHEEL_PACKAGES = [
     "utils3d==1.3+modly.headless",
