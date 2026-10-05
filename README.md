@@ -120,6 +120,13 @@ without textures**: `scene.glb` plus `scene_mesh.glb`, returning `scene.glb` to 
 Its default face budget is 1,000,000 per instance.
 
 For missing weights, use **Models**; for dependency errors, use **Repair** first.
+On Windows x64 with Python 3.11/3.12, Modly's `cuda_version` is driver capability,
+not the installed PyTorch CUDA ABI. Pre-Blackwell GPUs with capability ≥12.4 select
+the published cu124 wheelhouse, including newer drivers reporting 12.8. Setup
+verifies torch `2.6.0+cu124`, torchvision `0.21.0+cu124`, and CUDA runtime `12.4`.
+This selects an installation ABI; it does not qualify GPU kernels or inference.
+Blackwell remains unsupported by the published wheelhouse. Historical invocations
+without GPU metadata retain the default cu124 lane.
 For targeted recovery only, run `python3 setup.py --repair-scene-prep --json` or
 `python3 setup.py --repair-worldsculpt --json` from the extension directory.
 If NAF is corrupt or its automatic download fails, use the exact bootstrap repair

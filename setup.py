@@ -326,6 +326,8 @@ def _dependency_policy(runtime_evidence: dict[str, str]) -> dict[str, Any]:
         "torch_index_url": PYTORCH_CUDA_INDEX_URL,
         "natten": "0.21.0",
         "strict_validation": False,
+        **({"validate_torch_abi": True, "expected_torch_cuda": "12.4"}
+           if lane in {"windows-x64-cp311-cuda124", "windows-x64-cp312-cuda124"} else {}),
     }
 
 
@@ -427,17 +429,18 @@ def _validate_runtime_probe(probe: dict[str, Any], policy: dict[str, Any]) -> di
     errors: list[str] = []
     if not probe.get("ok"):
         errors.append(str(probe.get("error") or "runtime probe failed"))
-    if policy.get("strict_validation"):
+    if policy.get("strict_validation") or policy.get("validate_torch_abi"):
         expected = {
             "torch_version": policy["torch"],
             "torchvision_version": policy["torchvision"],
             "torch_cuda_version": policy["expected_torch_cuda"],
-            "gpu_sm": policy["required_gpu_sm"],
-            "natten_version": policy["natten"],
         }
+        if policy.get("strict_validation"):
+            expected.update({"gpu_sm": policy["required_gpu_sm"], "natten_version": policy["natten"]})
         for key, expected_value in expected.items():
             if str(probe.get(key)) != str(expected_value):
                 errors.append(f"{key} must be {expected_value}; found {probe.get(key)!r}")
+    if policy.get("strict_validation"):
         if probe.get("torch_cuda_available") is not True:
             errors.append("torch CUDA must be available")
         if policy.get("require_libnatten") and probe.get("natten_has_libnatten") is not True:
