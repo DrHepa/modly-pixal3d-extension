@@ -91,7 +91,7 @@ sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 
 from services.generators.base import BaseGenerator, GenerationCancelled
-from pixal3d_extension import runtime
+from pixal3d_extension import runtime, pipeline_patch
 
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
@@ -102,7 +102,11 @@ with tempfile.TemporaryDirectory() as tmp:
 
     generator = module.Pixal3DGenerator(model_dir, outputs_dir)
     initially_loaded = generator.is_loaded()
+    generator._prepare_generation_assets = lambda *args: None
+    original_patch = pipeline_patch.patch_pipeline
+    pipeline_patch.patch_pipeline = lambda *args, **kwargs: {"status": "patched"}
     generator.load()
+    pipeline_patch.patch_pipeline = original_patch
     loaded_after_load = generator.is_loaded()
     generator.unload()
     unloaded_after_unload = not generator.is_loaded()
@@ -124,7 +128,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
     calls = []
 
-    def fake_run_job(job, *, pipeline_factory=None):
+    def fake_run_job(job, *, pipeline_factory=None, cancel_event=None):
         calls.append({
             "job": dict(job),
             "pipeline_factory": pipeline_factory,
@@ -305,7 +309,10 @@ with tempfile.TemporaryDirectory() as tmp:
             outputs_dir,
             pipeline_factory=forbidden_pipeline,
         )
-        generator.load()
+        try:
+            generator.load()
+        except RuntimeError:
+            pass
         error = ""
         try:
             generator.generate({
@@ -335,8 +342,8 @@ with tempfile.TemporaryDirectory() as tmp:
         "actionable": "Modly Models" in error and "Repair" in error,
         "bootstrap_calls": len(bootstrap_calls),
         "downloader_calls": len(downloader_calls),
-        "local_mode": '"auxiliary_mode": "local"' in error,
-        "missing_assets": "missing_auxiliary_assets" in error,
+        "hf_downloads_disabled": "Hugging Face runtime downloads are disabled" in error,
+        "missing_assets": "missing_assets" in error,
         "network_calls": len(network_calls),
         "pipeline_calls": len(pipeline_calls),
         "strict_offline_not_used": "offline_runtime_dependencies_unresolved" not in error,
@@ -351,7 +358,7 @@ with tempfile.TemporaryDirectory() as tmp:
       actionable: true,
       bootstrap_calls: 0,
       downloader_calls: 0,
-      local_mode: true,
+      hf_downloads_disabled: true,
       missing_assets: true,
       network_calls: 0,
       pipeline_calls: 0,

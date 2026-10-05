@@ -1,0 +1,693 @@
+"""Ordered Modly multiple-image adapter with fixed or DA3-estimated cameras."""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import math
+import os
+import stat
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path, PureWindowsPath
+from typing import Any, Callable
+
+from PIL import Image, UnidentifiedImageError
+
+from .scene_prepare import _run_worker, offline_environment, validate_da3_weights
+from .scene_prepare_contract import validate_workspace_output_parent
+from .scene_prepare_lane import python_path, validate_da3_runtime
+
+
+MAX_IMAGE_BYTES = 64 * 1024 * 1024
+MAX_IMAGE_PIXELS = 100_000_000
+SUPPORTED_FORMATS = {"PNG", "JPEG", "WEBP"}
+VIEW_ROLE_AZIMUTHS = {
+    "front": 0,
+    "front-right": 45,
+    "right": 90,
+    "back-right": 135,
+    "back": 180,
+    "back-left": 225,
+    "left": 270,
+    "front-left": 315,
+}
+FILE_SHARE_READ = 0x00000001
+FILE_ATTRIBUTE_DIRECTORY = 0x00000010
+FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+
+
+@dataclass(frozen=True)
+class _WindowsFileIdentity:
+    volume_serial: int
+    file_id: bytes
+
+
+def _windows_file_identity_is_valid(identity: _WindowsFileIdentity) -> bool:
+    return (
+        len(identity.file_id) == 16
+        and identity.file_id != bytes(16)
+        and identity.file_id != bytes([0xFF]) * 16
+    )
+
+
+def _windows_extended_path(value: str) -> str:
+    """Return an absolute Win32 extended path without textual case folding."""
+
+    value = value.replace("/", "\\")
+    lowered = value.lower()
+    if lowered.startswith("\\\\.\\"):
+        raise ValueError("Windows device paths are not accepted")
+    if lowered.startswith("\\\\?\\unc\\"):
+        plain = "\\\\" + value[8:]
+        extended = value
+    elif lowered.startswith("\\\\?\\"):
+        plain = value[4:]
+        extended = value
+    else:
+        plain = value
+        extended = None
+    parsed = PureWindowsPath(plain)
+    if not parsed.is_absolute() or any(part in {".", ".."} for part in parsed.parts):
+        raise ValueError("Windows custody paths must be absolute without traversal segments")
+    if extended is not None:
+        if plain.startswith("\\\\") or (len(parsed.drive) == 2 and parsed.drive[1] == ":"):
+            return extended
+        raise ValueError("Unsupported Windows extended path namespace")
+    if plain.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + plain[2:]
+    if len(parsed.drive) != 2 or parsed.drive[1] != ":":
+        raise ValueError("Unsupported Windows absolute path")
+    return "\\\\?\\" + plain
+
+
+def _windows_display_path(value: str) -> str:
+    lowered = value.lower()
+    if lowered.startswith("\\\\?\\unc\\"):
+        return "\\\\" + value[8:]
+    if lowered.startswith("\\\\?\\"):
+        return value[4:]
+    return value
+
+
+def _windows_parent_paths(value: str):
+    current = PureWindowsPath(_windows_display_path(_windows_extended_path(value))).parent
+    while True:
+        yield str(current)
+        parent = current.parent
+        if parent == current:
+            return
+        current = parent
+
+
+def _windows_identity_chain_contains(
+    workspace: _WindowsFileIdentity,
+    candidate: _WindowsFileIdentity,
+    ancestors: list[_WindowsFileIdentity],
+) -> bool:
+    return (
+        _windows_file_identity_is_valid(workspace)
+        and _windows_file_identity_is_valid(candidate)
+        and candidate.volume_serial == workspace.volume_serial
+        and any(_windows_file_identity_is_valid(item) and item == workspace for item in ancestors)
+    )
+
+
+def _windows_stable_read(
+    candidate: Path, workspace: Path, label: str, *, _opened_hook: Callable[[Path], None] | None = None,
+) -> tuple[Path, bytes]:
+    """Read from a locked file while locked directory handles prove workspace custody."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    GENERIC_READ = 0x80000000
+    FILE_READ_ATTRIBUTES = 0x00000080
+    FILE_SHARE_WRITE = 0x00000002
+    OPEN_EXISTING = 3
+    FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+    FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    FILE_FLAG_SEQUENTIAL_SCAN = 0x08000000
+    FileIdInfo = 0x12
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+    class FILETIME(ctypes.Structure):
+        _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
+
+    class BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", FILETIME),
+            ("ftLastAccessTime", FILETIME),
+            ("ftLastWriteTime", FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    class FILE_ID_128(ctypes.Structure):
+        _fields_ = [("Identifier", ctypes.c_ubyte * 16)]
+
+    class FILE_ID_INFO(ctypes.Structure):
+        _fields_ = [("VolumeSerialNumber", ctypes.c_ulonglong), ("FileId", FILE_ID_128)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    get_info = kernel32.GetFileInformationByHandle
+    get_info.argtypes = [wintypes.HANDLE, ctypes.POINTER(BY_HANDLE_FILE_INFORMATION)]
+    get_info.restype = wintypes.BOOL
+    get_info_ex = kernel32.GetFileInformationByHandleEx
+    get_info_ex.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    get_info_ex.restype = wintypes.BOOL
+    get_final_path = kernel32.GetFinalPathNameByHandleW
+    get_final_path.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+    get_final_path.restype = wintypes.DWORD
+    read_file = kernel32.ReadFile
+    read_file.argtypes = [wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+    read_file.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    def metadata(open_handle, description: str) -> BY_HANDLE_FILE_INFORMATION:
+        info = BY_HANDLE_FILE_INFORMATION()
+        if not get_info(open_handle, ctypes.byref(info)):
+            raise OSError(ctypes.get_last_error(), f"{description} handle metadata cannot be read")
+        return info
+
+    def identity(open_handle, description: str) -> _WindowsFileIdentity:
+        info = FILE_ID_INFO()
+        if not get_info_ex(open_handle, FileIdInfo, ctypes.byref(info), ctypes.sizeof(info)):
+            raise OSError(ctypes.get_last_error(), f"{description} stable file identity cannot be read")
+        result = _WindowsFileIdentity(int(info.VolumeSerialNumber), bytes(info.FileId.Identifier))
+        if not _windows_file_identity_is_valid(result):
+            raise ValueError(f"{description} stable file identity is unavailable")
+        return result
+
+    def final_path(open_handle, description: str) -> str:
+        capacity = 32768
+        buffer = ctypes.create_unicode_buffer(capacity)
+        length = get_final_path(open_handle, buffer, capacity, 0)
+        if not length or length >= capacity:
+            raise OSError(ctypes.get_last_error(), f"{description} final handle path cannot be resolved")
+        return buffer.value
+
+    custody_handles = []
+
+    def open_directory(path: str, description: str):
+        directory_handle = create_file(
+            _windows_extended_path(path), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        if directory_handle == INVALID_HANDLE_VALUE:
+            raise OSError(ctypes.get_last_error(), f"{description} directory handle cannot be opened")
+        custody_handles.append(directory_handle)
+        return directory_handle
+
+    # Share only reads for the file. Existing or new writers/deleters/renamers
+    # conflict, while directory handles below keep the verified ancestry stable.
+    handle = create_file(
+        _windows_extended_path(str(candidate)), GENERIC_READ, FILE_SHARE_READ, None, OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, None,
+    )
+    if handle == INVALID_HANDLE_VALUE:
+        raise OSError(ctypes.get_last_error(), f"{label} cannot be opened as a locked regular file")
+    try:
+        if _opened_hook is not None:
+            _opened_hook(candidate)
+        info = metadata(handle, label)
+        if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT:
+            raise ValueError(f"{label} must not be a Windows reparse point")
+        if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY:
+            raise ValueError(f"{label} must be a regular file")
+        size = (int(info.nFileSizeHigh) << 32) | int(info.nFileSizeLow)
+        if size > MAX_IMAGE_BYTES:
+            raise ValueError(f"{label} must be no larger than 64 MiB")
+
+        candidate_identity = identity(handle, label)
+        final_candidate_path = final_path(handle, label)
+        workspace_handle = open_directory(str(workspace), f"{label} workspace")
+        workspace_info = metadata(workspace_handle, f"{label} workspace")
+        if workspace_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT:
+            raise ValueError(f"{label} workspace must not be a Windows reparse point")
+        if not workspace_info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY:
+            raise ValueError(f"{label} workspace must be a directory")
+        workspace_identity = identity(workspace_handle, f"{label} workspace")
+        if candidate_identity.volume_serial != workspace_identity.volume_serial:
+            raise ValueError(f"{label} must remain on the Modly workspace volume or share")
+
+        def locked_ancestor_identities(path: str, description: str) -> list[_WindowsFileIdentity]:
+            identities = []
+            for parent in _windows_parent_paths(path):
+                parent_handle = open_directory(parent, description)
+                parent_info = metadata(parent_handle, description)
+                if parent_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT:
+                    raise ValueError(f"{label} must not traverse a Windows reparse point")
+                if not parent_info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY:
+                    raise ValueError(f"{label} ancestor must remain a directory")
+                parent_identity = identity(parent_handle, description)
+                identities.append(parent_identity)
+                if parent_identity == workspace_identity:
+                    break
+            return identities
+
+        # The handle-resolved chain proves the opened bytes are below the workspace,
+        # even if a lexical junction is swapped after the file handle is acquired.
+        actual_ancestor_identities = locked_ancestor_identities(
+            final_candidate_path, f"{label} final-path ancestor",
+        )
+        if not _windows_identity_chain_contains(
+            workspace_identity, candidate_identity, actual_ancestor_identities,
+        ):
+            raise ValueError(f"{label} final handle path escapes the Modly workspace")
+
+        # The lexical chain separately rejects junctions/reparse points, including
+        # aliases that resolve to an otherwise in-workspace target.
+        lexical_ancestor_identities = locked_ancestor_identities(
+            str(candidate), f"{label} lexical ancestor",
+        )
+        if not _windows_identity_chain_contains(
+            workspace_identity, candidate_identity, lexical_ancestor_identities,
+        ):
+            raise ValueError(f"{label} path does not descend from the Modly workspace")
+        if final_path(handle, label) != final_candidate_path:
+            raise ValueError(f"{label} final handle path changed during custody validation")
+
+        chunks: list[bytes] = []
+        remaining = size
+        while remaining:
+            request = min(1024 * 1024, remaining)
+            chunk = ctypes.create_string_buffer(request)
+            count = wintypes.DWORD()
+            if not read_file(handle, chunk, request, ctypes.byref(count), None):
+                raise OSError(ctypes.get_last_error(), f"{label} locked handle read failed")
+            if count.value == 0:
+                raise OSError(f"{label} changed size during locked handle read")
+            chunks.append(chunk.raw[:count.value])
+            remaining -= count.value
+        return Path(_windows_display_path(final_candidate_path)), b"".join(chunks)
+    finally:
+        for custody_handle in reversed(custody_handles):
+            close_handle(custody_handle)
+        close_handle(handle)
+
+
+@dataclass(frozen=True)
+class ValidatedImage:
+    data: bytes
+    format: str
+    width: int
+    height: int
+    digest: str
+
+
+def _check_cancel(cancel_event: Any | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("Pixal3D MV generation cancelled")
+
+
+def _decode(data: bytes, label: str) -> ValidatedImage:
+    if not data or len(data) > MAX_IMAGE_BYTES:
+        raise ValueError(f"{label} must be a nonempty supported image no larger than 64 MiB")
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            image_format = str(image.format or "").upper()
+            width, height = image.size
+            image.verify()
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
+        raise ValueError(f"{label} must contain a supported image") from exc
+    if image_format not in SUPPORTED_FORMATS or width <= 0 or height <= 0 or width * height > MAX_IMAGE_PIXELS:
+        raise ValueError(f"{label} must contain a supported image (PNG, JPEG, or WebP) within safe dimensions")
+    return ValidatedImage(data, image_format, width, height, hashlib.sha256(data).hexdigest())
+
+
+def _workspace_file(raw: object, workspace: Path, label: str) -> tuple[Path, bytes]:
+    if not isinstance(raw, str) or not raw or raw != raw.strip() or "\x00" in raw:
+        raise TypeError(f"{label} must be a nonempty workspace image path")
+    parsed = Path(raw)
+    if PureWindowsPath(raw).is_absolute() and os.name != "nt":
+        raise ValueError(f"{label} must be a native workspace path")
+    if any(part in {".", ".."} for part in parsed.parts):
+        raise ValueError(f"{label} must not contain traversal segments")
+    candidate = parsed if parsed.is_absolute() else workspace / parsed
+    if os.name == "nt":
+        try:
+            return _windows_stable_read(candidate, workspace, label)
+        except OSError as exc:
+            raise ValueError(f"{label} must remain a locked regular file inside the Modly workspace") from exc
+
+    try:
+        relative = candidate.relative_to(workspace)
+    except ValueError as exc:
+        raise ValueError(f"{label} must remain inside the Modly workspace") from exc
+
+    current = workspace
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(f"{label} must not use symlinks")
+    resolved = candidate.resolve(strict=True)
+    if not resolved.is_relative_to(workspace) or not resolved.is_file():
+        raise ValueError(f"{label} must be a regular file inside the Modly workspace")
+
+    # Open every component relative to an already-open workspace descriptor.
+    # O_NOFOLLOW closes the symlink-swap window between custody validation and
+    # the immutable byte snapshot used by staging.
+    directory_fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY)
+    opened = [directory_fd]
+    try:
+        for part in relative.parts[:-1]:
+            directory_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            opened.append(directory_fd)
+        file_fd = os.open(relative.parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+        try:
+            info = os.fstat(file_fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError(f"{label} must be a regular file inside the Modly workspace")
+            chunks = []
+            total = 0
+            while True:
+                chunk = os.read(file_fd, min(1024 * 1024, MAX_IMAGE_BYTES + 1 - total))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > MAX_IMAGE_BYTES:
+                    raise ValueError(f"{label} must be no larger than 64 MiB")
+            return resolved, b"".join(chunks)
+        finally:
+            os.close(file_fd)
+    except OSError as exc:
+        raise ValueError(f"{label} must remain a regular non-symlink file inside the Modly workspace") from exc
+    finally:
+        for descriptor in reversed(opened):
+            os.close(descriptor)
+
+
+def validate_ordered_images(
+    primary_image_bytes: bytes, extra_image_paths: object, workspace_dir: str | Path,
+    *, max_connected: int = 3, purpose: str = "Pixal3D MV",
+) -> list[ValidatedImage]:
+    workspace = Path(workspace_dir).resolve(strict=True)
+    if not isinstance(extra_image_paths, list):
+        raise TypeError("extra_image_paths must be an ordered list supplied by Modly")
+    if len(extra_image_paths) > max_connected:
+        words = {4: "four", 8: "eight"}
+        total = max_connected + 1
+        raise ValueError(f"{purpose} accepts at most {words.get(total, total)} connected images")
+    connected_paths: list[tuple[int, str]] = []
+    for index, value in enumerate(extra_image_paths, start=2):
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise TypeError(f"view {index} must be None or a workspace image path")
+        connected_paths.append((index, value))
+    if len(connected_paths) < 1:
+        raise ValueError(f"{purpose} requires at least two connected images")
+    snapshots = [
+        (index, *_workspace_file(value, workspace, f"view {index}"))
+        for index, value in connected_paths
+    ]
+    paths = [item[1] for item in snapshots]
+    if len(set(paths)) != len(paths):
+        raise ValueError(f"{purpose} extra image paths must not contain duplicate or repeated paths")
+    images = [_decode(bytes(primary_image_bytes), "primary view")]
+    for index, _path, data in snapshots:
+        images.append(_decode(data, f"view {index}"))
+    digests = [image.digest for image in images]
+    if len(set(digests)) != len(digests):
+        raise ValueError(f"{purpose} connected images must not contain duplicate content")
+    dimensions = {(image.width, image.height) for image in images}
+    if len(dimensions) != 1:
+        raise ValueError(f"{purpose} connected images must have matching dimensions")
+    return images
+
+
+def _stage_pngs(images: list[ValidatedImage], target: Path) -> list[Path]:
+    paths = []
+    for index, item in enumerate(images):
+        destination = target / f"{index:04d}.png"
+        with Image.open(io.BytesIO(item.data)) as image:
+            mode = "RGBA" if "A" in image.getbands() else "RGB"
+            image.convert(mode).save(destination, format="PNG")
+        paths.append(destination)
+    return paths
+
+
+def _apply_declared_view_roles(
+    images: list[ValidatedImage],
+    extra_image_paths: list[str | None],
+    params: dict[str, Any],
+) -> tuple[list[ValidatedImage], list[dict[str, Any]] | None]:
+    layout = params.get("view_layout", "auto")
+    if layout == "auto":
+        return images, None
+    if layout != "declared_roles":
+        raise ValueError("view_layout must be auto or declared_roles")
+
+    connected_slots = [1] + [
+        slot for slot, path in enumerate(extra_image_paths, start=2) if path is not None
+    ]
+    default_roles = {1: "front", 2: "right", 3: "back", 4: "left"}
+    records: list[tuple[ValidatedImage, dict[str, Any]]] = []
+    for slot, image in zip(connected_slots, images, strict=True):
+        handle = "image" if slot == 1 else f"image_{slot}"
+        role_key = "image_role" if slot == 1 else f"image_{slot}_role"
+        role = params.get(role_key, default_roles[slot])
+        if role not in VIEW_ROLE_AZIMUTHS:
+            raise ValueError(f"{role_key} must declare a supported view role")
+        records.append((image, {
+            "slot": slot,
+            "handle": handle,
+            "role": role,
+            "azimuthDegrees": VIEW_ROLE_AZIMUTHS[role],
+        }))
+
+    roles = [record[1]["role"] for record in records]
+    if len(set(roles)) != len(roles):
+        raise ValueError("connected declared view roles must be unique")
+    if roles.count("front") != 1:
+        raise ValueError("connected declared view roles must contain exactly one front")
+
+    records.sort(key=lambda record: record[1]["azimuthDegrees"])
+    return [record[0] for record in records], [record[1] for record in records]
+
+
+def _write_declared_role_transforms(
+    transforms_path: Path, role_provenance: list[dict[str, Any]], view_fov: object,
+) -> None:
+    if isinstance(view_fov, bool):
+        raise ValueError("view_fov must be a number of degrees between 1 and 170")
+    try:
+        fov_degrees = float(view_fov)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("view_fov must be a number of degrees between 1 and 170") from exc
+    if not math.isfinite(fov_degrees) or not 1.0 <= fov_degrees <= 170.0:
+        raise ValueError("view_fov must be a number of degrees between 1 and 170")
+    camera_angle_x = math.radians(fov_degrees)
+    # Upstream's fixed rig frames an object in [-0.5, 0.5] with 10% padding.
+    # For the default 20-degree FOV this is the official 3.119204998 distance.
+    camera_distance = 0.55 / math.tan(camera_angle_x / 2.0)
+
+    front = (
+        (1.0, 0.0, 0.0, 0.0),
+        (0.0, 0.0, -1.0, -camera_distance),
+        (0.0, 1.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0, 1.0),
+    )
+    frames = []
+    for index, role in enumerate(role_provenance):
+        angle = math.radians(float(role["azimuthDegrees"]))
+        cosine = math.cos(angle)
+        sine = math.sin(angle)
+        rotation_z = (
+            (cosine, -sine, 0.0),
+            (sine, cosine, 0.0),
+            (0.0, 0.0, 1.0),
+        )
+        matrix = [
+            [
+                sum(rotation_z[row][axis] * front[axis][column] for axis in range(3))
+                for column in range(4)
+            ]
+            for row in range(3)
+        ] + [[0.0, 0.0, 0.0, 1.0]]
+        frames.append({
+            "file_path": f"{index:04d}.png",
+            "camera_angle_x": camera_angle_x,
+            "transform_matrix": matrix,
+        })
+
+    transforms = {
+        "mesh_scale": 1.0,
+        "frames": frames,
+        "provenance": {
+            "cameraEstimator": "declared fixed orbit",
+            "cameraPosePolicy": "declared-role-canonical-orbit",
+            "cameraConvention": "blender-c2w",
+            "cameraDistance": camera_distance,
+            "viewFovDegrees": fov_degrees,
+            "framing": "object spans approximately 1/1.1 of every square view",
+            "viewLayout": "declared_roles",
+            "viewRoles": role_provenance,
+        },
+    }
+    transforms_path.write_text(
+        json.dumps(transforms, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
+def _validate_auto_camera_coverage(transforms_path: Path) -> None:
+    transforms = json.loads(transforms_path.read_text(encoding="utf-8"))
+    frames = transforms.get("frames")
+    if not isinstance(frames, list) or len(frames) < 3:
+        return
+
+    azimuths: list[float] = []
+    for frame in frames:
+        if not isinstance(frame, dict):
+            raise ValueError("DA3 transforms contain an invalid camera frame")
+        matrix = frame.get("transform_matrix")
+        if (
+            not isinstance(matrix, list) or len(matrix) != 4
+            or any(not isinstance(row, list) or len(row) != 4 for row in matrix)
+        ):
+            raise ValueError("DA3 transforms contain an invalid camera matrix")
+        try:
+            x = float(matrix[0][3])
+            y = float(matrix[1][3])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("DA3 transforms contain a non-numeric camera position") from exc
+        if not math.isfinite(x) or not math.isfinite(y) or math.hypot(x, y) <= 1e-6:
+            raise ValueError("DA3 transforms contain an invalid camera position")
+        azimuths.append(math.degrees(math.atan2(x, -y)) % 360.0)
+
+    def separation(left: float, right: float) -> float:
+        return abs((left - right + 180.0) % 360.0 - 180.0)
+
+    maximum_from_primary = max(separation(value, azimuths[0]) for value in azimuths[1:])
+    minimum_pair = min(
+        separation(azimuths[left], azimuths[right])
+        for left in range(len(azimuths))
+        for right in range(left + 1, len(azimuths))
+    )
+    if maximum_from_primary < 90.0 or minimum_pair < 8.0:
+        rendered = ", ".join(f"{value:.1f}°" for value in azimuths)
+        raise ValueError(
+            "DA3 camera estimation collapsed the multiview orbit "
+            f"(estimated azimuths: {rendered}). Use Declared roles and assign each connected view "
+            "its real camera direction."
+        )
+
+
+def _estimate_cameras(
+    frame_paths: list[Path], da3_root: Path, staging: Path, extension_root: Path,
+    *, progress_cb=None, cancel_event=None,
+) -> Path:
+    job = {
+        "schema": "modly.pixal3d-mv-camera-job.v1",
+        "frame_paths": [str(path) for path in frame_paths],
+        "da3_root": str(Path(da3_root).resolve(strict=True)),
+        "output_path": str(staging / "transforms.json"),
+        "process_resolution": 504,
+    }
+    handle = tempfile.NamedTemporaryFile(
+        "w", prefix=".mv-camera-job-", suffix=".json", dir=staging, delete=False, encoding="utf-8"
+    )
+    job_path = Path(handle.name)
+    try:
+        json.dump(job, handle, sort_keys=True)
+        handle.close()
+        result = _run_worker(
+            [str(python_path(extension_root)), "-m", "pixal3d_extension.multiview_camera_worker", str(job_path)],
+            cwd=extension_root,
+            env=offline_environment(staging / ".da3-cache", extension_root),
+            progress_cb=progress_cb,
+            cancel_event=cancel_event,
+            output_field="transforms_path",
+            label="Pixal3D MV camera calibration",
+        )
+        if result != staging / "transforms.json" or not result.is_file():
+            raise RuntimeError("Pixal3D MV camera calibration did not produce private transforms")
+        return result
+    finally:
+        try:
+            handle.close()
+        except Exception:
+            pass
+        job_path.unlink(missing_ok=True)
+
+
+def run_multiview_from_images(
+    *, primary_image_bytes: bytes, extra_image_paths: list[str | None], workspace_dir: str | Path,
+    output_dir: str | Path, da3_root: str | Path, mv_root: str | Path, base_root: str | Path,
+    naf_path: str | Path, params: dict[str, Any], progress_cb: Callable[[int, str], None] | None = None,
+    cancel_event: Any | None = None, inference_runner: Callable[..., Any] | None = None,
+) -> Path:
+    """Build declared or estimated ordered cameras, then run the calibrated MV cascade."""
+
+    _check_cancel(cancel_event)
+    images = validate_ordered_images(primary_image_bytes, extra_image_paths, workspace_dir)
+    images, role_provenance = _apply_declared_view_roles(images, extra_image_paths, params)
+    _check_cancel(cancel_event)
+    extension_root = Path(__file__).resolve().parent.parent
+    if role_provenance is None:
+        validate_da3_weights(Path(da3_root))
+        validate_da3_runtime(extension_root)
+    _check_cancel(cancel_event)
+    workspace = Path(workspace_dir).resolve(strict=True)
+    output = validate_workspace_output_parent(Path(output_dir), workspace, "MV output directory")
+    output.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".pixal3d-mv-images-", dir=workspace) as directory:
+        staging = Path(directory)
+        frames = _stage_pngs(images, staging)
+        _check_cancel(cancel_event)
+        if role_provenance is not None:
+            if progress_cb:
+                progress_cb(3, "Building declared fixed-orbit cameras")
+            transforms_path = staging / "transforms.json"
+            _write_declared_role_transforms(
+                transforms_path, role_provenance, params.get("view_fov", 20.0),
+            )
+            provenance: dict[str, Any] = {
+                "source": "ordered Modly image ports",
+                "cameraEstimator": "declared fixed orbit",
+                "viewLayout": "declared_roles", "viewRoles": role_provenance,
+            }
+        else:
+            if progress_cb:
+                progress_cb(3, "Estimating consistent cameras with DA3 Base")
+            transforms_path = _estimate_cameras(
+                frames, Path(da3_root), staging, extension_root,
+                progress_cb=progress_cb, cancel_event=cancel_event,
+            )
+            _validate_auto_camera_coverage(transforms_path)
+            provenance = {
+                "source": "ordered Modly image ports", "cameraEstimator": "DA3 Base",
+            }
+        (staging / "scene-manifest.json").write_text(json.dumps({
+            "schema": "modly.scene-manifest.v1", "sceneRoot": ".",
+            "provenance": provenance,
+        }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _check_cancel(cancel_event)
+        from .multiview import run_multiview
+
+        internal_params = dict(params)
+        internal_params["num_views"] = len(images)
+        return run_multiview(
+            scene_manifest_path=staging / "scene-manifest.json", workspace_dir=workspace,
+            mv_root=mv_root, base_root=base_root, naf_path=naf_path, output_dir=output,
+            params=internal_params, inference_runner=inference_runner,
+            progress_cb=progress_cb, cancel_event=cancel_event,
+        )

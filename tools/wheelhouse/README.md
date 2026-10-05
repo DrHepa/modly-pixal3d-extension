@@ -2,6 +2,21 @@
 
 This directory documents the maintainer workflow for publishing release-backed wheelhouse assets. End users should run `python3 setup.py --prepare --json`; they should not build wheels locally during normal setup.
 
+## Pixal3D multi-view candidate provenance
+
+`build-pixal3d-mv-python-wheel.py` creates the bundled **pure-Python candidate overlay**, not a published native wheelhouse asset. It requires a local TencentARC/Pixal3D checkout at immutable commit `f7cf38429b0bd264f1995f0f8743a88b1c728b94` and the existing base `pixal3d-core` wheel with SHA256 `c46502c5ed195351efd150a229856095119435d356511f9343f71b8974a872f2`. It verifies the four patched Python source hashes, regenerates wheel RECORD hashes, and uses fixed ZIP timestamps for reproducibility. The resulting candidate SHA256 is `3ad32043cc429091d2bb2435e3e4256406f94da2dadfe92c4d36a44aa7c2309c` with those inputs. `setup.py` verifies this hash and reinstalls `wheels/mv/pixal3d_core-0.1.0+modly-py3-none-any.whl` after the release-backed wheelhouse's base wheel; this preserves the original single-view modules while adding the MV pipeline class.
+
+```bash
+python3 tools/wheelhouse/build-pixal3d-mv-python-wheel.py \
+  --source /absolute/path/to/Pixal3D-at-f7cf384 \
+  --base-wheel wheels/pixal3d_core-0.1.0+modly-py3-none-any.whl \
+  --output /tmp/pixal3d_core-mv-candidate.whl
+```
+
+The vendored `pixal3d_extension/vendor/inference_mv.py`, LICENSE and NOTICE are copied from the same immutable source; the inference file SHA256 is `875144f73fdf083e92717dcee260035c7391de09fe48f02316ce3ad3bf7aedf9`. The MV weight revision is separately pinned in `manifest.json` to Hugging Face commit `b0cb2e1b794cab9aa0ac38a95d794a4d9337437f`.
+
+The candidate is deliberately outside `wheelhouse.manifest.json`: it is pure Python and installed from the extension's own hash-verified artifact, while existing native lanes stay unchanged. This is **not** a claim that MV inference works on any GPU or on Blackwell. The native release archive must still be rebuilt and live-tested for each future exact platform/Python/CUDA lane before any MV support claim. Modly's host multi-source/shared-weight changes and a real posed-view UI→GPU→GLB test remain required.
+
 ## Local build recipe
 
 1. Build wheels in a clean Linux `aarch64`, Python `cp312`, CUDA `12.4` environment.
@@ -52,6 +67,8 @@ Windows wheelhouses must follow the exact-stack policy used by Pixal3D-ComfyUI r
 RTX 50-series / Blackwell support is tracked separately in `BLACKWELL-SM120.md`. The published CUDA 12.4 Windows wheelhouses are not Blackwell lanes; do not mark RTX 5090 supported until an exact-stack Blackwell wheelhouse is rebuilt, checksum-pinned, and validated on real RTX 50-series hardware.
 
 The experimental Blackwell candidate workflow is `.github/workflows/wheelhouse-windows-x64-cp311-cuda128-blackwell-candidate.yml`. It targets `windows-x64-cp311-cuda128-blackwell`, builds NATTEN against `torch==2.7.1+cu128` with `TORCH_CUDA_ARCH_LIST=12.0`, and packages exact-stack `cu128torch2.7` Windows native wheels. It is candidate-only and must remain outside `wheelhouse.manifest.json` until real RTX 50-series validation succeeds.
+
+Setup has a prepared but inactive payload route for this candidate. A payload containing `cuda_version` and `gpu_sm` is normalized before wheelhouse selection; CUDA 12.8 plus SM120 selects `cuda128-blackwell`. While that asset is not present in `wheelhouse.manifest.json`, setup must fail closed with `unsupported_lane` before filesystem preparation, download, or install. Do not use the prepared dependency policy as a support claim: publication still requires the exact RTX 50-series hardware checks in `BLACKWELL-SM120.md` and a newly checksum-pinned stable release asset.
 
 ## Windows NATTEN candidate workflow
 

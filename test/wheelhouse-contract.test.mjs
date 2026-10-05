@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -19,6 +19,66 @@ function runPython(source) {
   }
   return JSON.parse(result.stdout)
 }
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+
+test('Blackwell CUDA 12.8 workflow pins a CUDA-supported VS 2022 v143 host compiler and proves nvcc sees it', () => {
+  const workflow = readFileSync(join(repoRoot, '.github/workflows/wheelhouse-windows-x64-cp311-cuda128-blackwell-candidate.yml'), 'utf8')
+  const expectedActionPins = {
+    'actions/checkout': { sha: '11d5960a326750d5838078e36cf38b85af677262', version: 'v4' },
+    'actions/setup-python': { sha: 'a26af69be951a213d495a4c3e4e4022e16d87065', version: 'v5' },
+    'Jimver/cuda-toolkit': { sha: '3d45d157f327c09c04b50ee6ccdea2d9d017ec76', version: 'v0.2.35' },
+    'ilammy/msvc-dev-cmd': { sha: '0b201ec74fa43914dc39ae48a89fd1d8cb592756', version: 'v1' },
+    'actions/upload-artifact': { sha: 'ea165f8d65b6e75b540449e92b4886f43607fa02', version: 'v4' },
+  }
+
+  assert.match(workflow, /runs-on:\s*windows-2022/)
+  assert.doesNotMatch(workflow, /runs-on:\s*windows-latest/)
+  assert.doesNotMatch(workflow, /allow-unsupported-compiler/)
+  assert.doesNotMatch(workflow, /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/, 'workflow must not contain control characters')
+  for (const [action, { sha, version }] of Object.entries(expectedActionPins)) {
+    assert.match(workflow, new RegExp(`uses:\\s*${escapeRegExp(action)}@${sha}\\s*#\\s*${escapeRegExp(version)}`))
+  }
+  for (const match of workflow.matchAll(/^\s*uses:\s*([^\s#]+)(?:\s*#\s*([^\n]+))?$/gm)) {
+    const [action, ref] = match[1].split('@')
+    assert.ok(action in expectedActionPins, `Unexpected third-party GitHub Action in Blackwell workflow: ${action}`)
+    assert.match(ref, /^[0-9a-f]{40}$/, `GitHub Action ${action} must be pinned to a full 40-character commit SHA`)
+    assert.equal(ref, expectedActionPins[action].sha)
+    assert.equal(match[2]?.trim(), expectedActionPins[action].version)
+  }
+  assert.match(workflow, /Microsoft\.VisualStudio\.Component\.VC\.14\.38\.17\.8\.x86\.x64/)
+  assert.match(workflow, /function Get-Msvc1438Toolset/)
+  assert.match(workflow, /Join-Path \(Join-Path \$repoRoot 'build'\) 'blackwell-toolchain-evidence'/)
+  assert.match(workflow, /14\.38\.\*/)
+  assert.match(workflow, /MSVC 14\.38 toolset already exists; skipping Visual Studio Installer modify/)
+  assert.match(workflow, /for \(\$attempt = 1; \$attempt -le 2; \$attempt\+\+\)/)
+  assert.match(workflow, /Visual Studio Installer attempt \$attempt exited with code/)
+  assert.match(workflow, /Re-checking actual MSVC 14\.38 toolset after installer attempt/)
+  assert.match(workflow, /Retrying Visual Studio Installer once because MSVC 14\.38 is still absent/)
+  assert.match(workflow, /VS Installer log candidates/)
+  assert.match(workflow, /Copy-VsInstallerLogs/)
+  assert.doesNotMatch(workflow, /-ArgumentList @\(\s*'modify',\s*'--installPath',\s*\$installPath,/s)
+  assert.match(workflow, /\$installerArguments = "modify --installPath `"\$escapedInstallPath`" --add \$component --quiet --norestart --nocache"/)
+  assert.match(workflow, /Start-Process -FilePath \$vsInstaller -ArgumentList \$installerArguments/)
+  assert.match(workflow, /throw \"CUDA-supported MSVC 14\.38 toolset remains absent/)
+  assert.doesNotMatch(workflow, /Visual Studio Installer failed with exit code \$\(\$process\.ExitCode\)\./)
+  assert.match(workflow, /name: Upload Blackwell toolchain failure evidence[\s\S]*if: \${\{ failure\(\) \}\}[\s\S]*actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\s*#\s*v4[\s\S]*blackwell-toolchain-failure-\${\{ github.run_id \}/)
+  assert.match(workflow, /uses:\s*ilammy\/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756\s*#\s*v1[\s\S]*vsversion:\s*'2022'[\s\S]*toolset:\s*14\.38/)
+  assert.match(workflow, /\$env:VCToolsVersion\s+-notmatch\s+'\^14\\.38\\.'/)
+  assert.match(workflow, /\$clVersion\.Major\s+-ne\s+19\s+-or\s+\$clVersion\.Minor\s+-ne\s+38/)
+  assert.match(workflow, /cuda-host-compiler-probe\.cu/)
+  assert.match(workflow, /nvcc\s+-v\s+-c\s+\$probeSource/)
+})
+
+const MANUAL_FOV_OPTIONS = [
+  { value: '-1', label: 'Auto (MoGe)' },
+  { value: '0.2', label: '0.2 rad' },
+  { value: '0.35', label: '0.35 rad' },
+  { value: '0.5', label: '0.5 rad' },
+]
 
 test('wheelhouse manifest is pinned, checksum-verifiable, and selects supported cp312 cuda124 lanes', () => {
   const extensionManifest = JSON.parse(readFileSync(join(repoRoot, 'manifest.json'), 'utf8'))
@@ -145,7 +205,7 @@ with tempfile.TemporaryDirectory() as tmp:
     wheelhouse = root / 'wheels'
     wheelhouse.mkdir()
     calls = []
-    setup._run_setup_command = lambda command, *, cwd: calls.append({'command': command, 'cwd': str(cwd)}) or {'args': command, 'returncode': 0, 'stdout_tail': '{"HAS_LIBNATTEN": false, "importable": true, "ok": true, "torch_cuda_available": true, "torch_cuda_version": "13.0"}\\n' if command[1] == '-c' else '', 'stderr_tail': '', 'ok': True}
+    setup._run_setup_command = lambda command, *, cwd: calls.append({'command': command, 'cwd': str(cwd)}) or {'args': command, 'returncode': 0, 'stdout_tail': '{"HAS_LIBNATTEN": false, "importable": true, "ok": true, "torch_cuda_available": true, "torch_cuda_version": "13.0", "transformers_version": "4.57.3"}\\n' if command[1] == '-c' else '', 'stderr_tail': '', 'ok': True}
     install = setup._install_prepare_dependencies(root)
     win_runtime = {'os':'windows','arch':'x64','python_tag':'cp312','accelerator_lane':'cuda124'}
     print(json.dumps({
@@ -245,9 +305,12 @@ with tempfile.TemporaryDirectory() as tmp:
     output_dir = root / 'workspace' / 'Workflows'
     output_dir.mkdir(parents=True)
     captured = {}
+    import threading
+    cancel = threading.Event()
 
-    def fake_run_job(job, *, pipeline_factory=None):
+    def fake_run_job(job, *, pipeline_factory=None, cancel_event=None):
         del pipeline_factory
+        captured['cancel_event_matches'] = cancel_event is cancel
         captured['job'] = dict(job)
         captured['input_exists_during_run'] = Path(job['input_image']).is_file()
         glb = Path(job['output_dir']) / 'generated-job.glb'
@@ -257,7 +320,11 @@ with tempfile.TemporaryDirectory() as tmp:
     original_run_job = runtime.run_job
     runtime.run_job = fake_run_job
     try:
-        returned = Pixal3DGenerator(model_dir=model_dir, workspace_dir=output_dir).generate(b'png-bytes', params={'seed': 7})
+        generator = Pixal3DGenerator(model_dir=model_dir, workspace_dir=output_dir)
+        generator._prepare_generation_assets = lambda *args: None
+        returned = generator.generate(
+            b'png-bytes', params={'seed': 7}, cancel_evt=cancel
+        )
     finally:
         runtime.run_job = original_run_job
 
@@ -267,15 +334,17 @@ with tempfile.TemporaryDirectory() as tmp:
         'workspace_root_matches': Path(job['workspace_root']) == root,
         'model_source_matches': Path(job['model_source']) == model_dir,
         'output_dir_matches': Path(job['output_dir']) == output_dir,
-        'input_parent_matches_output': Path(job['input_image']).parent == output_dir,
+        'input_is_private_sibling': Path(job['input_image']).parent == output_dir.parent and Path(job['input_image']).parent != output_dir,
         'input_exists_during_run': captured['input_exists_during_run'],
         'seed': job['params']['seed'],
+        'cancel_event_matches': captured['cancel_event_matches'],
     }, sort_keys=True))
 `)
 
   assert.deepEqual(result, {
+    cancel_event_matches: true,
     input_exists_during_run: true,
-    input_parent_matches_output: true,
+    input_is_private_sibling: true,
     model_source_matches: true,
     output_dir_matches: true,
     returned_name: 'generated-job.glb',
@@ -306,7 +375,9 @@ with tempfile.TemporaryDirectory() as tmp:
     original_patch_pipeline = pipeline_patch.patch_pipeline
     pipeline_patch.patch_pipeline = fake_patch_pipeline
     try:
-        Pixal3DGenerator(model_dir=model_dir, workspace_dir=workspace_dir).load()
+        generator = Pixal3DGenerator(model_dir=model_dir, workspace_dir=workspace_dir)
+        generator._prepare_generation_assets = lambda *args: None
+        generator.load()
     finally:
         pipeline_patch.patch_pipeline = original_patch_pipeline
 
@@ -361,7 +432,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
   assert.equal(result.status, 'failed')
   assert.equal(result.failure_code, 'setup_path_conflict')
-  assert.equal(result.conflict_logical_path, 'models/pixal3d/auxiliary/dinov3')
+  assert.equal(result.conflict_logical_path, 'models/pixal3d/auxiliary/naf')
   assert.match(result.conflict_path.replaceAll('\\\\', '/'), /models\/pixal3d\/auxiliary$/)
   assert.equal(result.installs_started, false)
   assert.equal(result.downloads_started, false)
@@ -398,7 +469,7 @@ print(json.dumps({
   assert.ok(result.paths.every((value) => !value.includes('models/pixal3d/aux/')))
 })
 
-test('setup prepare bootstraps auxiliary model directories under auxiliary, not stale aux', () => {
+test('setup prepare reserves only the NAF directory under auxiliary, not stale aux', () => {
   const result = runPython(`
 import json, tempfile
 from pathlib import Path
@@ -434,20 +505,18 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.status, 'prepared')
   assert.equal(result.downloads_started, false)
   assert.equal(result.installs_started, false)
-  assert.equal(result.dinov3_dir, true)
-  assert.equal(result.rmbg_dir, true)
-  assert.equal(result.moge_dir, true)
+  assert.equal(result.dinov3_dir, false)
+  assert.equal(result.rmbg_dir, false)
+  assert.equal(result.moge_dir, false)
   assert.equal(result.naf_dir, true)
   assert.equal(result.legacy_aux_dir, false)
   assert.deepEqual(result.auxiliary_roots, {
-    dino: 'models/pixal3d/auxiliary/dinov3',
-    moge: 'models/pixal3d/auxiliary/moge',
+    dino: 'models/pixal3d/_shared/pixal3d-base/auxiliary/dinov3',
+    moge: 'models/pixal3d/_shared/pixal3d-base/auxiliary/moge',
     naf: 'models/pixal3d/auxiliary/naf',
-    rmbg: 'models/pixal3d/auxiliary/rmbg',
+    rmbg: 'models/pixal3d/_shared/pixal3d-base/auxiliary/rmbg',
   })
-  assert.ok(result.created_paths.includes('models/pixal3d/auxiliary/dinov3'))
-  assert.ok(result.created_paths.includes('models/pixal3d/auxiliary/rmbg'))
-  assert.ok(result.created_paths.includes('models/pixal3d/auxiliary/moge'))
+  assert.ok(!result.created_paths.some((path) => path.includes('/_shared/')))
   assert.ok(result.created_paths.includes('models/pixal3d/auxiliary/naf'))
 })
 
@@ -531,7 +600,7 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.calls.length, 1)
   assert.equal(result.calls[0].force, true)
   assert.match(result.bootstrap_command, /--bootstrap-auxiliary-assets/)
-  assert.match(result.bootstrap_intent, /allowlisted DINO\/RMBG\/MoGe\/NAF/)
+  assert.match(result.bootstrap_intent, /allowlisted NAF checkpoint/)
   assert.match(result.plan_note, /--bootstrap-auxiliary-assets/)
   assert.equal(result.plan_status, 'download_plan')
 })
@@ -566,16 +635,21 @@ with tempfile.TemporaryDirectory() as tmp:
 
   assert.equal(result.missing_code, 'missing_auxiliary_assets')
   assert.equal(result.missing_count, 10)
-  assert.ok(result.missing_sample.some((value) => value.includes('models/pixal3d/auxiliary/dinov3/')))
+  assert.ok(result.missing_sample.some((value) => value.includes('models/pixal3d/_shared/pixal3d-base/auxiliary/dinov3/')))
   assert.equal(result.complete_code, 'auxiliary_assets_ready')
   assert.deepEqual(result.complete_missing, [])
   assert.deepEqual(result.assets_complete, { dino: true, moge: true, naf: true, rmbg: true })
 })
 
-test('auxiliary bootstrap downloads only the exact DINO/RMBG/MoGe/NAF allowlist with a mocked downloader', () => {
+test('auxiliary bootstrap downloads only the exact NAF allowlist with a mocked downloader', () => {
   const result = runPython(`
 import json, tempfile
 from pathlib import Path
+# Pin the synthetic downloader fixture without bypassing integrity validation.
+import hashlib
+from pixal3d_extension import naf_checkpoint
+naf_checkpoint.NAF_SIZE = 86
+naf_checkpoint.NAF_SHA256 = hashlib.sha256(b'https://github.com/valeoai/NAF/releases/download/model/naf_release.pth/naf_release.pth').hexdigest()
 from pixal3d_extension.assets import bootstrap_auxiliary_assets, check_auxiliary_sentinels
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -606,21 +680,12 @@ with tempfile.TemporaryDirectory() as tmp:
 `)
 
   const expectedCalls = [
-    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'config.json', source_kind: 'hf_repo', url: null },
-    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'preprocessor_config.json', source_kind: 'hf_repo', url: null },
-    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'model.safetensors', source_kind: 'hf_repo', url: null },
-    { repo_id: 'camenduru/RMBG-2.0', filename: 'config.json', source_kind: 'hf_repo', url: null },
-    { repo_id: 'camenduru/RMBG-2.0', filename: 'preprocessor_config.json', source_kind: 'hf_repo', url: null },
-    { repo_id: 'camenduru/RMBG-2.0', filename: 'BiRefNet_config.py', source_kind: 'hf_repo', url: null },
-    { repo_id: 'camenduru/RMBG-2.0', filename: 'birefnet.py', source_kind: 'hf_repo', url: null },
-    { repo_id: 'camenduru/RMBG-2.0', filename: 'model.safetensors', source_kind: 'hf_repo', url: null },
-    { repo_id: 'Ruicheng/moge-2-vitl', filename: 'model.pt', source_kind: 'hf_repo', url: null },
     { repo_id: 'https://github.com/valeoai/NAF/releases/download/model/naf_release.pth', filename: 'naf_release.pth', source_kind: 'url', url: 'https://github.com/valeoai/NAF/releases/download/model/naf_release.pth' },
   ]
   assert.equal(result.status, 'ready')
   assert.equal(result.code, 'auxiliary_assets_bootstrapped')
   assert.equal(result.downloads_started, true)
-  assert.equal(result.allowlist_files, 10)
+  assert.equal(result.allowlist_files, 1)
   assert.deepEqual(result.naf_allowlist, {
     files: ['naf_release.pth'],
     local_root: 'models/pixal3d/auxiliary/naf',
@@ -628,22 +693,13 @@ with tempfile.TemporaryDirectory() as tmp:
     source_kind: 'url',
     url: 'https://github.com/valeoai/NAF/releases/download/model/naf_release.pth',
   })
-  assert.equal(result.calls.length, 10)
+  assert.equal(result.calls.length, 1)
   assert.deepEqual(result.calls, expectedCalls)
   assert.deepEqual(result.files, [
-    'dinov3/config.json',
-    'dinov3/model.safetensors',
-    'dinov3/preprocessor_config.json',
-    'moge/model.pt',
     'naf/naf_release.pth',
-    'rmbg/BiRefNet_config.py',
-    'rmbg/birefnet.py',
-    'rmbg/config.json',
-    'rmbg/model.safetensors',
-    'rmbg/preprocessor_config.json',
   ])
-  assert.equal(result.sentinel_code, 'auxiliary_assets_ready')
-  assert.deepEqual(result.missing, [])
+  assert.equal(result.sentinel_code, 'missing_auxiliary_assets')
+  assert.equal(result.missing.length, 9)
 })
 
 test('auxiliary bootstrap validates sentinels and does not promote staged partial files on failure', () => {
@@ -682,7 +738,7 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.bootstrap_status, 'failed')
   assert.equal(result.bootstrap_code, 'auxiliary_bootstrap_failed')
   assert.equal(result.downloads_started, true)
-  assert.equal(result.call_count, 10)
+  assert.equal(result.call_count, 1)
   assert.deepEqual(result.final_files, [])
   assert.equal(result.staging_left, false)
   assert.equal(result.sentinel_code, 'missing_auxiliary_assets')
@@ -941,7 +997,7 @@ with tempfile.TemporaryDirectory() as tmp:
     ext_dir = Path(tmp) / 'Modly' / 'data' / 'extensions' / 'pixal3d'
     ext_dir.mkdir(parents=True)
     layout = resolve_modly_layout(ext_dir)
-    pipeline_path = resolve_storage_path(layout, 'models/pixal3d/generate/pipeline.json')
+    pipeline_path = resolve_storage_path(layout, 'models/pixal3d/_shared/pixal3d-base/pipeline.json')
     pipeline_path.parent.mkdir(parents=True)
     pipeline_path.write_text(json.dumps(PIPELINE), encoding='utf-8')
     for manifest in AUXILIARY_ASSETS.values():
@@ -976,22 +1032,22 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.patch_code, 'pipeline_patch_applied')
   assert.equal(result.dino_is_absolute, true)
   assert.equal(result.rmbg_is_absolute, true)
-  assert.equal(result.dino_suffix, 'models/pixal3d/auxiliary/dinov3')
-  assert.equal(result.rmbg_suffix, 'models/pixal3d/auxiliary/rmbg')
+  assert.equal(result.dino_suffix, 'models/pixal3d/_shared/pixal3d-base/auxiliary/dinov3')
+  assert.equal(result.rmbg_suffix, 'models/pixal3d/_shared/pixal3d-base/auxiliary/rmbg')
   assert.deepEqual(result.replacement_kinds, { dino: 'local', rmbg: 'local' })
   assert.deepEqual(result.replacement_refs, {
-    dino: 'local:models/pixal3d/auxiliary/dinov3',
-    rmbg: 'local:models/pixal3d/auxiliary/rmbg',
+    dino: 'local:models/pixal3d/_shared/pixal3d-base/auxiliary/dinov3',
+    rmbg: 'local:models/pixal3d/_shared/pixal3d-base/auxiliary/rmbg',
   })
   assert.deepEqual(result.auxiliary_kinds, { dino: 'local', moge: 'local', naf: 'local', rmbg: 'local' })
-  assert.equal(result.auxiliary_refs.moge, 'local:models/pixal3d/auxiliary/moge/model.pt')
+  assert.equal(result.auxiliary_refs.moge, 'local:models/pixal3d/_shared/pixal3d-base/auxiliary/moge/model.pt')
   assert.equal(result.auxiliary_refs.naf, 'local:models/pixal3d/auxiliary/naf/naf_release.pth')
   assert.equal(result.metadata_contains_tmp, false)
   assert.deepEqual(result.unlocalized_keys, [])
   assert.deepEqual(result.localizable_keys, ['moge', 'naf'])
 })
 
-test('default pipeline patch preserves remote/HF-cache fallback when local auxiliary assets are missing', () => {
+test('default pipeline patch blocks missing host-managed auxiliary assets instead of using hidden HF fallback', () => {
   const result = runPython(`
 import json, tempfile
 from pathlib import Path
@@ -1020,44 +1076,40 @@ with tempfile.TemporaryDirectory() as tmp:
             path.write_text('primary', encoding='utf-8')
 
     patched = patch_pipeline(ext_dir, auxiliary_mode='default', network_available=True)
-    pipeline = json.loads(resolve_storage_path(layout, 'models/pixal3d/generate/pipeline.json').read_text(encoding='utf-8'))
+    pipeline = json.loads(resolve_storage_path(layout, 'models/pixal3d/_shared/pixal3d-base/pipeline.json').read_text(encoding='utf-8'))
     readiness = check_readiness(ext_dir, auxiliary_mode='default', network_available=True, runtime_validated=True)
     print(json.dumps({
         'patch_code': patched['code'],
-        'patch_aux_code': patched['auxiliary_source']['code'],
-        'replacement_kinds': patched['auxiliary_source']['sources'],
         'dino': pipeline['args']['image_cond_model']['args']['model_name'],
         'rmbg': pipeline['args']['rembg_model']['args']['model_name'],
-        'moge': patched['auxiliary_source']['sources']['moge']['value'],
-        'naf': patched['auxiliary_source']['sources']['naf']['value'],
         'readiness_code': readiness['code'],
         'readiness_generation_allowed': readiness['generation_allowed'],
-        'readiness_aux_code': readiness['auxiliary_source']['code'],
-        'local_aux_exists': resolve_storage_path(layout, 'models/pixal3d/auxiliary/dinov3').exists(),
-        'local_moge_exists': resolve_storage_path(layout, 'models/pixal3d/auxiliary/moge/model.pt').exists(),
+        'local_aux_exists': resolve_storage_path(layout, 'models/pixal3d/_shared/pixal3d-base/auxiliary/dinov3').exists(),
+        'local_moge_exists': resolve_storage_path(layout, 'models/pixal3d/_shared/pixal3d-base/auxiliary/moge/model.pt').exists(),
         'local_naf_exists': resolve_storage_path(layout, 'models/pixal3d/auxiliary/naf/naf_release.pth').exists(),
     }, sort_keys=True))
 `)
 
-  assert.equal(result.patch_code, 'pipeline_patch_applied')
-  assert.equal(result.patch_aux_code, 'remote_auxiliary_fallback')
-  assert.equal(result.dino, 'camenduru/dinov3-vitl16-pretrain-lvd1689m')
-  assert.equal(result.rmbg, 'camenduru/RMBG-2.0')
-  assert.equal(result.moge, 'Ruicheng/moge-2-vitl')
-  assert.equal(result.naf, 'https://github.com/valeoai/NAF/releases/download/model/naf_release.pth')
-  assert.equal(result.readiness_code, 'ready')
-  assert.equal(result.readiness_generation_allowed, true)
-  assert.equal(result.readiness_aux_code, 'remote_auxiliary_fallback')
+  assert.equal(result.patch_code, 'missing_auxiliary_assets')
+  assert.equal(result.dino, 'facebook/dinov3-vitl16-pretrain-lvd1689m')
+  assert.equal(result.rmbg, 'briaai/RMBG-2.0')
+  assert.equal(result.readiness_code, 'missing_auxiliary_assets')
+  assert.equal(result.readiness_generation_allowed, false)
   assert.equal(result.local_aux_exists, false)
   assert.equal(result.local_moge_exists, false)
   assert.equal(result.local_naf_exists, false)
 })
 
-test('runtime derives Modly root from model_source and patches RMBG before pipeline execution', () => {
+test('runtime derives Modly root from shared model_source and patches RMBG before pipeline execution', () => {
   const result = runPython(`
 import json, tempfile
 from pathlib import Path
-from pixal3d_extension.assets import PRIMARY_ASSET
+# Pin the synthetic downloader fixture without bypassing integrity validation.
+import hashlib
+from pixal3d_extension import naf_checkpoint
+naf_checkpoint.NAF_SIZE = 86
+naf_checkpoint.NAF_SHA256 = hashlib.sha256(b'https://github.com/valeoai/NAF/releases/download/model/naf_release.pth/naf_release.pth').hexdigest()
+from pixal3d_extension.assets import PRIMARY_ASSET, AUXILIARY_ASSETS
 from pixal3d_extension.paths import resolve_modly_layout, resolve_storage_path
 from pixal3d_extension import runtime
 
@@ -1077,8 +1129,13 @@ with tempfile.TemporaryDirectory() as tmp:
         path = resolve_storage_path(layout, sentinel)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(PIPELINE) if sentinel.endswith('pipeline.json') else 'primary', encoding='utf-8')
-    pipeline_path = resolve_storage_path(layout, 'models/pixal3d/generate/pipeline.json')
-    model_dir = resolve_storage_path(layout, 'models/pixal3d/generate')
+    for key in ('dino', 'rmbg', 'moge'):
+        for sentinel in AUXILIARY_ASSETS[key].sentinel_paths:
+            path = resolve_storage_path(layout, sentinel)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('auxiliary', encoding='utf-8')
+    pipeline_path = resolve_storage_path(layout, 'models/pixal3d/_shared/pixal3d-base/pipeline.json')
+    model_dir = resolve_storage_path(layout, 'models/pixal3d/_shared/pixal3d-base')
     image = workspace_dir / 'input.png'
     image.write_bytes(b'image')
     calls = []
@@ -1124,20 +1181,25 @@ with tempfile.TemporaryDirectory() as tmp:
 `)
 
   assert.equal(result.status, 'completed')
-  assert.equal(result.call_count, 10)
+  assert.equal(result.call_count, 1)
   assert.equal(result.rmbg_is_upstream_gated, false)
   assert.notEqual(result.rmbg, 'briaai/RMBG-2.0')
-  assert.equal(result.rmbg_suffix, 'models/pixal3d/auxiliary/rmbg')
-  assert.equal(result.dino_suffix, 'models/pixal3d/auxiliary/dinov3')
+  assert.equal(result.rmbg_suffix, 'models/pixal3d/_shared/pixal3d-base/auxiliary/rmbg')
+  assert.equal(result.dino_suffix, 'models/pixal3d/_shared/pixal3d-base/auxiliary/dinov3')
   assert.equal(result.source_code, 'local_auxiliary_assets_ready')
   assert.deepEqual(result.source_kinds, { dino: 'local', moge: 'local', naf: 'local', rmbg: 'local' })
 })
 
-test('runtime default mode attempts auxiliary bootstrap before remote fallback and uses local paths immediately', () => {
+test('runtime default mode bootstraps only NAF after Modly has supplied shared HF assets', () => {
   const result = runPython(`
 import json, sys, tempfile, types
 from pathlib import Path
-from pixal3d_extension.assets import PRIMARY_ASSET
+# Pin the synthetic downloader fixture without bypassing integrity validation.
+import hashlib
+from pixal3d_extension import naf_checkpoint
+naf_checkpoint.NAF_SIZE = 86
+naf_checkpoint.NAF_SHA256 = hashlib.sha256(b'https://github.com/valeoai/NAF/releases/download/model/naf_release.pth/naf_release.pth').hexdigest()
+from pixal3d_extension.assets import PRIMARY_ASSET, AUXILIARY_ASSETS
 from pixal3d_extension.paths import resolve_modly_layout, resolve_storage_path
 from pixal3d_extension import runtime
 
@@ -1167,6 +1229,11 @@ with tempfile.TemporaryDirectory() as tmp:
         path = resolve_storage_path(layout, sentinel)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(PIPELINE) if sentinel.endswith('pipeline.json') else 'primary', encoding='utf-8')
+    for key in ('dino', 'rmbg', 'moge'):
+        for sentinel in AUXILIARY_ASSETS[key].sentinel_paths:
+            path = resolve_storage_path(layout, sentinel)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('auxiliary', encoding='utf-8')
     image = ext_dir / 'input.png'
     image.write_bytes(b'image')
     (ext_dir / 'outputs').mkdir()
@@ -1191,7 +1258,7 @@ with tempfile.TemporaryDirectory() as tmp:
         'auxiliary_bootstrap_downloader': downloader,
         'params': {},
     }, pipeline_factory=fake_pipeline)
-    pipeline = json.loads(resolve_storage_path(layout, 'models/pixal3d/generate/pipeline.json').read_text(encoding='utf-8'))
+    pipeline = json.loads(resolve_storage_path(layout, 'models/pixal3d/_shared/pixal3d-base/pipeline.json').read_text(encoding='utf-8'))
     dino = pipeline['args']['image_cond_model']['args']['model_name']
     rmbg = pipeline['args']['rembg_model']['args']['model_name']
     moge = result['auxiliary_source']['sources']['moge']['value']
@@ -1212,20 +1279,11 @@ with tempfile.TemporaryDirectory() as tmp:
 
   assert.equal(result.status, 'completed')
   assert.deepEqual(result.calls, [
-    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'config.json', source_kind: 'hf_repo', url: null },
-    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'preprocessor_config.json', source_kind: 'hf_repo', url: null },
-    { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'model.safetensors', source_kind: 'hf_repo', url: null },
-    { repo_id: 'camenduru/RMBG-2.0', filename: 'config.json', source_kind: 'hf_repo', url: null },
-    { repo_id: 'camenduru/RMBG-2.0', filename: 'preprocessor_config.json', source_kind: 'hf_repo', url: null },
-    { repo_id: 'camenduru/RMBG-2.0', filename: 'BiRefNet_config.py', source_kind: 'hf_repo', url: null },
-    { repo_id: 'camenduru/RMBG-2.0', filename: 'birefnet.py', source_kind: 'hf_repo', url: null },
-    { repo_id: 'camenduru/RMBG-2.0', filename: 'model.safetensors', source_kind: 'hf_repo', url: null },
-    { repo_id: 'Ruicheng/moge-2-vitl', filename: 'model.pt', source_kind: 'hf_repo', url: null },
     { repo_id: 'https://github.com/valeoai/NAF/releases/download/model/naf_release.pth', filename: 'naf_release.pth', source_kind: 'url', url: 'https://github.com/valeoai/NAF/releases/download/model/naf_release.pth' },
   ])
-  assert.equal(result.dino_suffix, 'models/pixal3d/auxiliary/dinov3')
-  assert.equal(result.rmbg_suffix, 'models/pixal3d/auxiliary/rmbg')
-  assert.equal(result.moge_suffix, 'models/pixal3d/auxiliary/moge/model.pt')
+  assert.equal(result.dino_suffix, 'models/pixal3d/_shared/pixal3d-base/auxiliary/dinov3')
+  assert.equal(result.rmbg_suffix, 'models/pixal3d/_shared/pixal3d-base/auxiliary/rmbg')
+  assert.equal(result.moge_suffix, 'models/pixal3d/_shared/pixal3d-base/auxiliary/moge/model.pt')
   assert.equal(result.naf_suffix, 'models/pixal3d/auxiliary/naf/naf_release.pth')
   assert.equal(result.source_code, 'local_auxiliary_assets_ready')
   assert.deepEqual(result.source_kinds, { dino: 'local', moge: 'local', naf: 'local', rmbg: 'local' })
@@ -1233,11 +1291,11 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.glb_exists, true)
 })
 
-test('runtime default mode preserves remote/HF/Torch-cache fallback when auxiliary bootstrap fails', () => {
+test('runtime default mode reports failed NAF bootstrap without remote fallback', () => {
   const result = runPython(`
 import json, sys, tempfile, types
 from pathlib import Path
-from pixal3d_extension.assets import PRIMARY_ASSET
+from pixal3d_extension.assets import PRIMARY_ASSET, AUXILIARY_ASSETS
 from pixal3d_extension.paths import resolve_modly_layout, resolve_storage_path
 from pixal3d_extension import runtime
 
@@ -1267,6 +1325,11 @@ with tempfile.TemporaryDirectory() as tmp:
         path = resolve_storage_path(layout, sentinel)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(PIPELINE) if sentinel.endswith('pipeline.json') else 'primary', encoding='utf-8')
+    for key in ('dino', 'rmbg', 'moge'):
+        for sentinel in AUXILIARY_ASSETS[key].sentinel_paths:
+            path = resolve_storage_path(layout, sentinel)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('auxiliary', encoding='utf-8')
     image = ext_dir / 'input.png'
     image.write_bytes(b'image')
     (ext_dir / 'outputs').mkdir()
@@ -1291,35 +1354,27 @@ with tempfile.TemporaryDirectory() as tmp:
         'auxiliary_bootstrap_downloader': failing_downloader,
         'params': {},
     }, pipeline_factory=fake_pipeline)
-    pipeline = json.loads(resolve_storage_path(layout, 'models/pixal3d/generate/pipeline.json').read_text(encoding='utf-8'))
+    pipeline = json.loads(resolve_storage_path(layout, 'models/pixal3d/_shared/pixal3d-base/pipeline.json').read_text(encoding='utf-8'))
     print(json.dumps({
         'status': result['status'],
         'call_count': len(calls),
         'first_call': calls[0],
         'dino': pipeline['args']['image_cond_model']['args']['model_name'],
         'rmbg': pipeline['args']['rembg_model']['args']['model_name'],
-        'moge': result['auxiliary_source']['sources']['moge']['value'],
-        'naf': result['auxiliary_source']['sources']['naf']['value'],
-        'source_code': result['auxiliary_source']['code'],
-        'source_kinds': {key: value['kind'] for key, value in result['auxiliary_source']['sources'].items()},
-        'bootstrap_status': result['auxiliary_source']['auxiliary_bootstrap']['status'],
-        'warning_codes': [warning['code'] for warning in result['auxiliary_source'].get('warnings', [])],
-        'glb_exists': Path(result['output']['glb_path']).is_file(),
+        'failure_code': result['code'],
+        'bootstrap_status': result['auxiliary_bootstrap']['status'],
+        'generation_allowed': result['generation_allowed'],
     }, sort_keys=True))
 `)
 
-  assert.equal(result.status, 'completed')
+  assert.equal(result.status, 'failed')
   assert.equal(result.call_count, 1)
-  assert.deepEqual(result.first_call, { repo_id: 'camenduru/dinov3-vitl16-pretrain-lvd1689m', filename: 'config.json', source_kind: 'hf_repo' })
-  assert.equal(result.dino, 'camenduru/dinov3-vitl16-pretrain-lvd1689m')
-  assert.equal(result.rmbg, 'camenduru/RMBG-2.0')
-  assert.equal(result.moge, 'Ruicheng/moge-2-vitl')
-  assert.equal(result.naf, 'https://github.com/valeoai/NAF/releases/download/model/naf_release.pth')
-  assert.equal(result.source_code, 'remote_auxiliary_fallback')
-  assert.deepEqual(result.source_kinds, { dino: 'remote', moge: 'remote', naf: 'remote', rmbg: 'remote' })
+  assert.deepEqual(result.first_call, { repo_id: 'https://github.com/valeoai/NAF/releases/download/model/naf_release.pth', filename: 'naf_release.pth', source_kind: 'url' })
+  assert.equal(result.dino, 'facebook/dinov3-vitl16-pretrain-lvd1689m')
+  assert.equal(result.rmbg, 'briaai/RMBG-2.0')
+  assert.equal(result.failure_code, 'naf_bootstrap_failed')
   assert.equal(result.bootstrap_status, 'failed')
-  assert.deepEqual(result.warning_codes, ['auxiliary_bootstrap_failed_remote_fallback_preserved'])
-  assert.equal(result.glb_exists, true)
+  assert.equal(result.generation_allowed, false)
 })
 
 test('strict local/offline readiness and runtime fail early on missing NAF without importing inference or hubconf', () => {
@@ -1457,14 +1512,15 @@ with tempfile.TemporaryDirectory() as tmp:
             path.write_text('aux', encoding='utf-8')
 
     patch_pipeline(ext_dir, auxiliary_mode='local', network_available=False)
-    local_dino = str(resolve_storage_path(layout, 'models/pixal3d/auxiliary/dinov3'))
-    local_moge = str(resolve_storage_path(layout, 'models/pixal3d/auxiliary/moge/model.pt'))
+    local_dino = str(resolve_storage_path(layout, 'models/pixal3d/_shared/pixal3d-base/auxiliary/dinov3'))
+    local_moge = str(resolve_storage_path(layout, 'models/pixal3d/_shared/pixal3d-base/auxiliary/moge/model.pt'))
     image = ext_dir / 'input.png'
     image.write_bytes(b'image')
     (ext_dir / 'outputs').mkdir()
 
     fake_inference = types.ModuleType('inference')
     fake_config_object = types.SimpleNamespace(model_name='facebook/dinov3-vitl16-pretrain-lvd1689m')
+    fake_inference.build_image_cond_model = lambda config: None
     fake_inference.IMAGE_COND_CONFIGS = {
         'ss': {'model_name': 'camenduru/dinov3-vitl16-pretrain-lvd1689m'},
         'shape_512': fake_config_object,
@@ -1507,7 +1563,7 @@ with tempfile.TemporaryDirectory() as tmp:
         'readiness': {'generation_allowed': True, 'code': 'ready'},
         'auxiliary_mode': 'local',
         'network_available': False,
-        'model_source': str(resolve_storage_path(layout, 'models/pixal3d/generate')),
+        'model_source': str(resolve_storage_path(layout, 'models/pixal3d/_shared/pixal3d-base')),
         'params': {'seed': 1},
     })
     print(json.dumps({
@@ -1527,144 +1583,20 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.glb_exists, true)
 })
 
-test('runtime local mode patches NAF to local checkpoint without Torch Hub downloader', () => {
-  const result = runPython(`
-import json, sys, tempfile, types
-from pathlib import Path
-from pixal3d_extension.assets import AUXILIARY_ASSETS, PRIMARY_ASSET
-from pixal3d_extension.paths import resolve_modly_layout, resolve_storage_path
-from pixal3d_extension.pipeline_patch import patch_pipeline
-from pixal3d_extension import runtime
-
-PIPELINE = {
-    'args': {
-        'image_cond_model': {'args': {'model_name': 'facebook/dinov3-vitl16-pretrain-lvd1689m'}},
-        'rembg_model': {'args': {'model_name': 'briaai/RMBG-2.0'}},
-    }
-}
-
-class FakeScene:
-    def apply_transform(self, matrix):
-        pass
-    def export(self, file_type):
-        return b'rotated'
-
-fake_trimesh = types.ModuleType('trimesh')
-fake_trimesh.load = lambda path, file_type, force, process: FakeScene()
-fake_trimesh.transformations = types.SimpleNamespace(rotation_matrix=lambda angle, axis: None)
-sys.modules['trimesh'] = fake_trimesh
-
-with tempfile.TemporaryDirectory() as tmp:
-    ext_dir = Path(tmp) / 'Modly' / 'data' / 'extensions' / 'pixal3d'
-    ext_dir.mkdir(parents=True)
-    layout = resolve_modly_layout(ext_dir)
-    for sentinel in PRIMARY_ASSET.sentinel_paths:
-        path = resolve_storage_path(layout, sentinel)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(PIPELINE) if sentinel.endswith('pipeline.json') else 'primary', encoding='utf-8')
-    for manifest in AUXILIARY_ASSETS.values():
-        for sentinel in manifest.sentinel_paths:
-            path = resolve_storage_path(layout, sentinel)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text('aux', encoding='utf-8')
-
-    patch_pipeline(ext_dir, auxiliary_mode='local', network_available=False)
-    local_naf = str(resolve_storage_path(layout, 'models/pixal3d/auxiliary/naf/naf_release.pth'))
-    image = ext_dir / 'input.png'
-    image.write_bytes(b'image')
-    (ext_dir / 'outputs').mkdir()
-
-    captured = {'torch_hub_calls': 0}
-    fake_torch = types.ModuleType('torch')
-    def fake_torch_load(path, map_location=None):
-        captured['torch_load'] = {'path': str(path), 'map_location': str(map_location)}
-        return {'weights': 'local'}
-    fake_torch.load = fake_torch_load
-    def forbidden_url_loader(*_args, **_kwargs):
-        captured['torch_hub_calls'] += 1
-        raise AssertionError('local NAF mode must not call torch.hub.load_state_dict_from_url')
-    fake_torch.hub = types.SimpleNamespace(load_state_dict_from_url=forbidden_url_loader)
-    sys.modules['torch'] = fake_torch
-
-    fake_hubconf = types.ModuleType('hubconf')
-    class FakeNAF:
-        def to(self, device):
-            captured['naf_device'] = str(device)
-            return self
-        def load_state_dict(self, state_dict):
-            captured['naf_state_dict'] = state_dict
-            return None
-    fake_hubconf.NAF = FakeNAF
-    def remote_naf(pretrained=True, device='cpu'):
-        if pretrained:
-            fake_torch.hub.load_state_dict_from_url('https://github.com/valeoai/NAF/releases/download/model/naf_release.pth', progress=True, map_location=device)
-        return FakeNAF().to(device)
-    fake_hubconf.naf = remote_naf
-    sys.modules['hubconf'] = fake_hubconf
-
-    fake_inference = types.ModuleType('inference')
-    fake_inference.IMAGE_COND_CONFIGS = {}
-    fake_inference.load_moge_model = lambda *args, **kwargs: None
-    def run_inference(*, image_path, output_path, seed, model_path, manual_fov, low_vram, resolution):
-        del image_path, seed, model_path, manual_fov, low_vram, resolution
-        from hubconf import naf
-        model = naf(pretrained=True, device='cuda')
-        captured['patched_checkpoint'] = getattr(naf, '__modly_local_checkpoint__', None)
-        captured['returned_model_type'] = type(model).__name__
-        Path(output_path).write_bytes(b'raw')
-    fake_inference.run_inference = run_inference
-    sys.modules['inference'] = fake_inference
-
-    runtime._prepare_runtime_compat = lambda: None
-    runtime._install_windows_native_module_aliases = lambda: None
-    runtime._install_natten_fallback = lambda: None
-    runtime._silence_flex_gemm_autotuners = lambda: None
-
-    result = runtime.run_job({
-        'workspace_root': str(ext_dir),
-        'input_image': 'input.png',
-        'output_dir': 'outputs',
-        'readiness': {'generation_allowed': True, 'code': 'ready'},
-        'auxiliary_mode': 'local',
-        'network_available': False,
-        'model_source': str(resolve_storage_path(layout, 'models/pixal3d/generate')),
-        'params': {'seed': 1},
-    })
-    print(json.dumps({
-        'status': result['status'],
-        'local_naf': local_naf,
-        'patched_checkpoint': captured['patched_checkpoint'],
-        'torch_load': captured.get('torch_load'),
-        'torch_hub_calls': captured['torch_hub_calls'],
-        'naf_device': captured['naf_device'],
-        'naf_state_dict': captured['naf_state_dict'],
-        'returned_model_type': captured['returned_model_type'],
-        'glb_exists': Path(result['output']['glb_path']).is_file(),
-    }, sort_keys=True))
-`)
-
-  assert.equal(result.status, 'completed')
-  assert.equal(result.patched_checkpoint, result.local_naf)
-  assert.deepEqual(result.torch_load, { path: result.local_naf, map_location: 'cuda' })
-  assert.equal(result.torch_hub_calls, 0)
-  assert.equal(result.naf_device, 'cuda')
-  assert.deepEqual(result.naf_state_dict, { weights: 'local' })
-  assert.equal(result.returned_model_type, 'FakeNAF')
-  assert.equal(result.glb_exists, true)
+test('single-view NAF loading uses a scoped extractor override, not global hubconf mutation', () => {
+  const runtime = readFileSync(join(repoRoot, 'pixal3d_extension', 'runtime.py'), 'utf8')
+  assert.match(runtime, /with _MV_RUN_LOCK, _local_naf_extractors\(/)
+  assert.match(runtime, /verify_checkpoint=True/)
+  assert.doesNotMatch(runtime, /_patch_hubconf_naf_loader|setattr\(hubconf_module, "naf"/)
 })
 
 test('DINO/RMBG/MoGe/NAF are local-first while full offline and NATTEN strict kernels remain separate', () => {
   const readme = readFileSync(join(repoRoot, 'README.md'), 'utf8')
-  assert.match(readme, /not\*\* a full offline-generation guarantee|not\*\* a full offline/i)
   assert.match(readme, /Ruicheng\/moge-2-vitl/)
-  assert.match(readme, /models\/pixal3d\/auxiliary\/moge\/model\.pt/)
-  assert.match(readme, /models\/pixal3d\/auxiliary\/naf\/naf_release\.pth/)
-  assert.match(readme, /MoGeModel\.from_pretrained\(\)/)
-  assert.match(readme, /torch\.hub\.load_state_dict_from_url/)
-  assert.match(readme, /hubconf\.naf/)
-  assert.match(readme, /naf_release\.pth/)
-  assert.match(readme, /no-DNS generation smoke test/i)
-  assert.match(readme, /NATTEN\/libnatten.*separate|separate from strict NAF native kernels/i)
+  assert.match(readme, /pinned \*\*NAF checkpoint[\s\S]*?separate GitHub asset/i)
+  assert.match(readme, /Full offline operation is not promised until all assets/i)
+  assert.match(readme, /native-kernel availability is a separate[\s\S]*?requirement/i)
+  assert.match(readme, /Other feature\/platform paths remain \*\*UNTESTED/i)
 
   const result = runPython(`
 import json
@@ -1681,8 +1613,8 @@ print(json.dumps({
   assert.deepEqual(result.moge_sentinels, ['model.pt'])
   assert.deepEqual(result.naf_sentinels, ['naf_release.pth'])
   assert.deepEqual(result.localizable, {
-    moge: 'local_first_with_remote_or_hf_cache_fallback',
-    naf: 'local_first_with_torch_cache_or_network_fallback_in_default',
+    moge: 'modly_shared_weight_group_required',
+    naf: 'first_generation_or_manual_bootstrap_required',
   })
   assert.match(result.strict_kernel_notes.naf, /NATTEN\/libnatten native kernel availability/)
   assert.deepEqual(result.unlocalized, {})
@@ -1718,7 +1650,7 @@ with tempfile.TemporaryDirectory() as tmp:
     calls = []
     def fake_run(command, *, cwd):
         calls.append(command)
-        return {'args': command, 'returncode': 0, 'stdout_tail': '{"HAS_LIBNATTEN": false, "importable": true, "ok": true, "torch_cuda_available": true, "torch_cuda_version": "13.0"}\\n' if command[1] == '-c' else '', 'stderr_tail': '', 'ok': True}
+        return {'args': command, 'returncode': 0, 'stdout_tail': '{"HAS_LIBNATTEN": false, "importable": true, "ok": true, "torch_cuda_available": true, "torch_cuda_version": "13.0", "transformers_version": "4.57.3"}\\n' if command[1] == '-c' else '', 'stderr_tail': '', 'ok': True}
     setup._run_setup_command = fake_run
     setup._install_prepare_dependencies(root, wheelhouse_path=linux_x64)
     x64_commands = calls[:]
@@ -1886,7 +1818,7 @@ with tempfile.TemporaryDirectory() as tmp:
             'readiness': {'generation_allowed': True, 'code': 'ready'},
             'auxiliary_mode': 'local',
             'network_available': False,
-            'model_source': str(resolve_storage_path(layout, 'models/pixal3d/generate')),
+            'model_source': str(resolve_storage_path(layout, 'models/pixal3d/_shared/pixal3d-base')),
             'params': {'seed': 1},
         })
     finally:
@@ -1914,7 +1846,7 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.traceback_contains_oserror, true)
   assert.match(result.context.input_image.replaceAll('\\', '/'), /input\.png$/)
   assert.match(result.context.output_dir.replaceAll('\\', '/'), /outputs$/)
-  assert.match(result.context.model_source.replaceAll('\\', '/'), /models\/pixal3d\/generate$/)
+  assert.match(result.context.model_source.replaceAll('\\', '/'), /models\/pixal3d\/_shared\/pixal3d-base$/)
   assert.deepEqual(Object.keys(result.context.env), ['HF_HUB_CACHE'])
   assert.equal(result.context.env.HF_HUB_CACHE, 'I:\\hf-cache')
   assert.deepEqual(result.path_hint, {
@@ -1947,7 +1879,7 @@ test('low_vram schema is UI-compatible select and runtime parses values explicit
   const generatorSchema = runPython(`
 import json
 from generator import Pixal3DGenerator
-schema = Pixal3DGenerator.params_schema()
+schema = Pixal3DGenerator().params_schema()
 low_vram = next(param for param in schema if param['id'] == 'low_vram')
 print(json.dumps(low_vram, sort_keys=True))
 `)
@@ -1992,6 +1924,142 @@ print(json.dumps({
   })
 })
 
+test('manual_fov schema exposes Auto MoGe and manual radian options', () => {
+  const manifest = JSON.parse(readFileSync(join(repoRoot, 'manifest.json'), 'utf8'))
+  const manifestParam = manifest.nodes[0].params_schema.find((param) => param.id === 'manual_fov')
+  assert.ok(manifestParam)
+  assert.equal(manifestParam.label, 'Manual FOV')
+  assert.equal(manifestParam.type, 'select')
+  assert.equal(manifestParam.default, '-1')
+  assert.deepEqual(manifestParam.options, MANUAL_FOV_OPTIONS)
+  assert.match(manifestParam.tooltip, /Auto.*MoGe camera estimation/i)
+  assert.match(manifestParam.tooltip, /manual values skip MoGe/i)
+  assert.match(manifestParam.tooltip, /perspective changes/i)
+
+  const generatorSchema = runPython(`
+import json
+from generator import Pixal3DGenerator
+schema = Pixal3DGenerator().params_schema()
+manual_fov = next(param for param in schema if param['id'] == 'manual_fov')
+print(json.dumps(manual_fov, sort_keys=True))
+`)
+  assert.equal(generatorSchema.label, 'Manual FOV')
+  assert.equal(generatorSchema.type, 'select')
+  assert.equal(generatorSchema.default, '-1')
+  assert.deepEqual(generatorSchema.options, MANUAL_FOV_OPTIONS)
+  assert.match(generatorSchema.tooltip, /Auto.*MoGe camera estimation/i)
+  assert.match(generatorSchema.tooltip, /manual values skip MoGe/i)
+  assert.match(generatorSchema.tooltip, /perspective changes/i)
+})
+
+test('manual_fov runtime parser accepts strings and numbers with safe Auto fallback', () => {
+  const parsed = runPython(`
+import json
+from pixal3d_extension.runtime import _parse_manual_fov
+print(json.dumps({
+    'default_none': _parse_manual_fov(None),
+    'string_auto': _parse_manual_fov('-1'),
+    'string_auto_float': _parse_manual_fov(' -1.0 '),
+    'int_auto': _parse_manual_fov(-1),
+    'float_auto': _parse_manual_fov(-1.0),
+    'string_02': _parse_manual_fov('0.2'),
+    'float_035': _parse_manual_fov(0.35),
+    'string_035_imprecise': _parse_manual_fov('0.35000000000000003'),
+    'string_05_padded': _parse_manual_fov(' 0.5 '),
+    'invalid_string': _parse_manual_fov('maybe'),
+    'invalid_zero': _parse_manual_fov(0),
+    'invalid_bool_true': _parse_manual_fov(True),
+}, sort_keys=True))
+`)
+  assert.deepEqual(parsed, {
+    default_none: -1,
+    float_035: 0.35,
+    float_auto: -1,
+    int_auto: -1,
+    invalid_bool_true: -1,
+    invalid_string: -1,
+    invalid_zero: -1,
+    string_02: 0.2,
+    string_035_imprecise: 0.35,
+    string_05_padded: 0.5,
+    string_auto: -1,
+    string_auto_float: -1,
+  })
+})
+
+test('manual_fov runtime passes sanitized values through pipeline and run_inference paths', () => {
+  const result = runPython(`
+import json, sys, tempfile, types
+from pathlib import Path
+from pixal3d_extension import runtime
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    image = root / 'input.png'
+    image.write_bytes(b'image')
+    pipeline_output = root / 'pipeline-output'
+    pipeline_output.mkdir()
+    inference_output = root / 'inference-output'
+    inference_output.mkdir()
+    captured = {}
+    runtime._scoped_single_view_naf_extractors = lambda *_: __import__('contextlib').nullcontext()
+
+    def fake_pipeline(_source):
+        def pipeline(**kwargs):
+            captured['pipeline_manual_fov'] = kwargs['manual_fov']
+            glb = Path(kwargs['output_dir']) / 'pipeline-manual-fov.glb'
+            glb.write_bytes(b'raw')
+            return {'glb_path': str(glb)}
+        return pipeline
+
+    pipeline_result = runtime.run_job({
+        'input_image': str(image),
+        'output_dir': str(pipeline_output),
+        'readiness': {'generation_allowed': True, 'code': 'ready'},
+        'params': {'manual_fov': '0.35000000000000003'},
+    }, pipeline_factory=fake_pipeline)
+
+    fake_inference = types.ModuleType('inference')
+    fake_inference.IMAGE_COND_CONFIGS = {}
+    fake_inference.build_image_cond_model = lambda config: None
+    fake_inference.load_moge_model = lambda *args, **kwargs: None
+    def run_inference(*, image_path, output_path, seed, model_path, manual_fov, low_vram, resolution):
+        del image_path, seed, model_path, low_vram, resolution
+        captured['run_inference_manual_fov'] = manual_fov
+        Path(output_path).write_bytes(b'raw')
+    fake_inference.run_inference = run_inference
+    sys.modules['inference'] = fake_inference
+
+    runtime._prepare_runtime_compat = lambda: None
+    runtime._install_windows_native_module_aliases = lambda: None
+    runtime._install_natten_fallback = lambda: None
+    runtime._silence_flex_gemm_autotuners = lambda: None
+
+    inference_result = runtime.run_job({
+        'input_image': str(image),
+        'output_dir': str(inference_output),
+        'readiness': {'generation_allowed': True, 'code': 'ready'},
+        'params': {'manual_fov': 'invalid'},
+    })
+
+    print(json.dumps({
+        'pipeline_status': pipeline_result['status'],
+        'pipeline_manual_fov': captured['pipeline_manual_fov'],
+        'pipeline_params_manual_fov': pipeline_result['params']['manual_fov'],
+        'inference_status': inference_result['status'],
+        'run_inference_manual_fov': captured['run_inference_manual_fov'],
+        'inference_params_manual_fov': inference_result['params']['manual_fov'],
+    }, sort_keys=True))
+`)
+
+  assert.equal(result.pipeline_status, 'completed')
+  assert.equal(result.pipeline_manual_fov, 0.35)
+  assert.equal(result.pipeline_params_manual_fov, 0.35)
+  assert.equal(result.inference_status, 'completed')
+  assert.equal(result.run_inference_manual_fov, -1)
+  assert.equal(result.inference_params_manual_fov, -1)
+})
+
 test('texture_size schema is UI-compatible select with safe default', () => {
   const manifest = JSON.parse(readFileSync(join(repoRoot, 'manifest.json'), 'utf8'))
   const manifestParam = manifest.nodes[0].params_schema.find((param) => param.id === 'texture_size')
@@ -2010,7 +2078,7 @@ test('texture_size schema is UI-compatible select with safe default', () => {
   const generatorSchema = runPython(`
 import json
 from generator import Pixal3DGenerator
-schema = Pixal3DGenerator.params_schema()
+schema = Pixal3DGenerator().params_schema()
 texture_size = next(param for param in schema if param['id'] == 'texture_size')
 print(json.dumps(texture_size, sort_keys=True))
 `)
@@ -2126,15 +2194,29 @@ with tempfile.TemporaryDirectory() as tmp:
     output.mkdir()
     captured = {}
 
+    fake_o_voxel = types.ModuleType('o_voxel')
+    fake_postprocess = types.ModuleType('o_voxel.postprocess')
+    def original_to_glb(*args, **kwargs):
+        captured['export_texture_size'] = kwargs.get('texture_size')
+        return object()
+    fake_postprocess.to_glb = original_to_glb
+    fake_o_voxel.postprocess = fake_postprocess
+    sys.modules['o_voxel'] = fake_o_voxel
+    sys.modules['o_voxel.postprocess'] = fake_postprocess
+
     fake_inference = types.ModuleType('inference')
     def run_inference(*, image_path, output_path, seed, model_path, manual_fov, low_vram, resolution):
         del image_path, seed, model_path, manual_fov, low_vram, resolution
         captured['env_during'] = os.environ.get(PIXAL3D_TEXTURE_SIZE_ENV)
+        fake_postprocess.to_glb(texture_size=4096)
         Path(output_path).write_bytes(b'raw')
     fake_inference.run_inference = run_inference
+    fake_inference.o_voxel = fake_o_voxel
     fake_inference.IMAGE_COND_CONFIGS = {}
+    fake_inference.build_image_cond_model = lambda config: None
     fake_inference.load_moge_model = lambda *args, **kwargs: None
     sys.modules['inference'] = fake_inference
+    runtime._scoped_single_view_naf_extractors = lambda *_: __import__('contextlib').nullcontext()
 
     runtime._prepare_runtime_compat = lambda: None
     runtime._install_windows_native_module_aliases = lambda: None
@@ -2161,6 +2243,8 @@ print(json.dumps({
     'status': result['status'],
     'env_during': captured['env_during'],
     'env_after': env_after,
+    'export_texture_size': captured['export_texture_size'],
+    'export_restored': fake_postprocess.to_glb is original_to_glb,
     'params_texture_size': result['params']['texture_size'],
 }, sort_keys=True))
 `)
@@ -2168,6 +2252,8 @@ print(json.dumps({
   assert.equal(result.status, 'completed')
   assert.equal(result.env_during, '1024')
   assert.equal(result.env_after, '2048')
+  assert.equal(result.export_texture_size, 1024)
+  assert.equal(result.export_restored, true)
   assert.equal(result.params_texture_size, 1024)
 })
 
@@ -2570,7 +2656,10 @@ test('Blackwell Windows wheelhouse candidate is exact-stack and artifact-only', 
   assert.match(workflow, /\$env:NATTEN_CUDA_ARCH = \$env:CUDA_ARCH_LIST/)
   assert.match(workflow, /natten-\$env:NATTEN_PACKAGE_VERSION-\*-win_amd64\.whl/)
   assert.match(workflow, /build-windows-x64-cp311-cuda128-blackwell\.ps1 -NattenWheelPath[\s\S]*-NattenVersion \$env:NATTEN_PACKAGE_VERSION/)
-  assert.match(workflow, /actions\/upload-artifact@v4/)
+  assert.match(workflow, /name: Upload Blackwell toolchain failure evidence[\s\S]*if: \${\{ failure\(\) \}\}[\s\S]*blackwell-toolchain-failure-\${\{ github.run_id \}/)
+  assert.match(workflow, /path: build\/blackwell-toolchain-evidence/)
+  assert.match(workflow, /if-no-files-found: warn/)
+  assert.match(workflow, /actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02\s*#\s*v4/)
   assert.doesNotMatch(workflow, /upload-release-asset/i)
 
   assert.match(script, /windows-x64-cp311-cuda128-blackwell/)
@@ -2611,10 +2700,909 @@ test('Blackwell Windows wheelhouse candidate is exact-stack and artifact-only', 
   assert.match(docs, /run `27086897007` reached candidate assembly/)
   assert.match(docs, /interpreted PowerShell backtick-`t` as a tab/)
   assert.match(docs, /`\$\{CudaTag\}torch\$\{TorchMinor\}-\.\.\.`/)
+  assert.match(docs, /run `35533729886` was dispatched from `feat\/pixal3d-upstream-multinode` at commit `cc56796d479e58f4e46f28256eacc9bf35748eec`/)
+  assert.match(docs, /unsupported Microsoft Visual Studio version/)
+  assert.match(docs, /run `35535794357` was dispatched from `feat\/pixal3d-upstream-multinode` at commit `0175c870d0643157a5851e137b1fa6342b63fa86`/)
+  assert.match(docs, /Visual Studio Installer returned generic exit code `1`/)
+  assert.match(docs, /checks for an existing `VC\\Tools\\MSVC\\14\.38\.\*` toolset/)
+  assert.match(docs, /re-checks the actual toolset directory regardless of the exit code/)
+  assert.match(docs, /retries once only if `14\.38\.\*` is still absent/)
+  assert.match(docs, /captures VS Installer log candidates into a failure artifact/)
+  assert.match(docs, /fails closed if the CUDA-supported MSVC 14\.38 toolset remains absent/)
   assert.match(docs, /must not update `wheelhouse\.manifest\.json`/)
+  assert.match(docs, /`cuda_version` and `gpu_sm`/)
+  assert.match(docs, /`12\.8`.*`120`.*`cuda128-blackwell`/s)
+  assert.match(docs, /hard gate.*before.*download.*install/i)
+  assert.match(docs, /torch `2\.7\.1\+cu128`.*torchvision `0\.22\.1\+cu128`.*NATTEN `0\.21\.6`/s)
+  assert.match(docs, /RTX 50-series.*Low VRAM.*valid GLB/s)
   assert.match(recipe, /wheelhouse-windows-x64-cp311-cuda128-blackwell-candidate\.yml/)
   assert.match(recipe, /candidate-only/)
+  assert.match(recipe, /payload.*`cuda_version`.*`gpu_sm`/s)
+  assert.match(recipe, /not present in `wheelhouse\.manifest\.json`.*fail.*`unsupported_lane`/s)
   assert.ok(!manifest.includes('windows-x64-cp311-cuda128-blackwell'))
+})
+
+test('Blackwell runtime lane selection is driven by CUDA and SM payload without activating the official manifest', () => {
+  const result = runPython(`
+import json
+from pathlib import Path
+from modly_wheelhouse import WheelhouseError, detect_runtime_lane, load_manifest, select_asset
+
+payload = {'cuda_version': '12.8.1', 'gpu_sm': 'sm_120'}
+runtime = detect_runtime_lane(payload, system='Windows', machine='AMD64', python_tag='cp311')
+manifest = load_manifest(Path('wheelhouse.manifest.json'))
+official_error = None
+try:
+    select_asset(manifest, runtime)
+except WheelhouseError as exc:
+    official_error = exc.code
+
+candidate_manifest = json.loads(json.dumps(manifest))
+candidate_manifest['assets'].append({
+    'id': 'windows-x64-cp311-cuda128-blackwell',
+    'filename': 'candidate.zip',
+    'size_bytes': 1,
+    'sha256': '0' * 64,
+    'compression': 'zip',
+    'selectors': {
+        'os': 'windows',
+        'arch': 'x64',
+        'python_tag': 'cp311',
+        'accelerator_lane': 'cuda128-blackwell',
+    },
+})
+selected = select_asset(candidate_manifest, runtime)
+print(json.dumps({
+    'runtime': runtime,
+    'official_error': official_error,
+    'selected': selected['id'],
+    'official_has_candidate': any(asset['id'] == selected['id'] for asset in manifest['assets']),
+}, sort_keys=True))
+`)
+
+  assert.deepEqual(result.runtime, {
+    accelerator_lane: 'cuda128-blackwell',
+    arch: 'x64',
+    cuda_version: '12.8',
+    gpu_sm: '120',
+    os: 'windows',
+    python_tag: 'cp311',
+  })
+  assert.equal(result.official_error, 'unsupported_lane')
+  assert.equal(result.selected, 'windows-x64-cp311-cuda128-blackwell')
+  assert.equal(result.official_has_candidate, false)
+})
+
+test('setup hard-gates explicit Blackwell payload before filesystem preparation or network access', () => {
+  const result = runPython(`
+import json, shutil, tempfile
+from pathlib import Path
+import setup
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp) / 'pixal3d'
+    root.mkdir()
+    shutil.copy2('wheelhouse.manifest.json', root / 'wheelhouse.manifest.json')
+    calls = []
+    setup._create_prepare_paths = lambda _layout: calls.append('create') or (_ for _ in ()).throw(AssertionError('must gate before path creation'))
+    setup.prepare_wheelhouse = lambda *_args, **_kwargs: calls.append('download') or (_ for _ in ()).throw(AssertionError('must gate before download'))
+    payload = json.dumps({'ext_dir': str(root), 'cuda_version': '12.8.1', 'gpu_sm': '12.0'})
+    outcome = setup.run_setup(['--payload-json', payload, '--json'])
+    print(json.dumps({'outcome': outcome, 'calls': calls}, sort_keys=True))
+`)
+
+  assert.equal(result.outcome.status, 'failed')
+  assert.equal(result.outcome.failure_code, 'unsupported_lane')
+  assert.equal(result.outcome.downloads_started, false)
+  assert.equal(result.outcome.installs_started, false)
+  assert.equal(result.outcome.runtime_evidence.accelerator_lane, 'cuda128-blackwell')
+  assert.deepEqual(result.calls, [])
+})
+
+test('setup rejects malformed non-object and ambiguous payloads before any side effects', () => {
+  const result = runPython(`
+import json
+import setup
+
+cases = {
+    'array': ['--payload-json', '[]', '--json'],
+    'boolean': ['--payload-json', 'true', '--json'],
+    'null': ['--payload-json', 'null', '--json'],
+    'empty_string': ['--payload-json', '', '--json'],
+    'invalid_json': ['--payload-json', '{not-json', '--json'],
+    'empty_object': ['--payload-json', '{}', '--json'],
+    'explicit_and_positional': [
+        '--payload-json',
+        json.dumps({'ext_dir': '/tmp/explicit', 'cuda_version': 124, 'gpu_sm': 89}),
+        json.dumps({'ext_dir': '/tmp/positional', 'cuda_version': 124, 'gpu_sm': 89}),
+        '--json',
+    ],
+    'repeated_explicit': [
+        '--payload-json',
+        json.dumps({'ext_dir': '/tmp/first', 'cuda_version': 124, 'gpu_sm': 89}),
+        '--payload-json',
+        json.dumps({'ext_dir': '/tmp/second', 'cuda_version': 124, 'gpu_sm': 89}),
+        '--json',
+    ],
+}
+
+calls = []
+setup.resolve_modly_layout = lambda *_args, **_kwargs: calls.append('resolve') or (_ for _ in ()).throw(AssertionError('must reject before layout resolution'))
+setup._create_prepare_paths = lambda *_args, **_kwargs: calls.append('create') or (_ for _ in ()).throw(AssertionError('must reject before path creation'))
+setup.prepare_wheelhouse = lambda *_args, **_kwargs: calls.append('download') or (_ for _ in ()).throw(AssertionError('must reject before download'))
+
+outcomes = {name: setup.run_setup(argv) for name, argv in cases.items()}
+print(json.dumps({'outcomes': outcomes, 'calls': calls}, sort_keys=True))
+`)
+
+  for (const [name, outcome] of Object.entries(result.outcomes)) {
+    assert.equal(outcome.status, 'failed', name)
+    assert.equal(outcome.failure_code, 'invalid_runtime_evidence', name)
+    assert.equal(outcome.downloads_started, false, name)
+    assert.equal(outcome.installs_started, false, name)
+    assert.match(outcome.message, /exactly one non-empty JSON object/i, name)
+  }
+  assert.deepEqual(result.calls, [])
+})
+
+test('setup preserves the real Modly payload object contract', () => {
+  const result = runPython(`
+import json
+import setup
+
+payload = {
+    'python_exe': '/host/python',
+    'ext_dir': '/extensions/pixal3d',
+    'gpu_sm': 89,
+    'cuda_version': 124,
+    'accelerator': 'cuda',
+    'platform': 'win32',
+    'arch': 'x64',
+}
+loaded = setup._load_payload(json.dumps(payload))
+print(json.dumps(loaded, sort_keys=True))
+`)
+
+  assert.deepEqual(result, {
+    cuda_version: 124,
+    ext_dir: '/extensions/pixal3d',
+    gpu_sm: 89,
+  })
+})
+
+test('runtime evidence accepts Modly numeric CUDA encodings and canonical dotted forms', () => {
+  const result = runPython(`
+import json
+from modly_wheelhouse import detect_runtime_lane
+
+cases = [
+    {'cuda_version': 128, 'gpu_sm': 120},
+    {'cuda_version': 126, 'gpu_sm': 'sm_89'},
+    {'cuda_version': 124, 'gpu_sm': 89},
+    {'cuda_version': '12.8', 'gpu_sm': '12.0'},
+    {'cuda_version': '12.8.1', 'gpu_sm': 'compute_120'},
+    {'cuda_version': 12.8, 'gpu_sm': 12.0},
+]
+print(json.dumps([
+    detect_runtime_lane(case, system='Windows', machine='AMD64', python_tag='cp311')
+    for case in cases
+], sort_keys=True))
+`)
+
+  assert.deepEqual(result.map(({ cuda_version, gpu_sm, accelerator_lane }) => ({ cuda_version, gpu_sm, accelerator_lane })), [
+    { cuda_version: '12.8', gpu_sm: '120', accelerator_lane: 'cuda128-blackwell' },
+    { cuda_version: '12.6', gpu_sm: '89', accelerator_lane: 'cuda126' },
+    { cuda_version: '12.4', gpu_sm: '89', accelerator_lane: 'cuda124' },
+    { cuda_version: '12.8', gpu_sm: '120', accelerator_lane: 'cuda128-blackwell' },
+    { cuda_version: '12.8', gpu_sm: '120', accelerator_lane: 'cuda128-blackwell' },
+    { cuda_version: '12.8', gpu_sm: '120', accelerator_lane: 'cuda128-blackwell' },
+  ])
+})
+
+test('runtime evidence rejects booleans malformed values and out-of-range encodings', () => {
+  const result = runPython(`
+import json
+from modly_wheelhouse import WheelhouseError, detect_runtime_lane
+
+cases = [
+    {'cuda_version': True, 'gpu_sm': 120},
+    {'cuda_version': 128, 'gpu_sm': False},
+    {'cuda_version': '12.x', 'gpu_sm': 120},
+    {'cuda_version': 12, 'gpu_sm': 120},
+    {'cuda_version': 1000, 'gpu_sm': 120},
+    {'cuda_version': '0.0', 'gpu_sm': 120},
+    {'cuda_version': 128, 'gpu_sm': 0},
+    {'cuda_version': 128, 'gpu_sm': 1000},
+    {'cuda_version': 128, 'gpu_sm': '12.10'},
+]
+out = []
+for payload in cases:
+    try:
+        detect_runtime_lane(payload, system='Windows', machine='AMD64', python_tag='cp311')
+    except WheelhouseError as exc:
+        out.append(exc.code)
+    else:
+        out.append('accepted')
+print(json.dumps(out))
+`)
+
+  assert.deepEqual(result, Array(9).fill('invalid_runtime_evidence'))
+})
+
+test('setup hard-gates the real numeric Modly Blackwell payload before side effects', () => {
+  const result = runPython(`
+import json, shutil, tempfile
+from pathlib import Path
+import setup
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp) / 'pixal3d'
+    root.mkdir()
+    shutil.copy2('wheelhouse.manifest.json', root / 'wheelhouse.manifest.json')
+    calls = []
+    setup._create_prepare_paths = lambda _layout: calls.append('create') or (_ for _ in ()).throw(AssertionError('must gate before path creation'))
+    setup.prepare_wheelhouse = lambda *_args, **_kwargs: calls.append('download') or (_ for _ in ()).throw(AssertionError('must gate before download'))
+    payload = json.dumps({'ext_dir': str(root), 'cuda_version': 128, 'gpu_sm': 120})
+    outcome = setup.run_setup(['--payload-json', payload, '--json'])
+    print(json.dumps({'outcome': outcome, 'calls': calls}, sort_keys=True))
+`)
+
+  assert.equal(result.outcome.status, 'failed')
+  assert.equal(result.outcome.failure_code, 'unsupported_lane')
+  assert.equal(result.outcome.runtime_evidence.cuda_version, '12.8')
+  assert.equal(result.outcome.runtime_evidence.gpu_sm, '120')
+  assert.deepEqual(result.calls, [])
+})
+
+test('legacy positional Blackwell evidence reaches the same fail-closed preflight before side effects', () => {
+  const result = runPython(`
+import json, shutil, tempfile
+from pathlib import Path
+import setup
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp) / 'pixal3d'
+    root.mkdir()
+    shutil.copy2('wheelhouse.manifest.json', root / 'wheelhouse.manifest.json')
+    calls = []
+    setup._create_prepare_paths = lambda _layout: calls.append('create') or (_ for _ in ()).throw(AssertionError('must gate before path creation'))
+    setup.prepare_wheelhouse = lambda *_args, **_kwargs: calls.append('download') or (_ for _ in ()).throw(AssertionError('must gate before download'))
+    outcome = setup.run_setup(['/host/python.exe', str(root), '120', '128'])
+    print(json.dumps({'outcome': outcome, 'calls': calls}, sort_keys=True))
+`)
+
+  assert.equal(result.outcome.status, 'failed')
+  assert.equal(result.outcome.failure_code, 'unsupported_lane')
+  assert.equal(result.outcome.runtime_evidence.cuda_version, '12.8')
+  assert.equal(result.outcome.runtime_evidence.gpu_sm, '120')
+  assert.deepEqual(result.calls, [])
+})
+
+test('legacy positional CUDA 12.4 lane remains a normal preparation path', () => {
+  const result = runPython(`
+import json, shutil, tempfile
+from pathlib import Path
+import setup
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp) / 'pixal3d'
+    root.mkdir()
+    shutil.copy2('wheelhouse.manifest.json', root / 'wheelhouse.manifest.json')
+    calls = []
+    setup._create_prepare_paths = lambda _layout: calls.append('create') or ([], [])
+    outcome = setup.run_setup(['/host/python.exe', str(root), '89', '124', '--skip-install'])
+    print(json.dumps({'outcome': outcome, 'calls': calls}, sort_keys=True))
+`)
+
+  assert.equal(result.outcome.status, 'prepared')
+  assert.equal(result.outcome.runtime_evidence.cuda_version, '12.4')
+  assert.equal(result.outcome.runtime_evidence.gpu_sm, '89')
+  assert.equal(result.outcome.runtime_evidence.accelerator_lane, 'cuda124')
+  assert.equal(result.outcome.runtime_lane_preflight.status, 'matched')
+  assert.deepEqual(result.calls, ['create'])
+})
+
+test('Blackwell candidate install plan pins torch cu128, torchvision cu128, and NATTEN 0.21.6', () => {
+  const result = runPython(`
+import json, tempfile
+from pathlib import Path
+import setup
+
+runtime = {
+    'os': 'windows',
+    'arch': 'x64',
+    'python_tag': 'cp311',
+    'accelerator_lane': 'cuda128-blackwell',
+    'cuda_version': '12.8',
+    'gpu_sm': '120',
+}
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    python = root / 'venv' / 'Scripts' / 'python.exe'
+    python.parent.mkdir(parents=True)
+    python.write_text('', encoding='utf-8')
+    wheelhouse = root / 'windows-x64-cp311-cuda128-blackwell'
+    wheelhouse.mkdir()
+    (wheelhouse / 'flex_gemm_ap-1.0.0+cu128torch2.7-cp311-cp311-win_amd64.whl').write_text('', encoding='utf-8')
+    (wheelhouse / 'natten-0.21.6-cp311-cp311-win_amd64.whl').write_text('', encoding='utf-8')
+    plan = setup._dependency_install_plan(root, wheelhouse, runtime)
+    policy = setup._dependency_policy(runtime)
+    print(json.dumps({'plan': plan, 'policy': policy}, sort_keys=True))
+`)
+
+  assert.equal(result.policy.torch, '2.7.1+cu128')
+  assert.equal(result.policy.torchvision, '0.22.1+cu128')
+  assert.equal(result.policy.natten, '0.21.6')
+  assert.equal(result.policy.expected_torch_cuda, '12.8')
+  assert.equal(result.policy.required_gpu_sm, '120')
+  assert.equal(result.policy.require_libnatten, true)
+  assert.ok(result.plan.torch_command.includes('https://download.pytorch.org/whl/cu128'))
+  assert.ok(result.plan.torch_command.includes('torch==2.7.1+cu128'))
+  assert.ok(result.plan.torch_command.includes('torchvision==0.22.1+cu128'))
+  assert.ok(result.plan.natten_command.includes('natten==0.21.6'))
+})
+
+test('Blackwell candidate runtime validation requires exact CUDA, SM120, imports, and native NATTEN', () => {
+  const result = runPython(`
+import copy, json
+import setup
+
+runtime = {
+    'os': 'windows', 'arch': 'x64', 'python_tag': 'cp311',
+    'accelerator_lane': 'cuda128-blackwell', 'cuda_version': '12.8', 'gpu_sm': '120',
+}
+policy = setup._dependency_policy(runtime)
+base = {
+    'ok': True,
+    'torch_version': '2.7.1+cu128',
+    'torchvision_version': '0.22.1+cu128',
+    'torch_cuda_version': '12.8',
+    'torch_cuda_available': True,
+    'gpu_sm': '120',
+    'natten_version': '0.21.6',
+    'natten_has_libnatten': True,
+    'imports': ['cumesh_vb', 'flex_gemm_ap', 'o_voxel_vb_ap', 'nvdiffrast', 'nvdiffrec_render', 'natten'],
+    'upstream_imports': ['cumesh', 'flex_gemm', 'o_voxel'],
+}
+cases = {'valid': base}
+for name, key, value in [
+    ('cuda_mismatch', 'torch_cuda_version', '12.6'),
+    ('sm_mismatch', 'gpu_sm', '89'),
+    ('natten_fallback', 'natten_has_libnatten', False),
+    ('missing_import', 'imports', ['cumesh_vb']),
+]:
+    candidate = copy.deepcopy(base)
+    candidate[key] = value
+    cases[name] = candidate
+print(json.dumps({name: setup._validate_runtime_probe(probe, policy) for name, probe in cases.items()}, sort_keys=True))
+`)
+
+  assert.equal(result.valid.ok, true)
+  for (const name of ['cuda_mismatch', 'sm_mismatch', 'natten_fallback', 'missing_import']) {
+    assert.equal(result[name].ok, false, `${name} should fail closed`)
+    assert.ok(result[name].validation_errors.length > 0)
+  }
+})
+
+test('Blackwell RTX50 hardware workflow is manual, self-hosted, SHA-pinned, and evidence-only', () => {
+  const workflowPath = join(repoRoot, '.github', 'workflows', 'blackwell-rtx50-hardware-validation.yml')
+  const workflow = readFileSync(workflowPath, 'utf8')
+  const expectedActionPins = {
+    'actions/checkout': { sha: '11d5960a326750d5838078e36cf38b85af677262', version: 'v4' },
+    'actions/upload-artifact': { sha: 'ea165f8d65b6e75b540449e92b4886f43607fa02', version: 'v4' },
+  }
+
+  assert.match(workflow, /workflow_dispatch:/)
+  assert.doesNotMatch(workflow, /^\s*push:/m)
+  assert.doesNotMatch(workflow, /^\s*schedule:/m)
+  assert.match(workflow, /runs-on:\s*\[self-hosted,\s*windows,\s*x64,\s*rtx50\]/)
+  for (const [action, { sha, version }] of Object.entries(expectedActionPins)) {
+    assert.match(workflow, new RegExp(`uses:\\s*${escapeRegExp(action)}@${sha}\\s*#\\s*${escapeRegExp(version)}`))
+  }
+  for (const match of workflow.matchAll(/^\s*uses:\s*([^\s#]+)(?:\s*#\s*([^\n]+))?$/gm)) {
+    const [action, ref] = match[1].split('@')
+    assert.ok(action in expectedActionPins, `Unexpected third-party GitHub Action in Blackwell hardware workflow: ${action}`)
+    assert.match(ref, /^[0-9a-f]{40}$/, `GitHub Action ${action} must be pinned to a full 40-character commit SHA`)
+    assert.equal(match[2]?.trim(), expectedActionPins[action].version)
+  }
+  for (const input of ['candidate_artifact_path', 'expected_artifact_sha256', 'expected_artifact_size_bytes', 'modly_weights_path', 'fixture_image_path']) {
+    assert.match(workflow, new RegExp(`${input}:[\\s\\S]*required:\\s*true`))
+  }
+  const jobEnv = workflow.match(/^    env:\s*\n([\s\S]*?)(?=^    steps:\s*$)/m)
+  assert.ok(jobEnv, 'Blackwell validation job must declare its non-runner inputs in job env')
+  assert.doesNotMatch(
+    jobEnv[0],
+    /\$\{\{\s*runner\./,
+    'runner context is unavailable while GitHub evaluates a job-level env block',
+  )
+  assert.match(workflow, /tools\/validation\/validate-blackwell-rtx50\.ps1/)
+  assert.match(
+    workflow,
+    /- name: Run Blackwell RTX50 validation harness[\s\S]*?env:\s*\n\s+EVIDENCE_DIR:\s*\$\{\{\s*runner\.temp\s*\}\}\/pixal3d-blackwell-validation-evidence[\s\S]*?run:\s*\|/,
+  )
+  assert.match(workflow, /blackwell-validation-evidence-\$\{\{ github\.run_id \}\}/)
+  assert.match(workflow, /path:\s*\$\{\{\s*runner\.temp\s*\}\}\/pixal3d-blackwell-validation-evidence/)
+  assert.match(workflow, /INPUT_CANDIDATE_ARTIFACT_PATH:\s*\$\{\{\s*inputs\.candidate_artifact_path\s*\}\}/)
+  assert.match(workflow, /INPUT_EXPECTED_ARTIFACT_SHA256:\s*\$\{\{\s*inputs\.expected_artifact_sha256\s*\}\}/)
+  assert.match(workflow, /INPUT_EXPECTED_ARTIFACT_SIZE_BYTES:\s*\$\{\{\s*inputs\.expected_artifact_size_bytes\s*\}\}/)
+  assert.match(workflow, /INPUT_MODLY_WEIGHTS_PATH:\s*\$\{\{\s*inputs\.modly_weights_path\s*\}\}/)
+  assert.match(workflow, /INPUT_FIXTURE_IMAGE_PATH:\s*\$\{\{\s*inputs\.fixture_image_path\s*\}\}/)
+  for (const runBlock of workflow.matchAll(/run:\s*\|\n([\s\S]*?)(?=\n\s{6}- name:|\n\s{4}[a-zA-Z_-]+:|\n?$)/g)) {
+    assert.doesNotMatch(runBlock[1], /\$\{\{\s*inputs\./, 'workflow run source must not embed raw user inputs')
+    assert.match(runBlock[1], /\$env:INPUT_CANDIDATE_ARTIFACT_PATH/)
+  }
+  assert.doesNotMatch(workflow, /\$\{\{\s*secrets\./)
+  assert.doesNotMatch(workflow, /upload-release-asset|gh release|wheelhouse\.manifest\.json/i)
+})
+
+test('Blackwell RTX50 PowerShell orchestrator fails closed and uses temp extension setup twice', () => {
+  const scriptPath = join(repoRoot, 'tools', 'validation', 'validate-blackwell-rtx50.ps1')
+  const script = readFileSync(scriptPath, 'utf8')
+
+  for (const parameter of ['CandidateArtifactPath', 'ExpectedArtifactSha256', 'ExpectedArtifactSizeBytes', 'ModlyWeightsPath', 'FixtureImagePath', 'EvidenceDir']) {
+    assert.match(script, new RegExp(`\\[Parameter\\(Mandatory=\\$true\\)\\][\\s\\S]*\\$${parameter}`))
+  }
+  assert.match(script, /\[ValidatePattern\('\^\[0-9a-fA-F\]\{64\}\$'\)\]/)
+  assert.match(script, /Assert-FileContract -Path \$candidateArtifact -ExpectedSha256 \$ExpectedArtifactSha256 -ExpectedSizeBytes \$ExpectedArtifactSizeBytes/)
+  assert.match(script, /Copy-ExtensionTree/)
+  assert.match(script, /\$setupPayload = \[ordered\]@\{[\s\S]*ext_dir = \$tempExtension[\s\S]*cuda_version = 128[\s\S]*gpu_sm = 120[\s\S]*\}/)
+  assert.match(script, /Invoke-SetupRepair -Attempt 1/)
+  assert.match(script, /Invoke-SetupRepair -Attempt 2/)
+  assert.match(script, /-m pip check/)
+  assert.match(script, /blackwell_real_generation\.py/)
+  assert.match(script, /blackwell-validation\.json/)
+  assert.match(script, /Assert-PathContained/)
+  assert.match(script, /Assert-BlackwellAuxiliaryAssets/)
+  assert.match(script, /Assert-NetworkDeniedBoundary/)
+  assert.match(script, /cancellation.*not_supported_by_harness/is)
+  assert.match(script, /Remove-Item -LiteralPath \$workRoot -Recurse -Force/)
+  assert.doesNotMatch(script, /Invoke-WebRequest|Start-BitsTransfer|huggingface-cli|from_pretrained|gh release/i)
+})
+
+test('Blackwell PowerShell gates accept ordered dictionaries and never pass deferred configuration checks', () => {
+  const script = readFileSync(join(repoRoot, 'tools', 'validation', 'validate-blackwell-rtx50.ps1'), 'utf8')
+  const newGateMatch = script.match(/function New-Gate \{[\s\S]*?\n\}/)
+  assert.ok(newGateMatch, 'New-Gate function must exist')
+  assert.match(newGateMatch[0], /\[System\.Collections\.IDictionary\]\$Fields\s*=\s*\[ordered\]@\{\}/)
+  assert.doesNotMatch(newGateMatch[0], /\[hashtable\]\$Fields/, 'PowerShell binder must not require [hashtable] for [ordered] callers')
+  assert.match(script, /\$gates\['blackwell_auxiliary_assets'\]\s*=\s*New-Gate 'blackwell_auxiliary_assets' 'deferred'/)
+  assert.match(script, /\$gates\['network_denied_boundary'\]\s*=\s*New-Gate 'network_denied_boundary' 'configured'/)
+  assert.doesNotMatch(script, /New-Gate 'blackwell_auxiliary_assets' 'passed'/)
+  assert.doesNotMatch(script, /New-Gate 'network_denied_boundary' 'passed'/)
+})
+
+test('Blackwell real-generation helper validates GLB geometry and fails closed on file contracts and paths', () => {
+  const result = runPython(`
+import importlib.util, json, tempfile
+from pathlib import Path
+
+module_path = Path('tools/validation/blackwell_real_generation.py').resolve()
+spec = importlib.util.spec_from_file_location('blackwell_real_generation', module_path)
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    glb = root / 'triangle.glb'
+    output_dir = root / 'outputs'
+    output_dir.mkdir()
+    output_glb = output_dir / 'triangle.glb'
+    helper.write_synthetic_glb_for_test(glb)
+    helper.write_synthetic_glb_for_test(output_glb)
+    stats = helper.validate_glb(glb)
+    output_stats = helper.validate_generated_glb_output(output_glb, output_dir=output_dir, workspace_dir=root)
+    digest = helper.sha256_file(glb)
+    ok_contract = helper.validate_file_contract(glb, digest, glb.stat().st_size)
+    failures = {}
+    for name, call in {
+        'bad_hash': lambda: helper.validate_file_contract(glb, '0' * 64, glb.stat().st_size),
+        'bad_size': lambda: helper.validate_file_contract(glb, digest, glb.stat().st_size + 1),
+        'bad_header': lambda: helper.validate_glb(root / 'bad.glb'),
+        'escape': lambda: helper.assert_path_contained(root / 'inside', root),
+        'output_escape': lambda: helper.validate_generated_glb_output(glb, output_dir=output_dir, workspace_dir=output_dir),
+        'output_missing': lambda: helper.validate_generated_glb_output(output_dir / 'missing.glb', output_dir=output_dir, workspace_dir=root),
+    }.items():
+        try:
+            if name == 'bad_header':
+                (root / 'bad.glb').write_bytes(b'not-glb')
+            call()
+            failures[name] = 'accepted'
+        except Exception as exc:
+            failures[name] = type(exc).__name__
+    print(json.dumps({'stats': stats, 'output_stats': output_stats, 'contract': ok_contract, 'failures': failures}, sort_keys=True))
+`)
+
+  assert.equal(result.stats.magic, 'glTF')
+  assert.equal(result.stats.version, 2)
+  assert.equal(result.stats.vertex_count, 3)
+  assert.deepEqual(result.stats.bbox_min, [0, 0, 0])
+  assert.deepEqual(result.stats.bbox_max, [1, 1, 0])
+  assert.equal(result.stats.sha256.length, 64)
+  assert.equal(result.contract.sha256.length, 64)
+  assert.equal(result.output_stats.path.endsWith('/outputs/triangle.glb'), true)
+  for (const [name, status] of Object.entries(result.failures)) {
+    assert.notEqual(status, 'accepted', `${name} must fail closed`)
+  }
+})
+
+test('Blackwell GLB validation walks every POSITION primitive and aggregates geometry truthfully', () => {
+  const result = runPython(String.raw`
+import importlib.util, json, math, struct, tempfile
+from pathlib import Path
+
+module_path = Path('tools/validation/blackwell_real_generation.py').resolve()
+spec = importlib.util.spec_from_file_location('blackwell_real_generation', module_path)
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+
+def pad4(data, pad=b' '):
+    return data + pad * ((4 - (len(data) % 4)) % 4)
+
+def write_multi(path, primitive_vertices):
+    blob = b''
+    views = []
+    accessors = []
+    primitives = []
+    for vertices in primitive_vertices:
+        offset = len(blob)
+        packed = struct.pack('<' + 'f' * (len(vertices) * 3), *(coord for vertex in vertices for coord in vertex))
+        blob += packed
+        views.append({'buffer': 0, 'byteOffset': offset, 'byteLength': len(packed), 'byteStride': 12, 'target': 34962})
+        accessors.append({'bufferView': len(views) - 1, 'byteOffset': 0, 'componentType': 5126, 'count': len(vertices), 'type': 'VEC3'})
+        primitives.append({'attributes': {'POSITION': len(accessors) - 1}})
+    json_doc = {
+        'asset': {'version': '2.0'},
+        'buffers': [{'byteLength': len(blob)}],
+        'bufferViews': views,
+        'accessors': accessors,
+        'meshes': [{'primitives': primitives}],
+    }
+    json_payload = pad4(json.dumps(json_doc, separators=(',', ':')).encode('utf-8'), b' ')
+    bin_payload = pad4(blob, b'\x00')
+    total_length = 12 + 8 + len(json_payload) + 8 + len(bin_payload)
+    path.write_bytes(
+        struct.pack('<4sII', b'glTF', 2, total_length)
+        + struct.pack('<I4s', len(json_payload), b'JSON')
+        + json_payload
+        + struct.pack('<I4s', len(bin_payload), b'BIN\x00')
+        + bin_payload
+    )
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    valid = root / 'multi.glb'
+    write_multi(valid, [
+        [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)],
+        [(0.0, 0.0, 1.0), (2.0, 0.0, 1.0), (0.0, 2.0, 1.0), (2.0, 2.0, 1.0), (3.0, 2.0, 1.0), (2.0, 3.0, 1.0)],
+    ])
+    stats = helper.validate_glb(valid)
+    invalid = root / 'nan.glb'
+    write_multi(invalid, [
+        [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)],
+        [(0.0, 0.0, 1.0), (math.nan, 0.0, 1.0), (0.0, 2.0, 1.0)],
+    ])
+    try:
+        helper.validate_glb(invalid)
+        nan_failure = 'accepted'
+    except Exception as exc:
+        nan_failure = getattr(exc, 'code', type(exc).__name__)
+    print(json.dumps({'stats': stats, 'nan_failure': nan_failure}, sort_keys=True))
+`)
+
+  assert.equal(result.stats.mesh_count, 1)
+  assert.equal(result.stats.primitive_count, 2)
+  assert.equal(result.stats.position_primitive_count, 2)
+  assert.equal(result.stats.vertex_count, 9)
+  assert.equal(result.stats.face_count, 3)
+  assert.deepEqual(result.stats.bbox_min, [0, 0, 0])
+  assert.deepEqual(result.stats.bbox_max, [3, 3, 1])
+  assert.equal(result.nan_failure, 'non_finite_position')
+})
+
+test('Blackwell GLB validation fully validates indexed triangle primitives', () => {
+  const result = runPython(String.raw`
+import importlib.util, json, struct, tempfile
+from pathlib import Path
+
+module_path = Path('tools/validation/blackwell_real_generation.py').resolve()
+spec = importlib.util.spec_from_file_location('blackwell_real_generation', module_path)
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+
+COMPONENT_PACK = {5121: 'B', 5123: 'H', 5125: 'I'}
+
+def pad4(data, pad=b' '):
+    return data + pad * ((4 - (len(data) % 4)) % 4)
+
+def align_blob(blob, alignment):
+    return blob + (b'\x00' * ((alignment - (len(blob) % alignment)) % alignment))
+
+def write_indexed(path, primitives):
+    blob = b''
+    views = []
+    accessors = []
+    mesh_primitives = []
+    for primitive in primitives:
+        vertices = primitive['vertices']
+        blob = align_blob(blob, 4)
+        if primitive.get('position_prefix_byte'):
+            blob += b'\x00'
+        pos_offset = len(blob)
+        if primitive.get('interleaved_position_stride'):
+            stride = primitive['interleaved_position_stride']
+            pos_blob = b''.join(struct.pack('<fff', *vertex) + (b'\x00' * (stride - 12)) for vertex in vertices)
+        else:
+            stride = primitive.get('position_stride', 12)
+            pos_blob = struct.pack('<' + 'f' * (len(vertices) * 3), *(coord for vertex in vertices for coord in vertex))
+        blob += pos_blob
+        views.append({'buffer': 0, 'byteOffset': pos_offset + primitive.get('position_view_offset_delta', 0), 'byteLength': primitive.get('position_view_length', len(pos_blob)), 'byteStride': stride})
+        accessors.append({'bufferView': len(views) - 1, 'byteOffset': primitive.get('position_accessor_offset', 0), 'componentType': 5126, 'count': len(vertices), 'type': 'VEC3'})
+        glb_primitive = {'attributes': {'POSITION': len(accessors) - 1}}
+        if 'mode' in primitive:
+            glb_primitive['mode'] = primitive['mode']
+        if 'indices' in primitive:
+            component = primitive.get('index_component', 5123)
+            index_values = primitive['indices']
+            fmt = COMPONENT_PACK.get(component, 'f')
+            index_blob = struct.pack('<' + fmt * len(index_values), *index_values)
+            if primitive.get('truncate_index_blob'):
+                index_blob = index_blob[:-1]
+            component_size = struct.calcsize('<' + fmt)
+            blob = align_blob(blob, component_size)
+            index_offset = len(blob)
+            blob += index_blob
+            views.append({
+                'buffer': primitive.get('index_buffer', 0),
+                'byteOffset': index_offset + primitive.get('index_view_offset_delta', 0),
+                'byteLength': primitive.get('index_view_length', len(index_blob)),
+                **({'byteStride': primitive['index_stride']} if 'index_stride' in primitive else {}),
+            })
+            accessors.append({
+                'bufferView': len(views) - 1,
+                'byteOffset': primitive.get('index_accessor_offset', 0),
+                'componentType': component,
+                'count': primitive.get('index_count', len(index_values)),
+                'type': primitive.get('index_type', 'SCALAR'),
+            })
+            glb_primitive['indices'] = len(accessors) - 1
+        mesh_primitives.append(glb_primitive)
+    doc = {'asset': {'version': '2.0'}, 'buffers': [{'byteLength': len(blob)}], 'bufferViews': views, 'accessors': accessors, 'meshes': [{'primitives': mesh_primitives}]}
+    json_payload = pad4(json.dumps(doc, separators=(',', ':')).encode(), b' ')
+    bin_payload = pad4(blob, b'\x00')
+    path.write_bytes(struct.pack('<4sII', b'glTF', 2, 12 + 8 + len(json_payload) + 8 + len(bin_payload)) + struct.pack('<I4s', len(json_payload), b'JSON') + json_payload + struct.pack('<I4s', len(bin_payload), b'BIN\x00') + bin_payload)
+
+base_vertices = [(0,0,0), (1,0,0), (0,1,0), (1,1,0)]
+cases = {}
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    valid = root / 'valid-indexed.glb'
+    write_indexed(valid, [
+        {'vertices': base_vertices, 'indices': [0, 1, 2], 'index_component': 5121},
+        {'vertices': base_vertices, 'indices': [0, 2, 3], 'index_component': 5123},
+        {'vertices': base_vertices, 'indices': [0, 1, 2, 1, 3, 2], 'index_component': 5125},
+        {'vertices': [(0,0,1), (1,0,1), (0,1,1)]},
+    ])
+    stats = helper.validate_glb(valid)
+    cases['valid'] = {key: stats[key] for key in ('primitive_count', 'position_primitive_count', 'vertex_count', 'face_count')}
+    negative_specs = {
+        'zero_index_bufferview': {'vertices': base_vertices, 'indices': [0, 1, 2], 'index_component': 5121, 'index_view_length': 0},
+        'truncated_index_bufferview': {'vertices': base_vertices, 'indices': [0, 1, 2], 'index_component': 5123, 'truncate_index_blob': True},
+        'signed_or_float_index_component': {'vertices': base_vertices, 'indices': [0.0, 1.0, 2.0], 'index_component': 5126},
+        'non_scalar_indices': {'vertices': base_vertices, 'indices': [0, 1, 2], 'index_component': 5121, 'index_type': 'VEC3'},
+        'out_of_range_index': {'vertices': base_vertices, 'indices': [0, 1, 4], 'index_component': 5121},
+        'misaligned_index_accessor': {'vertices': base_vertices, 'indices': [0, 1, 2], 'index_component': 5123, 'index_accessor_offset': 1},
+        'bad_index_stride': {'vertices': base_vertices, 'indices': [0, 1, 2], 'index_component': 5123, 'index_stride': 3},
+        'zero_index_count': {'vertices': base_vertices, 'indices': [0, 1, 2], 'index_component': 5121, 'index_count': 0},
+        'misaligned_position_view': {'vertices': base_vertices[:3], 'position_prefix_byte': True, 'position_view_offset_delta': 0},
+        'misaligned_position_accessor': {'vertices': base_vertices[:3], 'position_prefix_byte': True, 'position_view_offset_delta': -1, 'position_view_length': 37, 'position_accessor_offset': 1},
+        'bad_position_stride': {'vertices': base_vertices[:3], 'position_stride': 14, 'position_view_length': 42},
+        'nonmultiple_triangle_count': {'vertices': base_vertices, 'indices': [0, 1, 2, 3], 'index_component': 5121},
+        'unsupported_mode': {'vertices': base_vertices, 'indices': [0, 1], 'index_component': 5121, 'mode': 1},
+    }
+    aligned_interleaved = root / 'aligned-interleaved.glb'
+    write_indexed(aligned_interleaved, [
+        {'vertices': base_vertices[:3], 'interleaved_position_stride': 16},
+    ])
+    cases['aligned_interleaved'] = helper.validate_glb(aligned_interleaved)['face_count']
+    for name, spec in negative_specs.items():
+        path = root / f'{name}.glb'
+        try:
+            write_indexed(path, [spec])
+            helper.validate_glb(path)
+            cases[name] = 'accepted'
+        except Exception as exc:
+            cases[name] = getattr(exc, 'code', type(exc).__name__)
+print(json.dumps(cases, sort_keys=True))
+`)
+
+  assert.deepEqual(result.valid, {
+    primitive_count: 4,
+    position_primitive_count: 4,
+    vertex_count: 15,
+    face_count: 5,
+  })
+  for (const name of [
+    'zero_index_bufferview',
+    'truncated_index_bufferview',
+    'signed_or_float_index_component',
+    'non_scalar_indices',
+    'out_of_range_index',
+    'misaligned_index_accessor',
+    'bad_index_stride',
+    'zero_index_count',
+    'misaligned_position_view',
+    'misaligned_position_accessor',
+    'bad_position_stride',
+    'nonmultiple_triangle_count',
+    'unsupported_mode',
+  ]) {
+    assert.notEqual(result[name], 'accepted', `${name} must fail closed`)
+  }
+  assert.equal(result.aligned_interleaved, 1)
+})
+
+test('Blackwell GLB validation requires at least one nondegenerate triangle', () => {
+  const result = runPython(String.raw`
+import importlib.util, json, struct, tempfile
+from pathlib import Path
+
+module_path = Path('tools/validation/blackwell_real_generation.py').resolve()
+spec = importlib.util.spec_from_file_location('blackwell_real_generation', module_path)
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+
+def pad4(data, pad=b' '):
+    return data + pad * ((4 - (len(data) % 4)) % 4)
+
+def write_glb(path, primitives):
+    blob = b''
+    views = []
+    accessors = []
+    glb_primitives = []
+    for primitive in primitives:
+        vertices = primitive['vertices']
+        pos_offset = len(blob)
+        pos_blob = struct.pack('<' + 'f' * (len(vertices) * 3), *(coord for vertex in vertices for coord in vertex))
+        blob += pos_blob
+        views.append({'buffer': 0, 'byteOffset': pos_offset, 'byteLength': len(pos_blob), 'byteStride': 12})
+        accessors.append({'bufferView': len(views) - 1, 'byteOffset': 0, 'componentType': 5126, 'count': len(vertices), 'type': 'VEC3'})
+        glb_primitive = {'attributes': {'POSITION': len(accessors) - 1}}
+        if 'indices' in primitive:
+            index_offset = len(blob)
+            index_blob = struct.pack('<' + 'H' * len(primitive['indices']), *primitive['indices'])
+            blob += index_blob
+            views.append({'buffer': 0, 'byteOffset': index_offset, 'byteLength': len(index_blob)})
+            accessors.append({'bufferView': len(views) - 1, 'byteOffset': 0, 'componentType': 5123, 'count': len(primitive['indices']), 'type': 'SCALAR'})
+            glb_primitive['indices'] = len(accessors) - 1
+        glb_primitives.append(glb_primitive)
+    doc = {'asset': {'version': '2.0'}, 'buffers': [{'byteLength': len(blob)}], 'bufferViews': views, 'accessors': accessors, 'meshes': [{'primitives': glb_primitives}]}
+    json_payload = pad4(json.dumps(doc, separators=(',', ':')).encode(), b' ')
+    bin_payload = pad4(blob, b'\x00')
+    path.write_bytes(struct.pack('<4sII', b'glTF', 2, 12 + 8 + len(json_payload) + 8 + len(bin_payload)) + struct.pack('<I4s', len(json_payload), b'JSON') + json_payload + struct.pack('<I4s', len(bin_payload), b'BIN\x00') + bin_payload)
+
+def status_for(path):
+    try:
+        return helper.validate_glb(path)
+    except Exception as exc:
+        return getattr(exc, 'code', type(exc).__name__)
+
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    valid_small = root / 'valid-small.glb'
+    write_glb(valid_small, [{'vertices': [(0.0, 0.0, 0.0), (1e-12, 0.0, 0.0), (0.0, 1e-12, 0.0)]}])
+    mixed = root / 'mixed.glb'
+    write_glb(mixed, [
+        {'vertices': [(0,0,0), (0,0,0), (0,0,0)]},
+        {'vertices': [(0,0,0), (1,0,0), (0,1,0)]},
+        {'vertices': [(0,0,0), (1,0,0), (2,0,0)]},
+    ])
+    cases = {
+        'valid_small': status_for(valid_small),
+        'mixed': status_for(mixed),
+    }
+    negatives = {
+        'indexed_identical': [{'vertices': [(0,0,0), (0,0,0), (0,0,0)], 'indices': [0,1,2]}],
+        'nonindexed_identical': [{'vertices': [(1,1,1), (1,1,1), (1,1,1)]}],
+        'indexed_collinear': [{'vertices': [(0,0,0), (1,0,0), (2,0,0)], 'indices': [0,1,2]}],
+        'nonindexed_collinear': [{'vertices': [(0,0,0), (0,1,0), (0,2,0)]}],
+        'repeated_index': [{'vertices': [(0,0,0), (1,0,0), (0,1,0)], 'indices': [0,0,1]}],
+    }
+    for name, primitives in negatives.items():
+        path = root / f'{name}.glb'
+        write_glb(path, primitives)
+        cases[name] = status_for(path)
+    print(json.dumps(cases, sort_keys=True))
+`)
+
+  assert.equal(result.valid_small.face_count, 1)
+  assert.equal(result.valid_small.nondegenerate_face_count, 1)
+  assert.equal(result.mixed.face_count, 3)
+  assert.equal(result.mixed.nondegenerate_face_count, 1)
+  for (const name of ['indexed_identical', 'nonindexed_identical', 'indexed_collinear', 'nonindexed_collinear', 'repeated_index']) {
+    assert.notEqual(result[name], 'accepted', `${name} must fail closed`)
+    assert.equal(result[name], 'missing_nondegenerate_faces')
+  }
+})
+
+test('Blackwell real-generation helper is directly executable outside repo cwd without PYTHONPATH', () => {
+  const helperPath = join(repoRoot, 'tools', 'validation', 'blackwell_real_generation.py')
+  const outsideCwd = mkdtempSync(join(tmpdir(), 'pixal3d-helper-outside-'))
+  const baseEnv = { ...process.env }
+  delete baseEnv.PYTHONPATH
+
+  const direct = spawnSync(python, [helperPath, '--help'], {
+    cwd: outsideCwd,
+    encoding: 'utf8',
+    env: baseEnv,
+  })
+  assert.equal(direct.status, 0, `direct helper --help failed\nSTDOUT:\n${direct.stdout}\nSTDERR:\n${direct.stderr}`)
+  assert.match(direct.stdout, /validate-real/)
+
+  const tempRoot = join(mkdtempSync(join(tmpdir(), 'pixal3d helper path with spaces ')), 'extension copy')
+  mkdirSync(join(tempRoot, 'tools', 'validation'), { recursive: true })
+  cpSync(helperPath, join(tempRoot, 'tools', 'validation', 'blackwell_real_generation.py'))
+  cpSync(join(repoRoot, 'pixal3d_extension'), join(tempRoot, 'pixal3d_extension'), { recursive: true })
+  cpSync(join(repoRoot, 'generator.py'), join(tempRoot, 'generator.py'))
+  const copied = spawnSync(python, [join(tempRoot, 'tools', 'validation', 'blackwell_real_generation.py'), '--help'], {
+    cwd: outsideCwd,
+    encoding: 'utf8',
+    env: baseEnv,
+  })
+  assert.equal(copied.status, 0, `copied helper --help failed\nSTDOUT:\n${copied.stdout}\nSTDERR:\n${copied.stderr}`)
+  assert.match(copied.stdout, /validate-real/)
+})
+
+test('Blackwell helper enforces strict offline assets, full native imports, and process-level restart evidence', () => {
+  const helper = readFileSync(join(repoRoot, 'tools', 'validation', 'blackwell_real_generation.py'), 'utf8')
+
+  for (const moduleName of ['cumesh_vb', 'flex_gemm_ap', 'o_voxel_vb_ap', 'drtk', 'flash_attn', 'nvdiffrast', 'nvdiffrec_render', 'natten']) {
+    assert.match(helper, new RegExp(`BLACKWELL_REQUIRED_IMPORTS = \\[[\\s\\S]*"${moduleName}"`))
+  }
+  assert.match(helper, /from pixal3d_extension\.assets import[\s\S]*AUXILIARY_ASSETS[\s\S]*PRIMARY_ASSET/)
+  assert.match(helper, /from pixal3d_extension\.naf_checkpoint import verify_naf_checkpoint/)
+  assert.match(helper, /def validate_blackwell_assets/)
+  assert.match(helper, /verify_naf_checkpoint/)
+  assert.match(helper, /auxiliary_mode=.*strict/s)
+  assert.match(helper, /network_available=False/)
+  assert.doesNotMatch(helper, /network_available=True/)
+  for (const envName of ['HF_HUB_OFFLINE', 'TRANSFORMERS_OFFLINE', 'HF_DATASETS_OFFLINE', 'HF_HUB_DISABLE_IMPLICIT_TOKEN', 'HF_HUB_DISABLE_TELEMETRY']) {
+    assert.match(helper, new RegExp(envName))
+  }
+  assert.match(helper, /class NetworkDenied/)
+  assert.match(helper, /socket\.create_connection/)
+  assert.match(helper, /urllib\.request\.urlopen/)
+  assert.match(helper, /gates\["network_denial_boundary"\]\s*=\s*\{"status": "configured"/)
+  assert.match(helper, /"network_denial"\s*:/)
+  assert.match(helper, /"asset_gate"\s*:/)
+  assert.match(helper, /generation\["asset_gate"\]\["status"\] != "passed"/)
+  assert.match(helper, /generation\["network_denial"\]\["status"\] != "passed"/)
+  assert.match(helper, /def second_runtime_probe/)
+  assert.match(helper, /validate_runtime\(/)
+  assert.match(helper, /process-level cleanup proof/)
+  assert.doesNotMatch(helper, /import generator\\n"\s*"print\(json\.dumps\(\{'status':'passed','module': generator\.__name__\}/)
+})
+
+test('Blackwell hardware validation docs define manual usage and candidate-only evidence boundary', () => {
+  const docs = readFileSync(join(repoRoot, 'tools', 'wheelhouse', 'BLACKWELL-SM120.md'), 'utf8')
+
+  assert.match(docs, /validate-blackwell-rtx50\.ps1/)
+  assert.match(docs, /blackwell_real_generation\.py/)
+  assert.match(docs, /blackwell-rtx50-hardware-validation\.yml/)
+  assert.match(docs, /candidate artifact path.*expected SHA256.*expected size/i)
+  assert.match(docs, /pre-provisioned.*Modly weights path/i)
+  assert.match(docs, /setup\.py.*cuda_version.*128.*gpu_sm.*120/s)
+  assert.match(docs, /Repair.*twice.*idempot/i)
+  assert.match(docs, /natten\.HAS_LIBNATTEN.*True/)
+  assert.match(docs, /`drtk`.*`flash_attn`/s)
+  assert.match(docs, /strict.*offline.*auxiliary/i)
+  assert.match(docs, /local valid NAF sentinel/i)
+  assert.match(docs, /network-denial/i)
+  assert.match(docs, /process-level.*restart/i)
+  assert.match(docs, /regular file.*within.*output/i)
+  assert.match(docs, /single-view.*low_vram.*GLB/i)
+  assert.match(docs, /blackwell-validation\.json/)
+  assert.match(docs, /candidate_complete_unvalidated/)
+  assert.match(docs, /not official.*real Windows RTX 50/i)
 })
 
 test('linux x64 native source refs are immutable and confidence-documented', () => {
@@ -2998,7 +3986,7 @@ with tempfile.TemporaryDirectory() as tmp:
     calls = []
     def fake_run(command, *, cwd):
         calls.append({'command': command, 'cwd': str(cwd)})
-        return {'args': command, 'returncode': 0, 'stdout_tail': '{"HAS_LIBNATTEN": false, "importable": true, "ok": true, "torch_cuda_available": true, "torch_cuda_version": "13.0"}\\n' if command[1] == '-c' else '', 'stderr_tail': '', 'ok': True}
+        return {'args': command, 'returncode': 0, 'stdout_tail': '{"HAS_LIBNATTEN": false, "importable": true, "ok": true, "torch_cuda_available": true, "torch_cuda_version": "13.0", "transformers_version": "4.57.3"}\\n' if command[1] == '-c' else '', 'stderr_tail': '', 'ok': True}
     setup._run_setup_command = fake_run
     result = setup._install_prepare_dependencies(root, wheelhouse_path=verified)
     print(json.dumps({'status': result['status'], 'wheelhouse': result['wheelhouse'], 'commands': [call['command'] for call in calls]}, sort_keys=True))
@@ -3028,7 +4016,7 @@ with tempfile.TemporaryDirectory() as tmp:
     calls = []
     def fake_run(command, *, cwd):
         calls.append(command)
-        return {'args': command, 'returncode': 0, 'stdout_tail': '{"HAS_LIBNATTEN": false, "importable": true, "ok": true, "torch_cuda_available": true, "torch_cuda_version": "13.0"}\\n' if command[1] == '-c' else '', 'stderr_tail': '', 'ok': True}
+        return {'args': command, 'returncode': 0, 'stdout_tail': '{"HAS_LIBNATTEN": false, "importable": true, "ok": true, "torch_cuda_available": true, "torch_cuda_version": "13.0", "transformers_version": "4.57.3"}\\n' if command[1] == '-c' else '', 'stderr_tail': '', 'ok': True}
     setup._run_setup_command = fake_run
     result = setup._install_prepare_dependencies(root, wheelhouse_path=wheelhouse)
     print(json.dumps({'status': result['status'], 'packages': result['local_wheel_packages'], 'metadata_command': calls[3], 'install_command': calls[4]}, sort_keys=True))
@@ -3449,7 +4437,7 @@ with tempfile.TemporaryDirectory() as tmp:
     def fake_run(command, *, cwd):
         calls.append(command)
         if command[1:] == ['-c', command[-1]]:
-            return {'args': command, 'returncode': 0, 'stdout_tail': '{"HAS_LIBNATTEN": false, "importable": true, "ok": true, "torch_cuda_available": true, "torch_cuda_version": "13.0", "version": "0.21.0"}\\n', 'stderr_tail': '', 'ok': True}
+            return {'args': command, 'returncode': 0, 'stdout_tail': '{"HAS_LIBNATTEN": false, "importable": true, "ok": true, "torch_cuda_available": true, "torch_cuda_version": "13.0", "transformers_version": "4.57.3", "version": "0.21.0"}\\n', 'stderr_tail': '', 'ok': True}
         return {'args': command, 'returncode': 0, 'stdout_tail': '', 'stderr_tail': '', 'ok': True}
     setup._run_setup_command = fake_run
     result = setup._install_prepare_dependencies(root, wheelhouse_path=wheelhouse)
@@ -3474,15 +4462,17 @@ with tempfile.TemporaryDirectory() as tmp:
     verified.mkdir(parents=True)
     calls = []
     setup._create_prepare_paths = lambda _layout: ([], [])
-    def fake_prepare(workspace_root):
+    def fake_prepare(workspace_root, *, runtime_evidence=None):
         calls.append({'step': 'prepare_wheelhouse', 'workspace_root': str(workspace_root)})
         return {'status': 'ready', 'wheelhouse_path': str(verified), 'downloads_started': False, 'installs_started': False, 'selected_asset': 'linux-aarch64-cp312-cuda124'}
-    def fake_install(workspace_root, *, wheelhouse_path=None):
+    def fake_install(workspace_root, *, wheelhouse_path=None, runtime_evidence=None):
         calls.append({'step': 'install', 'wheelhouse_path': str(wheelhouse_path)})
         return {'status': 'installed', 'code': 'dependencies_installed', 'wheelhouse': str(wheelhouse_path), 'commands': []}
     setup._prepare_wheelhouse_for_setup = fake_prepare
     setup._install_prepare_dependencies = fake_install
-    result = setup.run_setup(['--workspace-root', str(root), '--prepare', '--json'])
+    result = setup.run_setup([
+        '--workspace-root', str(root), '--prepare', '--skip-scene-prep', '--json'
+    ])
     print(json.dumps({'status': result['status'], 'installs_started': result['installs_started'], 'wheelhouse': result['dependency_install']['wheelhouse'], 'wheelhouse_prepare': result['wheelhouse_prepare'], 'calls': calls}, sort_keys=True))
 `)
 
@@ -3505,7 +4495,7 @@ with tempfile.TemporaryDirectory() as tmp:
     verified = root / '.modly' / 'cache' / 'wheelhouse' / 'pixal3d' / '0.1.0' / 'linux-aarch64-cp312-cuda124' / 'extracted'
     verified.mkdir(parents=True)
     setup._create_prepare_paths = lambda _layout: ([], [])
-    setup._prepare_wheelhouse_for_setup = lambda _workspace_root: {'status': 'ready', 'wheelhouse_path': str(verified), 'selected_asset': 'linux-aarch64-cp312-cuda124'}
+    setup._prepare_wheelhouse_for_setup = lambda _workspace_root, **_kwargs: {'status': 'ready', 'wheelhouse_path': str(verified), 'selected_asset': 'linux-aarch64-cp312-cuda124'}
     setup._install_prepare_dependencies = lambda *_args, **_kwargs: {'status': 'failed', 'code': 'dependency_install_failed', 'commands': [{'ok': False}]}
     result = setup.run_setup(['--workspace-root', str(root), '--prepare', '--json'])
     print(json.dumps({'status': result['status'], 'dependency_code': result['dependency_install']['code'], 'next_steps': result['next_steps']}, sort_keys=True))
@@ -3529,7 +4519,7 @@ with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
     calls = []
     setup._create_prepare_paths = lambda _layout: ([], [])
-    def fake_prepare(_workspace_root):
+    def fake_prepare(_workspace_root, **_kwargs):
         raise WheelhouseError('checksum_mismatch', 'sha256 verification failed')
     def forbidden_install(*_args, **_kwargs):
         calls.append('install')
@@ -3605,14 +4595,10 @@ test('wheelhouse docs separate end-user release assets from maintainer build and
   const wheelhouseReadmePath = join(repoRoot, 'tools', 'wheelhouse', 'README.md')
 
   assert.match(readme, /release-backed wheelhouse/i)
-  assert.match(readme, /vendored `wheels\/` fallback/i)
-  assert.match(readme, /--no-index --find-links|--no-index --no-deps --find-links/)
-  assert.match(readme, /Linux `x64` \/ Python `cp312` \/ `cuda124`/)
-  assert.match(readme, /Windows `x64` \/ Python `cp312` \/ `cuda124`/)
-  assert.match(readme, /Windows `x64` \/ Python `cp311` \/ `cuda124`/)
-  assert.match(readme, /o-voxel-vb-ap/)
-  assert.doesNotMatch(readme, /- `natten==0\.21\.0`/)
-  assert.match(readme, /natten\.HAS_LIBNATTEN/)
+  assert.match(readme, /Provisioning lanes are Linux ARM64\/x64 Python 3\.12 and Windows x64 Python 3\.11\/3\.12/)
+  assert.match(readme, /CUDA 12\.4 wheels; available lanes are not blanket hardware qualification/)
+  assert.match(readme, /Prior core evidence:[\s\S]*?Windows x64, CPython 3\.11, CUDA 12\.4/)
+  assert.match(readme, /maintainer packaging details|Maintainer packaging details/)
   assert.equal(existsSync(wheelhouseReadmePath), true)
 
   const wheelhouseReadme = readFileSync(wheelhouseReadmePath, 'utf8')

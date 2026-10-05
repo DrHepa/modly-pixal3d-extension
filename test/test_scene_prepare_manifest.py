@@ -1,0 +1,69 @@
+import json
+import unittest
+from pathlib import Path
+
+
+class ScenePrepareManifestTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.manifest = json.loads((Path(__file__).parents[1] / "manifest.json").read_text())
+
+    def test_public_scene_prep_nodes_match_released_host_transport(self):
+        nodes = {node["id"]: node for node in self.manifest["nodes"]}
+        self.assertTrue({"generate", "generate-mv", "worldsculpt"}.issubset(nodes))
+        self.assertNotIn("scene-from-estimates", nodes)
+        images = nodes["scene-from-images"]
+        self.assertEqual((images["input"], images["output"]), ("image", "scene"))
+        self.assertEqual(images["inputs"], ["image"] * 8)
+        self.assertEqual(
+            images["input_contract"],
+            [
+                {
+                    "name": "image" if index == 1 else f"image_{index}",
+                    "label": "Primary view" if index == 1 else f"View {index}",
+                    "type": "image",
+                    "required": index == 1,
+                }
+                for index in range(1, 9)
+            ],
+        )
+        self.assertEqual(
+            images["input_labels"],
+            ["Primary view", "View 2", "View 3", "View 4", "View 5", "View 6", "View 7", "View 8"],
+        )
+        self.assertEqual(images["weight_groups"], ["sam3", "da3-base"])
+        self.assertNotIn("scene-from-video", nodes)
+        self.assertEqual(len(nodes), 5)
+        self.assertEqual((nodes["normalize-annotated-scene"]["input"], nodes["normalize-annotated-scene"]["output"]), ("scene", "scene"))
+        self.assertNotIn("weight_groups", nodes["normalize-annotated-scene"])
+        params = {param["id"]: param for param in images["params_schema"]}
+        self.assertNotIn("max_frames", params)
+        self.assertNotIn("frame_stride", params)
+        self.assertEqual(params["minimum_geometry_points"]["default"], 128)
+
+    def test_private_video_runtime_keeps_its_parameter_contract(self):
+        from generator import Pixal3DGenerator, SCENE_VIDEO_NODE
+
+        generator = Pixal3DGenerator()
+        generator.MODEL_NODE_ID = SCENE_VIDEO_NODE
+        video_params = {param["id"]: param for param in generator.params_schema()}
+        images = next(node for node in self.manifest["nodes"] if node["id"] == "scene-from-images")
+        params = {param["id"]: param for param in images["params_schema"]}
+        self.assertEqual(params, {key: value for key, value in video_params.items() if key not in {"max_frames", "frame_stride"}})
+        self.assertEqual(video_params["max_frames"]["default"], 16)
+        self.assertEqual(video_params["frame_stride"]["default"], 1)
+
+    def test_official_weight_groups_are_immutable_and_exact(self):
+        groups = {group["id"]: group for group in self.manifest["weight_groups"]}
+        sam = groups["sam3"]["model_sources"][0]
+        da3 = groups["da3-base"]["model_sources"][0]
+        self.assertEqual(sam["repo_id"], "facebook/sam3")
+        self.assertEqual(sam["revision"], "3c879f39826c281e95690f02c7821c4de09afae7")
+        self.assertEqual(sam["checks"], ["config.json", "sam3.pt", "LICENSE"])
+        self.assertEqual(da3["repo_id"], "depth-anything/DA3-BASE")
+        self.assertEqual(da3["revision"], "f4a6c9b3c95e41c82048423d3493a81ec3fa810e")
+        self.assertEqual(da3["checks"], ["config.json", "model.safetensors"])
+
+
+if __name__ == "__main__":
+    unittest.main()

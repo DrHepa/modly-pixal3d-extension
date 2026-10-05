@@ -1,105 +1,139 @@
-# Pixal3D Modly Extension
+# Pixal3D for Modly
 
-Pixal3D image-to-3D model extension for Modly. It converts a single input image into a textured GLB mesh using the upstream `TencentARC/Pixal3D` model family and Modly-managed model storage.
+Turn an image into a textured 3D asset, combine multiple views, or reconstruct
+objects in a scene with WorldSculpt—all inside Modly workflows.
 
-This repository contains only the extension runtime, setup entrypoint, and a release-backed wheelhouse contract needed to prepare Pixal3D dependencies from a GitHub install. Model weights are not included; Modly downloads model assets through its UI into the normal Modly model storage.
+**Requires [Modly 0.4.3 or newer](https://github.com/lightningpixel/modly/releases/tag/v0.4.3).**
+Model weights are downloaded through Modly Models; they are not bundled here.
 
-## What setup does
+## Install and get started
 
-```bash
-python3 setup.py --prepare --json
-```
+1. Open **Models/Extensions → Install from GitHub** and enter:
+   `https://github.com/DrHepa/modly-pixal3d-extension`
+2. Let setup finish. If dependencies need recovery, use the extension's **Repair** action.
+3. In **Models**, download the shared weight groups for your chosen node (below).
+4. Connect your inputs in a workflow and run the node.
 
-- creates `venv/` inside the extension
-- installs `requirements.txt`
-- prepares the selected release-backed wheelhouse from `wheelhouse.manifest.json`
-- installs native packages with `pip install --no-index --find-links <verified-wheelhouse>`
-- runs `pip check`
-- creates logical Modly model-storage folders under the configured Modly models root
+Normal setup automatically attempts the special scene-preparation and WorldSculpt
+environments on supported hosts. No separate manual setup is needed for a fresh install.
 
-It does **not** download model weights and does **not** run generation.
+**Upgrading from the older single-node extension?** Existing checkpoints can be
+moved—not copied—into the host's shared group roots. Preserve the auxiliary
+subdirectories and check Models readiness before deleting anything; do not download
+a duplicate set blindly.
 
-## Release-backed wheelhouse
+## Five workflow nodes
 
-`wheelhouse.manifest.json` pins the release tag, selected platform lane, archive filename, checksum, and fallback policy. Setup verifies the selected archive before extraction and installs native packages only from a verified local path using `--no-index --find-links`.
+| Node | Input | Output | Required groups |
+| --- | --- | --- | --- |
+| **Image to 3D** | One image | Textured GLB | Base |
+| **Multi-Image to 3D** | 2–4 images | Textured GLB | Base, MV, DA3 |
+| **Prepare Scene from Images** | 2–8 images | Scene bundle | SAM3, DA3 |
+| **Normalize Annotated Scene** | Existing annotated scene | Scene bundle | None |
+| **WorldSculpt Scene to 3D** | Prepared/normalized scene | Geometry-only GLB | Base, WorldSculpt adapters |
 
-The vendored `wheels/` fallback is intentionally retained for migration/rollback. It is used only after retryable release access failures such as network/auth errors and only when every wheel is lane-compatible and hash-verified. Setup must not silently fall back to PyPI for native packages.
+Video scene preparation is implemented but not public until the host's
+[typed model-input transport (PR #358)](https://github.com/lightningpixel/modly/pull/358) is released.
 
-Current published wheelhouse targets:
+### Image → textured asset
 
-- Linux `aarch64` / Python `cp312` / `cuda124`
-- Linux `x64` / Python `cp312` / `cuda124`
-- Windows `x64` / Python `cp311` / `cuda124` — Modly packaged app install contract
-- Windows `x64` / Python `cp312` / `cuda124`
+Connect an image to **Image to 3D**. Defaults favor safer memory use: resolution
+1024, Low VRAM, texture size 1024, automatic MoGe FOV, and a random seed (`-1`).
+Use a fixed seed for repeatable comparisons. Higher resolution and texture size
+cost more memory and time.
 
-Included packaged dependencies:
+### Multiple views → one asset
 
-- `pixal3d-core==0.1.0+modly`
-- `moge==2.0.0+modly`
-- `naf==0.1.0+modly`
-- `utils3d==1.3+modly.headless`
-- `pipeline==1.0.0+modly`
-- `o-voxel==0.0.1`
-- `cumesh==0.0.1`
-- `flex-gemm==1.0.0`
-- `nvdiffrast==0.4.0`
-- `nvdiffrec-render==0.0.0`
+Connect 2–4 images of the **same object**, with clear overlap between views.
+Use consecutive connected image slots, starting at Primary view. In stock Modly
+0.4.3, secondary images must be workspace-owned files; empty slots are compacted
+by the host, so do not rely on gaps preserving camera roles.
 
-The Windows `x64` / Python `cp311` / `cuda124` lane used by the packaged Modly app also includes `natten==0.21.0` with native `libnatten` available. Setup verifies the wheelhouse checksum, installs from the verified archive, and probes native CUDA/NATTEN availability before reporting success.
+Auto cameras use DA3 estimates, not guaranteed camera calibration. Declared camera
+roles must match your actual camera rig; their FOV defaults to **20°**.
+**Every MV camera mode currently requires DA3 weights and runtime**, including
+Declared roles. MV defaults are resolution/texture size 1024, Low VRAM, Auto
+cameras, and random seed (`-1`).
 
-On Windows, the equivalent exact-stack native package distributions are installed from the Windows lane where names differ, such as `o-voxel-vb-ap`, `cumesh-vb`, `flex-gemm-ap`, `drtk`, and `flash-attn`.
+### Images → scene → WorldSculpt
 
-`natten`/`libnatten` availability is lane-specific. Linux `aarch64` and Windows `x64`/`cp311`/`cuda124` include verified native NATTEN. Other lanes may treat NATTEN as optional; setup probes `natten.HAS_LIBNATTEN` and strict NAF is available only when that value is `True`.
+1. Connect 2–8 unique images with **matching dimensions** to consecutive slots on
+   **Prepare Scene from Images**.
+2. Enter the object labels you want SAM3 to track.
+3. Connect the resulting scene to **WorldSculpt Scene to 3D**.
 
-## Modly contract
+Use a static scene and an overlapping camera orbit; moving objects or weak view
+coverage can produce poor masks, boxes, or reconstruction. SAM3 supplies instance
+masks; DA3 supplies depth and camera estimates. DA3's scale is **relative**, not
+metric. WorldSculpt preserves that scene-scale limitation.
 
-- `manifest.json` declares the model extension.
-- `setup.py` prepares the extension environment.
-- `generator.py` exposes `Pixal3DGenerator`.
-- Model assets must live under Modly's model storage, not inside this repository.
+Already have frames, masks, cameras, and object boxes in an annotated Modly scene?
+Use **Normalize Annotated Scene** before WorldSculpt. Normalization validates and
+copies referenced scene assets; it does not estimate missing data or invent scale.
 
-## View-aligned generation behavior
+## Shared weights and first use
 
-Pixal3D generates meshes aligned to the input image projection rather than always canonicalizing the object to a universal upright/front pose. Upstream's projected render path is designed so the first rendered frame matches the projected input view.
+Modly stores each shared group once and reuses it across dependent nodes.
+Hugging Face weights are UI-managed and local-only during inference.
 
-Practical implications:
+| Group | Model sources | Used by |
+| --- | --- | --- |
+| `pixal3d-base` | TencentARC/Pixal3D, DINOv3, RMBG-2.0, Ruicheng/moge-2-vitl | Image, MV, WorldSculpt |
+| `pixal3d-mv` | TencentARC/Pixal3D MV checkpoints | MV |
+| `da3-base` | depth-anything/DA3-BASE | MV, scene preparation |
+| `sam3` | facebook/sam3 (**gated**) | Scene preparation |
+| `worldsculpt-adapters` | AlayaLab/WorldSculpt | WorldSculpt |
 
-- front/straight input images should usually produce upright meshes;
-- angled or isometric input images can produce angled meshes;
-- that input-dependent tilt is expected Pixal3D behavior, not a Modly orientation bug;
-- do not apply a fixed post-export pitch correction to all Pixal3D outputs, because it can break already-upright generations.
+For SAM3, accept Meta's model terms and authenticate in Modly's Hugging Face
+flow before downloading. See [Third-Party Notices](THIRD_PARTY_NOTICES.md).
 
-The extension preserves Pixal3D's exported GLB orientation. Do not apply a fixed post-export yaw correction to all Pixal3D outputs; front/back orientation can depend on upstream generation behavior and should be validated with representative inputs instead of rewritten unconditionally.
+The pinned **NAF checkpoint** is a separate GitHub asset. It automatically downloads
+on first base/MV/WorldSculpt use, after the other required assets are ready, and
+is verified before use. Full offline operation is not promised until all assets
+and runtime dependencies are complete; native-kernel availability is a separate
+requirement. A corrupt NAF checkpoint is never silently replaced.
 
-## Remaining runtime requirement
+## Requirements and validation boundaries
 
-After setup succeeds, use Modly UI to download Pixal3D model assets. Real generation should be validated only after the primary Pixal3D weights and the required auxiliary assets are present.
+Setup uses a checksum-verified, release-backed wheelhouse for the primary runtime.
+Provisioning lanes are Linux ARM64/x64 Python 3.12 and Windows x64 Python 3.11/3.12
+with CUDA 12.4 wheels; available lanes are not blanket hardware qualification.
 
-Auxiliary model assets are stored below `models/pixal3d/auxiliary/`. Do not shorten this folder to `aux`: `AUX` is a reserved Windows device name and can break setup on normal Windows filesystems.
+- **Prior core evidence:** Windows x64, CPython 3.11, CUDA 12.4.
+- **Current feature evidence:** Linux ARM64 / NVIDIA GB10 runs exercised base,
+  MV, scene preparation, and WorldSculpt. Viewport/perceptual validation remains partial.
+- Other feature/platform paths remain **UNTESTED**; no AMD/ROCm inference claim is made.
+- **Scene-preparation lane:** Linux ARM64, CPython 3.12, CUDA ≥12.6.
+- **WorldSculpt lane:** exact Linux ARM64, Python 3.12, PyTorch 2.12.0+cu130,
+  CUDA 13.0 environment, isolated from the primary runtime.
 
-Required localizable auxiliary sentinels:
+Memory needs depend on input, resolution, and reconstruction complexity. Low VRAM
+mode reduces pressure; it is not an OOM guarantee. Maintainer packaging details
+are in [the wheelhouse guide](tools/wheelhouse/README.md).
 
-- `models/pixal3d/auxiliary/dinov3/config.json`
-- `models/pixal3d/auxiliary/dinov3/preprocessor_config.json`
-- `models/pixal3d/auxiliary/dinov3/model.safetensors`
-- `models/pixal3d/auxiliary/rmbg/config.json`
-- `models/pixal3d/auxiliary/rmbg/preprocessor_config.json`
-- `models/pixal3d/auxiliary/rmbg/BiRefNet_config.py`
-- `models/pixal3d/auxiliary/rmbg/birefnet.py`
-- `models/pixal3d/auxiliary/rmbg/model.safetensors`
-- `models/pixal3d/auxiliary/moge/model.pt`
-- `models/pixal3d/auxiliary/naf/naf_release.pth`
+## Outputs and troubleshooting
 
-Normal setup does not download these weights implicitly. To explicitly seed the local DINO/RMBG/MoGe/NAF auxiliary assets, run `python3 setup.py --bootstrap-auxiliary-assets --workspace-root <extension-dir> --json`; that bootstrap is allowlist-only for the files above. DINO/RMBG/MoGe come from Hugging Face repo files, while NAF is a direct Torch checkpoint URL (`https://github.com/valeoai/NAF/releases/download/model/naf_release.pth`). Default first run may attempt the same controlled bootstrap before preserving the existing remote/HF/Torch-cache fallback. `local`, `offline`, and `strict` modes never start that network bootstrap.
+Base and MV publish only the final GLB. Scene preparation/normalization publish a
+`scene-manifest.json` bundle with essential frames, masks, camera data, object
+boxes, scale, and provenance. WorldSculpt currently publishes **geometry only,
+without textures**: `scene.glb` plus `scene_mesh.glb`, returning `scene.glb` to Modly.
+Its default face budget is 1,000,000 per instance.
 
-The pipeline patcher is local-first for DINO/RMBG: when those sentinels are complete, it writes local resolved paths into the user-local `pipeline.json` and records non-absolute logical metadata. MoGe is local-first at runtime: when `models/pixal3d/auxiliary/moge/model.pt` exists, the extension wraps `inference.load_moge_model` so `MoGeModel.from_pretrained()` receives that local checkpoint file path instead of `Ruicheng/moge-2-vitl`. NAF is local-first at runtime too: when `models/pixal3d/auxiliary/naf/naf_release.pth` exists, the extension wraps `hubconf.naf` before upstream `_load_naf()` can call it, so the checkpoint is loaded from the local path instead of `torch.hub.load_state_dict_from_url`. If auxiliary sentinels are missing in default mode, the existing DINO/RMBG remote IDs, MoGe `Ruicheng/moge-2-vitl` HF-cache/network fallback, and NAF Torch Hub cache/network fallback remain available. In `local`, `offline`, or `strict` auxiliary mode, missing DINO/RMBG/MoGe/NAF files fail early with `missing_auxiliary_assets` before importing upstream inference or `hubconf` code.
+For missing weights, use **Models**; for dependency errors, use **Repair** first.
+For targeted recovery only, run `python3 setup.py --repair-scene-prep --json` or
+`python3 setup.py --repair-worldsculpt --json` from the extension directory.
+If NAF is corrupt or its automatic download fails, use the exact bootstrap repair
+command shown in the error. Do not replace checkpoints or native wheels blindly.
 
-This is **not** a full offline-generation guarantee yet. Local DINO/RMBG/MoGe/NAF auxiliary assets remove the known model/checkpoint downloads when the files are present, but real offline still depends on runtime dependency availability and a no-DNS generation smoke test. NAF checkpoint localization is also separate from strict NAF native kernels: `natten.HAS_LIBNATTEN` must still be validated independently before claiming strict NATTEN/libnatten acceleration.
+## Credits and licenses
 
-## Publication status
+- Modly integration: **DrHepa**. Host: **[Modly by Lightning Pixel](https://github.com/lightningpixel/modly)**.
+- Models/projects: **[TencentARC/Pixal3D](https://github.com/TencentARC/Pixal3D)**,
+  **[AlayaLab/WorldSculpt](https://github.com/AlayaLab/WorldSculpt)**,
+  **[Meta SAM3](https://github.com/facebookresearch/sam3)**, and
+  **[ByteDance Depth Anything 3](https://github.com/ByteDance-Seed/Depth-Anything-3)**.
+- Warm thanks to **[jtydhr88/ComfyUI-WorldSculpt](https://github.com/jtydhr88/ComfyUI-WorldSculpt)**
+  for the **SAM3 + DA3 scene-preparation idea and workflow** that inspired this Modly integration.
 
-- Repository visibility: public.
-- Primary Modly packaged-app lane: Windows `x64` / Python `cp311` / CUDA `12.4`.
-- Setup contract: release-backed wheelhouse with checksum verification and native import probes.
-- Runtime status: Windows `x64` / Python `cp311` / CUDA `12.4` has been validated through a complete Modly Low VRAM 1024 generation, including native NATTEN sampling, GLB extraction, final GLB save, and Modly workspace fetch.
-- Runtime note: use Low VRAM mode on 8GB-class GPUs; generation quality and orientation depend on the input view and upstream Pixal3D export behavior. The extension does not rewrite the final GLB orientation with a fixed yaw transform.
+The wrapper uses [MIT](LICENSE). Upstream code and model weights retain their own
+licenses and restrictions; see [Third-Party Notices](THIRD_PARTY_NOTICES.md).
