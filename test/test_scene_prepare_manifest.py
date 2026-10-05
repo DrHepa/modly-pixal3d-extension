@@ -8,7 +8,7 @@ class ScenePrepareManifestTests(unittest.TestCase):
     def setUpClass(cls):
         cls.manifest = json.loads((Path(__file__).parents[1] / "manifest.json").read_text())
 
-    def test_public_scene_prep_nodes_use_native_image_and_video_contracts(self):
+    def test_public_scene_prep_nodes_match_released_host_transport(self):
         nodes = {node["id"]: node for node in self.manifest["nodes"]}
         self.assertTrue({"generate", "generate-mv", "worldsculpt"}.issubset(nodes))
         self.assertNotIn("scene-from-estimates", nodes)
@@ -32,22 +32,26 @@ class ScenePrepareManifestTests(unittest.TestCase):
             ["Primary view", "View 2", "View 3", "View 4", "View 5", "View 6", "View 7", "View 8"],
         )
         self.assertEqual(images["weight_groups"], ["sam3", "da3-base"])
-        video = nodes["scene-from-video"]
-        self.assertEqual((video["input"], video["output"]), ("video", "scene"))
-        self.assertEqual(video["weight_groups"], ["sam3", "da3-base"])
+        self.assertNotIn("scene-from-video", nodes)
+        self.assertEqual(len(nodes), 5)
         self.assertEqual((nodes["normalize-annotated-scene"]["input"], nodes["normalize-annotated-scene"]["output"]), ("scene", "scene"))
         self.assertNotIn("weight_groups", nodes["normalize-annotated-scene"])
         params = {param["id"]: param for param in images["params_schema"]}
         self.assertNotIn("max_frames", params)
         self.assertNotIn("frame_stride", params)
-        video_params = {param["id"]: param for param in video["params_schema"]}
-        self.assertEqual(
-            params,
-            {key: value for key, value in video_params.items() if key not in {"max_frames", "frame_stride"}},
-        )
+        self.assertEqual(params["minimum_geometry_points"]["default"], 128)
+
+    def test_private_video_runtime_keeps_its_parameter_contract(self):
+        from generator import Pixal3DGenerator, SCENE_VIDEO_NODE
+
+        generator = Pixal3DGenerator()
+        generator.MODEL_NODE_ID = SCENE_VIDEO_NODE
+        video_params = {param["id"]: param for param in generator.params_schema()}
+        images = next(node for node in self.manifest["nodes"] if node["id"] == "scene-from-images")
+        params = {param["id"]: param for param in images["params_schema"]}
+        self.assertEqual(params, {key: value for key, value in video_params.items() if key not in {"max_frames", "frame_stride"}})
         self.assertEqual(video_params["max_frames"]["default"], 16)
         self.assertEqual(video_params["frame_stride"]["default"], 1)
-        self.assertEqual(params["minimum_geometry_points"]["default"], 128)
 
     def test_official_weight_groups_are_immutable_and_exact(self):
         groups = {group["id"]: group for group in self.manifest["weight_groups"]}

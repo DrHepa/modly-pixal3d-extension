@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-This repository's original Modly integration and clean-room scene geometry are
+This repository's Modly integration and scene-preparation geometry are
 licensed under the repository `LICENSE`. Third-party code, model weights, and
 datasets retain their own terms.
 
@@ -44,9 +44,8 @@ datasets retain their own terms.
 - DA3 Base produces relative-scale depth and official camera extrinsics are
   world-to-camera. This extension does not describe those outputs as metric.
 
-## Clean-room boundary
+## Community inspiration
 
-No code or structural adaptation was copied from the unlicensed community
-`jtydhr88/ComfyUI-WorldSculpt` repository, including `nodes_realinput.py`.
-The scene-preparation geometry was independently implemented from documented
-input/output behavior and the official projects listed above.
+Warm thanks to [jtydhr88/ComfyUI-WorldSculpt](https://github.com/jtydhr88/ComfyUI-WorldSculpt)
+for the SAM3 + DA3 scene-preparation idea and workflow that inspired this Modly
+integration. Official upstream code and model licenses remain as listed above.

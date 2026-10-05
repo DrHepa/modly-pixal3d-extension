@@ -18,7 +18,7 @@ function python(source) {
 test('generate owns one shared multi-source group without a legacy or private download plan', () => {
   assert.ok(group)
   assert.deepEqual(manifest.nodes.map((node) => node.id), [
-    'generate', 'generate-mv', 'worldsculpt', 'scene-from-images', 'scene-from-video', 'normalize-annotated-scene',
+    'generate', 'generate-mv', 'worldsculpt', 'scene-from-images', 'normalize-annotated-scene',
   ])
   assert.deepEqual(manifest.nodes[0].weight_groups, ['pixal3d-base'])
   assert.equal(manifest.nodes[0].model_sources, undefined)
@@ -140,6 +140,7 @@ from pixal3d_extension import naf_checkpoint
 naf_checkpoint.NAF_SIZE = 3
 naf_checkpoint.NAF_SHA256 = hashlib.sha256(b'naf').hexdigest()
 from generator import Pixal3DGenerator
+from unittest.mock import patch
 from pixal3d_extension.assets import PRIMARY_ASSET, AUXILIARY_ASSETS
 from pixal3d_extension.paths import resolve_modly_layout, resolve_storage_path
 with tempfile.TemporaryDirectory() as tmp:
@@ -171,10 +172,11 @@ with tempfile.TemporaryDirectory() as tmp:
     gen = Pixal3DGenerator(private, output, pipeline_factory=factory)
     gen.MODEL_NODE_ID = 'generate'
     gen.shared_model_dirs = {'pixal3d-base': shared}
-    gen.load()
+    with patch("pixal3d_extension.assets._default_auxiliary_downloader", side_effect=downloader):
+        gen.load()
     image = output / 'input.png'
     image.write_bytes(b'png')
-    result = gen.generate({'input_image': str(image), 'output_dir': str(output), 'workspace_root': str(home), 'readiness': {'generation_allowed': True}, 'auxiliary_bootstrap_downloader': downloader})
+    result = gen.generate({'input_image': str(image), 'output_dir': str(output), 'workspace_root': str(home), 'readiness': {'generation_allowed': True}, 'auxiliary_bootstrap_downloader': lambda **kwargs: (_ for _ in ()).throw(AssertionError('unsafe caller hook'))})
     pipeline = json.loads((shared / 'pipeline.json').read_text())
     print(json.dumps({'output': result.name, 'calls': calls, 'dino': pipeline['args']['image_cond_model']['args']['model_name'], 'naf_exists': (home / 'models/pixal3d/auxiliary/naf/naf_release.pth').is_file()}))
 `)
@@ -216,6 +218,7 @@ with tempfile.TemporaryDirectory() as tmp:
     gen = Pixal3DGenerator(private, output)
     gen.MODEL_NODE_ID = 'generate'
     gen.shared_model_dirs = {'pixal3d-base': shared}
+    gen._prepare_generation_assets = lambda *args: None
     gen.load()
     after_load = str(resolve_storage_path(layout, logical))
     gen.generate({'input_image': str(output / 'input.png'), 'output_dir': str(output)})

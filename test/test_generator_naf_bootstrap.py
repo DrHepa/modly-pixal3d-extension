@@ -2,6 +2,7 @@ import tempfile
 import threading
 import unittest
 import io
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -9,7 +10,7 @@ from unittest.mock import patch
 from PIL import Image
 
 import generator as generator_module
-from generator import Pixal3DGenerator
+from generator import Pixal3DGenerator, GenerationCancelled
 
 
 class GeneratorNafBootstrapTests(unittest.TestCase):
@@ -59,6 +60,85 @@ class GeneratorNafBootstrapTests(unittest.TestCase):
         self.naf_path.parent.mkdir(parents=True, exist_ok=True)
         self.naf_path.write_bytes(b"valid-naf")
         return {"status": "ready", "code": "auxiliary_assets_bootstrapped"}
+
+    def _complete_base(self):
+        from pixal3d_extension.assets import AUXILIARY_ASSETS, PRIMARY_ASSET
+
+        for asset in [PRIMARY_ASSET, *(value for key, value in AUXILIARY_ASSETS.items() if key != "naf")]:
+            for relative in asset.sentinel_paths:
+                path = self.base / Path(relative).relative_to(PRIMARY_ASSET.local_root)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"model")
+        (self.base / "pipeline.json").write_text(json.dumps({"args": {
+            "image_cond_model": {"args": {"model_name": "facebook/dinov3-vitl16-pretrain-lvd1689m"}},
+            "rembg_model": {"args": {"model_name": "briaai/RMBG-2.0"}},
+        }}))
+
+    def test_base_load_bootstraps_only_naf_then_patches_local_sources(self):
+        self._complete_base()
+        generator = self._generator("generate")
+        with patch.object(generator, "_single_view_compatibility_error", return_value=None), \
+             patch.object(generator_module, "bootstrap_auxiliary_assets", side_effect=self._successful_bootstrap) as bootstrap, \
+             patch.object(generator_module, "verify_naf_checkpoint"):
+            self.assertIs(generator.load(), generator)
+        bootstrap.assert_called_once_with(self.root)
+        self.assertTrue(generator.is_loaded())
+        data = json.loads((self.base / "pipeline.json").read_text())
+        self.assertEqual(data["args"]["image_cond_model"]["args"]["model_name"], str(self.base / "auxiliary/dinov3"))
+        generator.unload()
+        self.assertFalse(generator.is_loaded())
+
+    def test_base_direct_generate_bootstraps_pinned_naf_but_strips_caller_hooks(self):
+        self._complete_base()
+        generator = self._generator("generate")
+        output = self.workspace / "result.glb"
+        unsafe = lambda **kwargs: self.fail("caller downloader must not be invoked")
+        with patch.object(generator, "_single_view_compatibility_error", return_value=None), \
+             patch.object(generator_module, "bootstrap_auxiliary_assets", side_effect=self._successful_bootstrap) as bootstrap, \
+             patch.object(generator_module, "verify_naf_checkpoint"), \
+             patch("pixal3d_extension.runtime.run_job", return_value={"status": "completed", "output": {"glb_path": str(output)}}) as run:
+            self.assertEqual(generator.generate(b"png", {"auxiliary_bootstrap_downloader": unsafe,
+                                                       "network_available": True, "auxiliary_mode": "remote"}), output)
+        bootstrap.assert_called_once_with(self.root)
+        job = run.call_args.args[0]
+        self.assertEqual(job["model_source"], str(self.base))
+        self.assertEqual(job["auxiliary_mode"], "local")
+        self.assertFalse(job["network_available"])
+        self.assertNotIn("auxiliary_bootstrap_downloader", job["params"])
+        self.assertNotIn("network_available", job["params"])
+        self.assertNotIn("auxiliary_mode", job["params"])
+
+    def test_base_invalid_pipeline_does_not_bootstrap(self):
+        self._complete_base()
+        for contents in ("not-json", "[]", '{"args": []}'):
+            with self.subTest(contents=contents):
+                (self.base / "pipeline.json").write_text(contents)
+                generator = self._generator("generate")
+                with patch.object(generator, "_single_view_compatibility_error", return_value=None), \
+                     patch.object(generator_module, "bootstrap_auxiliary_assets") as bootstrap, \
+                     self.assertRaisesRegex(RuntimeError, "missing_assets"):
+                    generator.load()
+                bootstrap.assert_not_called()
+                self.assertFalse(self.naf_path.exists())
+
+    def test_base_valid_naf_never_downloads_and_corrupt_naf_is_not_replaced(self):
+        self._complete_base()
+        self.naf_path.parent.mkdir(parents=True)
+        self.naf_path.write_bytes(b"valid-naf")
+        generator = self._generator("generate")
+        with patch.object(generator, "_single_view_compatibility_error", return_value=None), \
+             patch.object(generator_module, "bootstrap_auxiliary_assets") as bootstrap, \
+             patch.object(generator_module, "verify_naf_checkpoint"):
+            generator.load()
+        bootstrap.assert_not_called()
+        self.naf_path.write_bytes(b"corrupt")
+        with patch.object(generator, "_single_view_compatibility_error", return_value=None), \
+             patch.object(generator_module, "bootstrap_auxiliary_assets") as bootstrap, \
+             patch.object(generator_module, "verify_naf_checkpoint", side_effect=RuntimeError("SHA256 mismatch")), \
+             self.assertRaisesRegex(RuntimeError, "naf_bootstrap_failed"):
+            generator.load()
+        bootstrap.assert_not_called()
+        self.assertEqual(self.naf_path.read_bytes(), b"corrupt")
 
     def test_mv_and_worldsculpt_load_bootstrap_missing_naf_before_readiness(self):
         for node_id in ("generate-mv", "worldsculpt"):
@@ -170,6 +250,7 @@ class GeneratorNafBootstrapTests(unittest.TestCase):
 
     def test_load_does_not_bootstrap_when_non_naf_shared_assets_are_missing(self):
         for node_id, error in (
+            ("generate", "missing_assets"),
             ("generate-mv", "mv_assets_missing"),
             ("worldsculpt", "worldsculpt_assets_missing"),
         ):
@@ -241,6 +322,7 @@ class GeneratorNafBootstrapTests(unittest.TestCase):
         scene_manifest = self.workspace / "scene-manifest.json"
         scene_manifest.write_text("{}")
         for node_id, input_value, params, runner_name in (
+            ("generate", b"png", {}, "pixal3d_extension.runtime.run_job"),
             ("generate-mv", primary, mv_params, "pixal3d_extension.multiview_images.run_multiview_from_images"),
             ("worldsculpt", None, {"scene_manifest_path": str(scene_manifest)}, "pixal3d_extension.worldsculpt.run_worldsculpt"),
         ):
@@ -249,7 +331,7 @@ class GeneratorNafBootstrapTests(unittest.TestCase):
                 with patch.object(generator, "_preflight_non_naf_shared_assets") as preflight, \
                      patch.object(generator_module, "bootstrap_auxiliary_assets") as bootstrap, \
                      patch(runner_name) as runner, \
-                     self.assertRaisesRegex(RuntimeError, "cancelled"):
+                     self.assertRaises(GenerationCancelled):
                     generator.generate(input_value, params, cancel_evt=cancelled)
                 preflight.assert_not_called()
                 bootstrap.assert_not_called()
@@ -302,6 +384,7 @@ class GeneratorNafBootstrapTests(unittest.TestCase):
         scene_manifest = self.workspace / "scene-manifest.json"
         scene_manifest.write_text("{}")
         for node_id, input_value, params, runner_name in (
+            ("generate", b"png", {}, "pixal3d_extension.runtime.run_job"),
             ("generate-mv", primary, mv_params, "pixal3d_extension.multiview_images.run_multiview_from_images"),
             ("worldsculpt", None, {"scene_manifest_path": str(scene_manifest)}, "pixal3d_extension.worldsculpt.run_worldsculpt"),
         ):
@@ -321,7 +404,7 @@ class GeneratorNafBootstrapTests(unittest.TestCase):
                      patch.object(generator_module, "bootstrap_auxiliary_assets", side_effect=bootstrap_then_cancel) as bootstrap, \
                      patch.object(generator_module, "verify_naf_checkpoint"), \
                      patch(runner_name) as runner, \
-                     self.assertRaisesRegex(RuntimeError, "cancelled"):
+                     self.assertRaises(GenerationCancelled):
                     generator.generate(input_value, params, cancel_evt=cancelled)
                 bootstrap.assert_called_once_with(self.root)
                 runner.assert_not_called()

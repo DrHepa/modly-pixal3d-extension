@@ -113,12 +113,13 @@ test('MV texture size is propagated explicitly into the tracked GLB exporter', (
 
 test('MV docs distinguish UI-managed model weights from intentional first-use NAF bootstrap', () => {
   const docs = readFileSync(join(root, 'README.md'), 'utf8')
-  assert.match(docs, /DA3\s+and Pixal3D MV model\s+weights are UI-managed and local-only/i)
-  assert.match(docs, /NAF is the one\s+intentional auxiliary[\s\S]*?bootstrap atomically on first generation/i)
-  assert.match(docs, /manual bootstrap[\s\S]*?fallback/i)
-  assert.match(docs, /null gaps are ignored[\s\S]*?connected views retain port order/i)
-  assert.match(docs, /input_contract[\s\S]*?secondary ports are optional/i)
-  assert.doesNotMatch(docs, /No model weights are downloaded by this path/)
+  assert.match(docs, /Hugging Face weights are UI-managed and local-only/i)
+  assert.match(docs, /NAF checkpoint[\s\S]*?automatically downloads[\s\S]*?first base\/MV\/WorldSculpt use/i)
+  assert.match(docs, /consecutive connected image slots/i)
+  assert.match(docs, /secondary images must be workspace-owned files/i)
+  assert.match(docs, /empty slots are compacted[\s\S]*?do not rely on gaps/i)
+  assert.match(docs, /Every MV camera mode currently requires DA3 weights and runtime/i)
+  assert.doesNotMatch(docs, /null gaps are ignored|secondary byte uploads/i)
 })
 
 test('Windows MV custody workflow is SHA-pinned and exercises the real Windows filesystem contract', () => {

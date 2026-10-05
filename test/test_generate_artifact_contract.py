@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -39,7 +40,7 @@ class GenerateArtifactContractTests(unittest.TestCase):
     def test_upstream_video_artifact_dispatches_to_scene_video_with_canonical_envelope(self):
         generator = self._generator(SCENE_VIDEO_NODE)
         progress = object()
-        cancel = object()
+        cancel = threading.Event()
         expected = self.output / "video.scene"
 
         with patch("pixal3d_extension.scene_prepare.run_scene_from_video", return_value=expected) as run:

@@ -1,9 +1,43 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Callable
+
+
+_EXTENSION_ROOT = Path(__file__).resolve().parent
+if str(_EXTENSION_ROOT) not in sys.path:
+    sys.path.insert(0, str(_EXTENSION_ROOT))
+
+try:
+    from services.generators.base import BaseGenerator, GenerationCancelled
+except ModuleNotFoundError as exc:
+    if exc.name not in {"services", "services.generators", "services.generators.base"}:
+        raise
+
+    class GenerationCancelled(Exception):
+        """Standalone equivalent used only when Modly's generator API is absent."""
+
+    class BaseGenerator:
+        """Minimal standalone lifecycle contract for extension-local tooling."""
+
+        def __init__(self, model_dir: Path | None, outputs_dir: Path | None) -> None:
+            self.model_dir = model_dir
+            self.outputs_dir = outputs_dir
+            self._model: Any | None = None
+
+        def is_loaded(self) -> bool:
+            return self._model is not None
+
+        def unload(self) -> None:
+            self._model = None
+
+        def _check_cancelled(self, cancel_event: Any | None) -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise GenerationCancelled()
+
 
 from pixal3d_extension.assets import bootstrap_auxiliary_assets
 from pixal3d_extension.naf_checkpoint import verify_naf_checkpoint
@@ -26,23 +60,59 @@ SCENE_NORMALIZE_NODE = "normalize-annotated-scene"
 SCENE_PREP_NODES = {SCENE_ESTIMATE_NODE, SCENE_IMAGES_NODE, SCENE_VIDEO_NODE}
 
 
-def _patch_pipeline_json(model_dir: Path | None) -> None:
-    if model_dir is None:
-        return
-    pipeline_path = model_dir / "pipeline.json"
-    if not pipeline_path.is_file():
-        return
-    text = pipeline_path.read_text(encoding="utf-8")
-    patched = text.replace(_DINO_SOURCE, _DINO_REPLACEMENT).replace(_RMBG_SOURCE, _RMBG_REPLACEMENT)
-    if patched == text:
-        return
-    backup_path = model_dir / "pipeline.json.modly-original"
-    if not backup_path.exists():
-        backup_path.write_text(text, encoding="utf-8")
-    pipeline_path.write_text(patched, encoding="utf-8")
+_LOADED_STATE = object()
+_UI_MANAGED_ASSETS_MESSAGE = (
+    "Pixal3D Hugging Face runtime downloads are disabled. Open Modly Models to download "
+    "the Pixal3D weights, and use Repair on the Pixal3D extension if its "
+    "setup or auxiliary assets are incomplete."
+)
+_UI_MANAGED_ASSET_FAILURE_CODES = {
+    "missing_assets",
+    "missing_auxiliary_assets",
+    "missing_primary_assets",
+    "weights_missing_or_unvalidated",
+}
 
 
-class Pixal3DGenerator:
+def _prepare_ui_managed_job(job: dict, *, model_dir: Path | None = None) -> dict:
+    prepared = dict(job)
+    params = dict(prepared.get("params") or {})
+    for key in ("auxiliary_bootstrap_downloader", "auxiliary_mode", "network_available", "offline"):
+        prepared.pop(key, None)
+        params.pop(key, None)
+
+    model_source = model_dir or prepared.get("model_source")
+    if model_source is None:
+        raise RuntimeError(_UI_MANAGED_ASSETS_MESSAGE)
+    local_model_dir = Path(model_source).expanduser().resolve()
+
+    prepared["model_source"] = str(local_model_dir)
+    prepared["params"] = params
+    prepared["auxiliary_mode"] = "local"
+    prepared["network_available"] = False
+
+    if not (local_model_dir / "pipeline.json").is_file():
+        prepared["readiness"] = {
+            "generation_allowed": False,
+            "code": "weights_missing_or_unvalidated",
+            "message": _UI_MANAGED_ASSETS_MESSAGE,
+        }
+    elif not isinstance(prepared.get("readiness"), dict):
+        prepared["readiness"] = {"generation_allowed": True, "code": "ready"}
+    return prepared
+
+
+def _with_ui_managed_asset_guidance(result: dict) -> dict:
+    if result.get("code") not in _UI_MANAGED_ASSET_FAILURE_CODES:
+        return result
+    detail = result.get("message")
+    message = _UI_MANAGED_ASSETS_MESSAGE
+    if detail:
+        message = f"{message} Runtime preflight: {detail}"
+    return {**result, "message": message}
+
+
+class Pixal3DGenerator(BaseGenerator):
     """Root Modly model generator contract for Pixal3D.
 
     The class is intentionally defined in root ``generator.py`` because local
@@ -57,10 +127,11 @@ class Pixal3DGenerator:
         *,
         pipeline_factory: Callable[[str], Any] | None = None,
     ) -> None:
-        self.model_dir = Path(model_dir) if model_dir is not None else None
-        self.workspace_dir = Path(workspace_dir) if workspace_dir is not None else None
+        resolved_model_dir = Path(model_dir) if model_dir is not None else None
+        resolved_outputs_dir = Path(workspace_dir) if workspace_dir is not None else None
+        super().__init__(resolved_model_dir, resolved_outputs_dir)
+        self.workspace_dir = resolved_outputs_dir
         self.pipeline_factory = pipeline_factory
-        self._loaded = False
         if self.workspace_dir is not None:
             # Configure process-global Hugging Face code-cache authority before
             # any single-view or MV path can import Transformers constants.
@@ -81,7 +152,7 @@ class Pixal3DGenerator:
         group = SHARED_MV_GROUP if node_id == "generate-mv" else SHARED_BASE_GROUP
         if isinstance(shared_dirs, dict) and group in shared_dirs:
             return Path(shared_dirs[group])
-        # The extension's multi-source manifest requires PR #348. Do not
+        # The extension's multi-source manifest requires Modly 0.4.3. Do not
         # silently use stale private weights when the host has no shared root.
         if node_id in {"generate", "generate-mv"}:
             raise RuntimeError(f"Modly shared weight groups are required ({group}); update Modly before using this extension")
@@ -124,6 +195,35 @@ class Pixal3DGenerator:
         """Validate every host-managed shared asset before any NAF download."""
 
         node_id = self._effective_node_id()
+        if node_id in {None, "generate"}:
+            from pixal3d_extension.assets import AUXILIARY_ASSETS, PRIMARY_ASSET
+
+            try:
+                base = self._model_source()
+                if base is None:
+                    raise RuntimeError("the local Pixal3D base group is missing")
+                required = [*PRIMARY_ASSET.sentinels]
+                for key, asset in AUXILIARY_ASSETS.items():
+                    if key != "naf":
+                        required.extend(
+                            str(Path(asset.local_root).relative_to(PRIMARY_ASSET.local_root) / filename)
+                            for filename in asset.sentinels
+                        )
+                missing = [relative for relative in required if not (base / relative).is_file()]
+                if missing:
+                    raise RuntimeError(f"missing local files: {', '.join(missing)}")
+                pipeline = json.loads((base / "pipeline.json").read_text(encoding="utf-8"))
+                if not isinstance(pipeline, dict):
+                    raise ValueError("pipeline.json must contain a JSON object")
+                for key in ("image_cond_model", "rembg_model"):
+                    reference = pipeline
+                    for part in ("args", key, "args", "model_name"):
+                        reference = reference.get(part) if isinstance(reference, dict) else None
+                    if not isinstance(reference, str):
+                        raise ValueError(f"pipeline.json is missing the {key} model reference")
+            except (OSError, UnicodeError, ValueError, RuntimeError) as exc:
+                raise RuntimeError(f"missing_assets: {_UI_MANAGED_ASSETS_MESSAGE} {exc}") from exc
+            return
         if node_id == "generate-mv":
             from pixal3d_extension.multiview import validate_mv_pipeline_config
             from pixal3d_extension.scene_prepare import validate_da3_weights
@@ -153,9 +253,7 @@ class Pixal3DGenerator:
                 ) from exc
 
     def _raise_if_generation_cancelled(self, cancel_evt: Any | None) -> None:
-        if cancel_evt is not None and cancel_evt.is_set():
-            label = "WorldSculpt" if self._effective_node_id() == "worldsculpt" else "Pixal3D MV generation"
-            raise RuntimeError(f"{label} cancelled")
+        self._check_cancelled(cancel_evt)
 
     def _prepare_generation_assets(self, cancel_evt: Any | None = None) -> Path:
         """Preflight shared assets, then bootstrap only the remaining NAF deficiency."""
@@ -218,8 +316,15 @@ class Pixal3DGenerator:
         if self._effective_node_id() in {*SCENE_PREP_NODES, SCENE_NORMALIZE_NODE, "generate-mv"}:
             manifest = json.loads((Path(__file__).resolve().parent / "manifest.json").read_text(encoding="utf-8"))
             node_id = self._effective_node_id()
-            if node_id == SCENE_ESTIMATE_NODE:
-                node_id = SCENE_VIDEO_NODE
+            if node_id in {SCENE_ESTIMATE_NODE, SCENE_VIDEO_NODE}:
+                # Keep the implemented video lane private until Modly releases
+                # typed video model-input transport.
+                schema = next(node["params_schema"] for node in manifest["nodes"] if node["id"] == SCENE_IMAGES_NODE)
+                return [*schema,
+                        {"id": "max_frames", "label": "Maximum Frames", "type": "int", "default": 16,
+                         "min": 2, "max": 64, "tooltip": "Maximum ordered frames sent to SAM3 and DA3 Base."},
+                        {"id": "frame_stride", "label": "Frame Stride", "type": "int", "default": 1,
+                         "min": 1, "max": 120, "tooltip": "Deterministically keep every Nth frame before applying Maximum Frames."}]
             return next(node["params_schema"] for node in manifest["nodes"] if node["id"] == node_id)
         if self._effective_node_id() == "worldsculpt":
             return [{"id": "face_budget", "label": "Faces per Instance", "type": "int",
@@ -379,19 +484,22 @@ class Pixal3DGenerator:
             return all((Path(model_dir) / relative).is_file() for relative in MV_WEIGHT_FILES)
         return (Path(model_dir) / "pipeline.json").is_file()
 
+    def _auto_download(self) -> None:
+        raise RuntimeError(_UI_MANAGED_ASSETS_MESSAGE)
+
     def load(self) -> "Pixal3DGenerator":
         if self._effective_node_id() in {*SCENE_PREP_NODES, SCENE_NORMALIZE_NODE}:
             readiness = self.readiness_status()
             if not readiness["ok"]:
                 raise RuntimeError(f"{readiness['machine_code']}: {readiness['reason']}")
-            self._loaded = True
+            self._model = _LOADED_STATE
             return self
         if self._effective_node_id() == "worldsculpt":
             self._prepare_generation_assets()
             readiness = self.readiness_status()
             if not readiness["ok"]:
                 raise RuntimeError(f"{readiness['machine_code']}: {readiness['reason']}")
-            self._loaded = True
+            self._model = _LOADED_STATE
             return self
         model_source = self._model_source()
         if self._effective_node_id() == "generate-mv":
@@ -399,29 +507,25 @@ class Pixal3DGenerator:
             readiness = self.readiness_status()
             if not readiness["ok"]:
                 raise RuntimeError(f"{readiness['machine_code']}: {readiness['reason']}")
-            self._loaded = True
+            self._model = _LOADED_STATE
             return self
         compatibility_error = self._single_view_compatibility_error()
         if compatibility_error is not None:
             raise RuntimeError(f"{compatibility_error['code']}: {compatibility_error['message']}")
+        self._prepare_generation_assets()
         with shared_base_root(model_source if getattr(self, "shared_model_dirs", None) else None):
             modly_home = derive_modly_home(model_dir=self.model_dir, workspace_dir=self.workspace_dir)
             if modly_home is not None or self.workspace_dir is not None:
                 from pixal3d_extension.pipeline_patch import patch_pipeline
 
-                patch_result = patch_pipeline(modly_home or self.workspace_dir, auxiliary_mode="default", network_available=True)
+                patch_result = patch_pipeline(modly_home or self.workspace_dir, auxiliary_mode="local", network_available=False)
                 if isinstance(patch_result, dict) and patch_result.get("status") != "patched":
                     raise RuntimeError(patch_result.get("message") or patch_result.get("code", "Pixal3D model assets are missing"))
-            else:
-                _patch_pipeline_json(model_source)
-        self._loaded = True
+        self._model = _LOADED_STATE
         return self
 
     def unload(self) -> None:
-        self._loaded = False
-
-    def is_loaded(self) -> bool:
-        return self._loaded
+        super().unload()
 
     def _artifact_transport_path(self, kind: str, path: Any) -> Path:
         if not isinstance(path, (str, Path)):
@@ -499,7 +603,22 @@ class Pixal3DGenerator:
             )
         raise ValueError(f"Unsupported artifact kind for Pixal3D: {kind}")
 
-    def generate(self, image_or_job: Any, params: dict | None = None, progress_cb: Any | None = None, cancel_evt: Any | None = None) -> Path:
+    def generate(
+        self,
+        image_bytes: Any,
+        params: dict | None = None,
+        progress_cb: Any | None = None,
+        cancel_event: Any | None = None,
+        *,
+        cancel_evt: Any | None = None,
+    ) -> Path:
+        if cancel_event is not None and cancel_evt is not None:
+            raise TypeError("Pass either cancel_event or cancel_evt, not both")
+        cancel_event = cancel_event if cancel_event is not None else cancel_evt
+        self._check_cancelled(cancel_event)
+
+        image_or_job = image_bytes
+        cancel_evt = cancel_event
         if self._effective_node_id() == SCENE_IMAGES_NODE:
             from pixal3d_extension.scene_prepare import run_scene_from_images
 
@@ -630,7 +749,9 @@ class Pixal3DGenerator:
             raise RuntimeError(f"{compatibility_error['code']}: {compatibility_error['message']}")
         from pixal3d_extension.runtime import run_job
 
+        self._prepare_generation_assets(cancel_event)
         model_source = self._model_source()
+        input_path: Path | None = None
 
         if isinstance(image_or_job, dict):
             job = dict(image_or_job)
@@ -657,22 +778,28 @@ class Pixal3DGenerator:
             job = {
                 "input_image": str(input_path),
                 "output_dir": str(output_dir),
-                "model_source": str(model_source or PIXAL3D_SOURCE),
+                "model_source": str(model_source) if model_source is not None else None,
                 "params": params or {},
                 "readiness": {"generation_allowed": self.is_downloaded(), "code": "ready" if self.is_downloaded() else "weights_missing_or_unvalidated"},
             }
-            modly_home = derive_modly_home(model_dir=self.model_dir, workspace_dir=self.workspace_dir or output_dir)
+
+        try:
+            job = _prepare_ui_managed_job(job, model_dir=model_source)
+            modly_home = derive_modly_home(
+                model_dir=job.get("model_source"),
+                workspace_dir=job.get("workspace_root") or job.get("output_dir") or self.workspace_dir,
+            )
             if modly_home is not None:
                 job["workspace_root"] = str(modly_home)
 
-        try:
             with shared_base_root(model_source if getattr(self, "shared_model_dirs", None) else None):
-                result = run_job(job, pipeline_factory=self.pipeline_factory, cancel_event=cancel_evt)
+                result = run_job(job, pipeline_factory=self.pipeline_factory, cancel_event=cancel_event)
+            result = _with_ui_managed_asset_guidance(result)
             if result.get("status") != "completed":
                 raise RuntimeError(json.dumps(result, sort_keys=True))
             return Path(result["output"]["glb_path"])
         finally:
-            if not isinstance(image_or_job, dict):
+            if input_path is not None:
                 try:
                     input_path.unlink(missing_ok=True)
                 except Exception:
@@ -684,7 +811,8 @@ def generate(job: dict, *, pipeline_factory: Callable[[str], Any] | None = None)
 
     from pixal3d_extension.runtime import run_job
 
-    return run_job(job, pipeline_factory=pipeline_factory)
+    prepared = _prepare_ui_managed_job(job)
+    return _with_ui_managed_asset_guidance(run_job(prepared, pipeline_factory=pipeline_factory))
 
 
 def main() -> None:

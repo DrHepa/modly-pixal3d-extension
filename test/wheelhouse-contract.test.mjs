@@ -305,7 +305,8 @@ with tempfile.TemporaryDirectory() as tmp:
     output_dir = root / 'workspace' / 'Workflows'
     output_dir.mkdir(parents=True)
     captured = {}
-    cancel = object()
+    import threading
+    cancel = threading.Event()
 
     def fake_run_job(job, *, pipeline_factory=None, cancel_event=None):
         del pipeline_factory
@@ -319,7 +320,9 @@ with tempfile.TemporaryDirectory() as tmp:
     original_run_job = runtime.run_job
     runtime.run_job = fake_run_job
     try:
-        returned = Pixal3DGenerator(model_dir=model_dir, workspace_dir=output_dir).generate(
+        generator = Pixal3DGenerator(model_dir=model_dir, workspace_dir=output_dir)
+        generator._prepare_generation_assets = lambda *args: None
+        returned = generator.generate(
             b'png-bytes', params={'seed': 7}, cancel_evt=cancel
         )
     finally:
@@ -372,7 +375,9 @@ with tempfile.TemporaryDirectory() as tmp:
     original_patch_pipeline = pipeline_patch.patch_pipeline
     pipeline_patch.patch_pipeline = fake_patch_pipeline
     try:
-        Pixal3DGenerator(model_dir=model_dir, workspace_dir=workspace_dir).load()
+        generator = Pixal3DGenerator(model_dir=model_dir, workspace_dir=workspace_dir)
+        generator._prepare_generation_assets = lambda *args: None
+        generator.load()
     finally:
         pipeline_patch.patch_pipeline = original_patch_pipeline
 
@@ -386,11 +391,11 @@ with tempfile.TemporaryDirectory() as tmp:
 `)
 
   assert.deepEqual(result, {
-    auxiliary_mode: 'default',
+    auxiliary_mode: 'local',
     call_count: 1,
     called_with_root: true,
     called_with_workspace_dir: false,
-    network_available: true,
+    network_available: false,
   })
 })
 
@@ -1587,16 +1592,11 @@ test('single-view NAF loading uses a scoped extractor override, not global hubco
 
 test('DINO/RMBG/MoGe/NAF are local-first while full offline and NATTEN strict kernels remain separate', () => {
   const readme = readFileSync(join(repoRoot, 'README.md'), 'utf8')
-  assert.match(readme, /not\*\* a cross-platform offline-generation guarantee/i)
   assert.match(readme, /Ruicheng\/moge-2-vitl/)
-  assert.match(readme, /models\/pixal3d\/_shared\/pixal3d-base\/auxiliary\/moge\/model\.pt/)
-  assert.match(readme, /models\/pixal3d\/auxiliary\/naf\/naf_release\.pth/)
-  assert.match(readme, /MoGeModel\.from_pretrained\(\)/)
-  assert.match(readme, /without calling upstream `torch\.hub\.load`/)
-  assert.match(readme, /scoped per-extractor override verifies its exact size and SHA-256/)
-  assert.match(readme, /naf_release\.pth/)
-  assert.match(readme, /no-network test, installed Modly UI, and other platform lanes remain untested/i)
-  assert.match(readme, /NATTEN\/libnatten.*separate|separate from strict NAF native kernels/i)
+  assert.match(readme, /pinned \*\*NAF checkpoint[\s\S]*?separate GitHub asset/i)
+  assert.match(readme, /Full offline operation is not promised until all assets/i)
+  assert.match(readme, /native-kernel availability is a separate[\s\S]*?requirement/i)
+  assert.match(readme, /Other feature\/platform paths remain \*\*UNTESTED/i)
 
   const result = runPython(`
 import json
@@ -4595,14 +4595,10 @@ test('wheelhouse docs separate end-user release assets from maintainer build and
   const wheelhouseReadmePath = join(repoRoot, 'tools', 'wheelhouse', 'README.md')
 
   assert.match(readme, /release-backed wheelhouse/i)
-  assert.match(readme, /vendored `wheels\/` fallback/i)
-  assert.match(readme, /--no-index --find-links|--no-index --no-deps --find-links/)
-  assert.match(readme, /Linux `x64` \/ Python `cp312` \/ `cuda124`/)
-  assert.match(readme, /Windows `x64` \/ Python `cp312` \/ `cuda124`/)
-  assert.match(readme, /Windows `x64` \/ Python `cp311` \/ `cuda124`/)
-  assert.match(readme, /o-voxel-vb-ap/)
-  assert.doesNotMatch(readme, /- `natten==0\.21\.0`/)
-  assert.match(readme, /natten\.HAS_LIBNATTEN/)
+  assert.match(readme, /Provisioning lanes are Linux ARM64\/x64 Python 3\.12 and Windows x64 Python 3\.11\/3\.12/)
+  assert.match(readme, /CUDA 12\.4 wheels; available lanes are not blanket hardware qualification/)
+  assert.match(readme, /Prior core evidence:[\s\S]*?Windows x64, CPython 3\.11, CUDA 12\.4/)
+  assert.match(readme, /maintainer packaging details|Maintainer packaging details/)
   assert.equal(existsSync(wheelhouseReadmePath), true)
 
   const wheelhouseReadme = readFileSync(wheelhouseReadmePath, 'utf8')
