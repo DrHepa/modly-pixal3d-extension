@@ -480,12 +480,26 @@ def detect_runtime_lane(
 
     evidence = {"os": os_name, "arch": arch, "python_tag": python_tag, "accelerator_lane": "cuda124"}
     if cuda_value is None:
+        if os_name == "windows" and ("cuda_version" in payload or "gpu_sm" in payload):
+            raise WheelhouseError("invalid_runtime_evidence", "Explicit Windows GPU metadata must not be null")
         return evidence
 
     cuda_version, accelerator_lane = _normalize_cuda_version(cuda_value)
     gpu_sm = _normalize_gpu_sm(gpu_sm_value)
     if accelerator_lane == "cuda128" and gpu_sm == "120":
         accelerator_lane = "cuda128-blackwell"
+    elif os_name == "windows" and arch == "x64" and python_tag in {"cp311", "cp312"}:
+        if int(gpu_sm) >= 100:
+            raise WheelhouseError(
+                "unsupported_lane",
+                "The published Windows CUDA 12.4 ABI is not a Blackwell runtime lane",
+                observation={"runtime_evidence": {**evidence, "accelerator_lane": accelerator_lane,
+                                                   "cuda_version": cuda_version, "gpu_sm": gpu_sm}},
+            )
+        # Modly reports driver capability, not the native wheel ABI. A newer
+        # driver can use the published cu124 stack; kernel support is separate.
+        if tuple(int(part) for part in cuda_version.split(".")) >= (12, 4):
+            accelerator_lane = "cuda124"
     return {
         **evidence,
         "accelerator_lane": accelerator_lane,

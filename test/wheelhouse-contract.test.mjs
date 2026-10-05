@@ -2891,7 +2891,7 @@ print(json.dumps([
 
   assert.deepEqual(result.map(({ cuda_version, gpu_sm, accelerator_lane }) => ({ cuda_version, gpu_sm, accelerator_lane })), [
     { cuda_version: '12.8', gpu_sm: '120', accelerator_lane: 'cuda128-blackwell' },
-    { cuda_version: '12.6', gpu_sm: '89', accelerator_lane: 'cuda126' },
+    { cuda_version: '12.6', gpu_sm: '89', accelerator_lane: 'cuda124' },
     { cuda_version: '12.4', gpu_sm: '89', accelerator_lane: 'cuda124' },
     { cuda_version: '12.8', gpu_sm: '120', accelerator_lane: 'cuda128-blackwell' },
     { cuda_version: '12.8', gpu_sm: '120', accelerator_lane: 'cuda128-blackwell' },
@@ -4016,7 +4016,7 @@ with tempfile.TemporaryDirectory() as tmp:
     calls = []
     def fake_run(command, *, cwd):
         calls.append(command)
-        return {'args': command, 'returncode': 0, 'stdout_tail': '{"HAS_LIBNATTEN": false, "importable": true, "ok": true, "torch_cuda_available": true, "torch_cuda_version": "13.0", "transformers_version": "4.57.3"}\\n' if command[1] == '-c' else '', 'stderr_tail': '', 'ok': True}
+        return {'args': command, 'returncode': 0, 'stdout_tail': '{"HAS_LIBNATTEN": false, "importable": true, "ok": true, "torch_cuda_available": true, "torch_version": "2.6.0+cu124", "torchvision_version": "0.21.0+cu124", "torch_cuda_version": "12.4", "transformers_version": "4.57.3"}\\n' if command[1] == '-c' else '', 'stderr_tail': '', 'ok': True}
     setup._run_setup_command = fake_run
     result = setup._install_prepare_dependencies(root, wheelhouse_path=wheelhouse)
     print(json.dumps({'status': result['status'], 'packages': result['local_wheel_packages'], 'metadata_command': calls[3], 'install_command': calls[4]}, sort_keys=True))
