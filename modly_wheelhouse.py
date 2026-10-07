@@ -87,6 +87,10 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         _require(_is_safe_relative_path(str(asset.get("filename", ""))), "unsafe_asset_path", "Asset filename must be a safe relative path")
         _require(isinstance(asset.get("size_bytes"), int) and asset["size_bytes"] > 0, "invalid_asset_size", "Asset size must be positive")
         _validate_hash(asset.get("sha256"))
+        asset_release = asset.get("release")
+        if asset_release:
+            _require(bool(HEX_COMMIT.fullmatch(str(asset_release.get("immutable_commit", "")))), "missing_immutable_commit", "Asset release commit must be pinned")
+            _require(bool(asset_release.get("tag")) and asset_release["tag"] != "latest", "mutable_release_tag", "Asset release tag must be pinned")
         selectors = asset.get("selectors") or {}
         _require(REQUIRED_SELECTOR_KEYS <= set(selectors), "missing_selectors", "Asset selectors are incomplete")
 
@@ -110,11 +114,21 @@ def _cache_key(manifest: dict[str, Any], asset: dict[str, Any]) -> str:
     )
 
 
+def _asset_provenance(manifest: dict[str, Any], asset: dict[str, Any]) -> dict[str, Any]:
+    release = asset.get("release") or manifest["release"]
+    return {
+        "release_tag": release["tag"],
+        **({"channel": asset["channel"], "release": release,
+            "provenance": asset.get("provenance", {}), "asset_url": _asset_url(manifest, asset)}
+           if asset.get("channel") else {}),
+    }
+
+
 def _asset_url(manifest: dict[str, Any], asset: dict[str, Any]) -> str:
     explicit_url = asset.get("url")
     if isinstance(explicit_url, str) and explicit_url:
         return explicit_url
-    release = manifest["release"]
+    release = asset.get("release") or manifest["release"]
     return "https://github.com/{owner}/{repo}/releases/download/{tag}/{filename}".format(
         owner=release["owner"],
         repo=release["repo"],
@@ -177,7 +191,7 @@ def _write_cache_marker(marker_path: Path, manifest: dict[str, Any], asset: dict
             {
                 "asset_id": asset["id"],
                 "sha256": asset["sha256"],
-                "release_tag": manifest["release"]["tag"],
+                **_asset_provenance(manifest, asset),
                 "wheelhouse_version": manifest["wheelhouse_version"],
             },
             sort_keys=True,
@@ -194,6 +208,8 @@ def _verified_extracted_cache(paths: dict[str, Path], asset: dict[str, Any]) -> 
         and marker
         and marker.get("asset_id") == asset["id"]
         and marker.get("sha256") == asset["sha256"]
+        and (not asset.get("channel") or
+             (marker.get("channel") == asset["channel"] and marker.get("release_tag") == asset["release"]["tag"]))
     )
 
 
@@ -259,7 +275,7 @@ def _ready_observation(
         "downloaded": downloaded,
         "sha256_verified": True,
         "bytes_downloaded": bytes_downloaded,
-        "release_tag": manifest["release"]["tag"],
+        **_asset_provenance(manifest, asset),
         "downloads_started": downloads_started,
         "installs_started": False,
         "wheelhouse_path": str(wheelhouse_path),
@@ -332,7 +348,7 @@ def prepare_wheelhouse(
                 "downloads_started": True,
                 "installs_started": False,
                 "selected_asset": asset["id"],
-                "release_tag": manifest["release"]["tag"],
+                **_asset_provenance(manifest, asset),
             }
         )
         raise
@@ -486,7 +502,9 @@ def detect_runtime_lane(
 
     cuda_version, accelerator_lane = _normalize_cuda_version(cuda_value)
     gpu_sm = _normalize_gpu_sm(gpu_sm_value)
-    if accelerator_lane == "cuda128" and gpu_sm == "120":
+    if (os_name == "windows" and arch == "x64" and python_tag == "cp311"
+            and gpu_sm == "120" and tuple(int(part) for part in cuda_version.split(".")) >= (12, 8)):
+        # Driver capability is not the wheel ABI: newer drivers retain cu128 support.
         accelerator_lane = "cuda128-blackwell"
     elif os_name == "windows" and arch == "x64" and python_tag in {"cp311", "cp312"}:
         if int(gpu_sm) >= 100:

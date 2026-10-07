@@ -22,6 +22,7 @@ SUPPORTED_RUNTIME_LANES = {
     "windows-x64-cp311-cuda124",
     "windows-x64-cp312-cuda124",
 }
+EXPERIMENTAL_BASE_RUNTIME_LANES = {"windows-x64-cp311-cuda128-blackwell"}
 SUPPORTED_RUNTIME_LANE = "linux-aarch64-cp312-cuda124"
 TRANSFORMERS_VERSION = "4.57.3"
 
@@ -174,7 +175,7 @@ def check_readiness(
             "generation_allowed": False,
         }
 
-    if runtime_lane not in SUPPORTED_RUNTIME_LANES:
+    if runtime_lane not in SUPPORTED_RUNTIME_LANES | EXPERIMENTAL_BASE_RUNTIME_LANES:
         return {
             "status": "blocked",
             "code": "unsupported_lane",
@@ -228,4 +229,6 @@ def check_readiness(
         "localizable_runtime_dependencies": LOCALIZABLE_RUNTIME_DEPENDENCY_STATUS,
         "runtime_dependencies": RUNTIME_DEPENDENCY_STATUS,
         "import_validation": import_validation or {},
+        **({"channel": "experimental", "scope": "base-only", "inference_validated": False}
+           if runtime_lane in EXPERIMENTAL_BASE_RUNTIME_LANES else {}),
     }

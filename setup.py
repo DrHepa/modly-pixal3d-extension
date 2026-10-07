@@ -80,7 +80,7 @@ PYTORCH_DIRECT_PIP_FLAGS = [*PYTORCH_PIP_FLAGS, "--no-deps"]
 PYTORCH_CUDA_PACKAGES = ["torch==2.6.0+cu124", "torchvision==0.21.0+cu124"]
 PYTORCH_AARCH64_PACKAGES = ["torch==2.12.0", "torchvision==0.27.0"]
 BLACKWELL_RUNTIME_LANE = "windows-x64-cp311-cuda128-blackwell"
-BLACKWELL_REQUIRED_IMPORTS = ["cumesh_vb", "flex_gemm_ap", "o_voxel_vb_ap", "nvdiffrast", "nvdiffrec_render", "natten"]
+BLACKWELL_REQUIRED_IMPORTS = ["cumesh_vb", "flex_gemm_ap", "o_voxel_vb_ap", "nvdiffrast", "nvdiffrec_render", "drtk", "flash_attn", "natten"]
 BLACKWELL_REQUIRED_UPSTREAM_IMPORTS = ["cumesh", "flex_gemm", "o_voxel"]
 PIP_BOOTSTRAP_PACKAGE = "https://files.pythonhosted.org/packages/44/3c/d717024885424591d5376220b5e836c2d5293ce2011523c9de23ff7bf068/pip-25.3-py3-none-any.whl#sha256=9655943313a94722b7774661c21049070f6bbb0a1516bf02f7c8d5d9201514cd"
 
@@ -240,12 +240,19 @@ def _create_prepare_paths(layout: ModlyLayout) -> tuple[list[dict[str, str]], li
     return created, skipped
 
 
-def _run_setup_command(args: list[str], *, cwd: Path) -> dict[str, Any]:
+def _run_setup_command(args: list[str], *, cwd: Path, timeout: int | None = None) -> dict[str, Any]:
     attempts: list[dict[str, Any]] = []
     max_attempts = 3 if _is_retryable_pip_json_command(args) else 1
     completed = None
     for attempt in range(1, max_attempts + 1):
-        completed = subprocess.run(args, cwd=cwd, text=True, capture_output=True)
+        try:
+            completed = subprocess.run(args, cwd=cwd, text=True, capture_output=True, **({"timeout": timeout} if timeout is not None else {}))
+        except subprocess.TimeoutExpired as exc:
+            def tail(value):
+                return (value.decode(errors="replace") if isinstance(value, bytes) else value or "")[-4000:]
+            return {"args": args, "ok": False, "returncode": None, "timed_out": True,
+                    "timeout_seconds": timeout, "error": f"Runtime probe timed out after {timeout}s",
+                    "stdout_tail": tail(exc.stdout), "stderr_tail": tail(exc.stderr)}
         attempts.append(
             {
                 "attempt": attempt,
@@ -334,6 +341,7 @@ def _dependency_policy(runtime_evidence: dict[str, str]) -> dict[str, Any]:
 def _dependency_install_plan(workspace_root: Path, wheelhouse: Path, runtime_evidence: dict[str, str]) -> dict[str, Any]:
     venv_python = _venv_python_path(workspace_root)
     policy = _dependency_policy(runtime_evidence)
+    local_wheel_flags = ["--force-reinstall"] if policy["lane"] == BLACKWELL_RUNTIME_LANE else []
     torch_command = [str(venv_python), "-m", "pip", "install", *PYTORCH_PIP_FLAGS]
     if policy["torch_index_url"]:
         torch_command.extend(["--index-url", policy["torch_index_url"]])
@@ -341,13 +349,14 @@ def _dependency_install_plan(workspace_root: Path, wheelhouse: Path, runtime_evi
     natten_command = None
     if _wheelhouse_contains_natten(wheelhouse):
         natten_command = [
-            str(venv_python), "-m", "pip", "install", "--no-index", "--no-deps", "--find-links", str(wheelhouse),
+            str(venv_python), "-m", "pip", "install", "--no-index", "--no-deps", *local_wheel_flags, "--find-links", str(wheelhouse),
             f"natten=={policy['natten']}",
         ]
     return {
         "policy": policy,
         "torch_command": torch_command,
         "natten_command": natten_command,
+        "local_wheel_flags": local_wheel_flags,
         "local_wheel_packages": _local_wheel_packages_for_wheelhouse(wheelhouse),
         "metadata_packages": _metadata_dependency_packages_for_wheelhouse(wheelhouse),
     }
@@ -365,11 +374,12 @@ def _install_prepare_dependencies(
         return {"status": "failed", "code": "venv_python_missing", "venv_python": str(venv_python), "commands": []}
     if not wheelhouse.exists():
         return {"status": "failed", "code": "wheelhouse_missing", "wheelhouse": str(wheelhouse), "commands": []}
+    runtime_evidence = runtime_evidence or _runtime_evidence_for_wheelhouse(wheelhouse)
+    base_only = _dependency_policy(runtime_evidence)["lane"] == BLACKWELL_RUNTIME_LANE
     mv_wheel = SCRIPT_DIR / MV_CORE_WHEEL
-    if not mv_wheel.is_file() or hashlib.sha256(mv_wheel.read_bytes()).hexdigest() != MV_CORE_WHEEL_SHA256:
+    if not base_only and (not mv_wheel.is_file() or hashlib.sha256(mv_wheel.read_bytes()).hexdigest() != MV_CORE_WHEEL_SHA256):
         return {"status": "failed", "code": "mv_core_wheel_missing_or_invalid", "wheel": str(mv_wheel), "commands": []}
 
-    runtime_evidence = runtime_evidence or _runtime_evidence_for_wheelhouse(wheelhouse)
     plan = _dependency_install_plan(workspace_root, wheelhouse, runtime_evidence)
     local_wheel_packages = plan["local_wheel_packages"]
     torch_install_command = plan["torch_command"]
@@ -378,9 +388,10 @@ def _install_prepare_dependencies(
         torch_install_command,
         [str(venv_python), "-m", "pip", "install", *PYTORCH_PIP_FLAGS, "-r", "requirements.txt"],
         [str(venv_python), "-m", "pip", "install", *PYTORCH_PIP_FLAGS, *plan["metadata_packages"]],
-        [str(venv_python), "-m", "pip", "install", "--no-index", "--no-deps", "--find-links", str(wheelhouse), *local_wheel_packages],
-        [str(venv_python), "-m", "pip", "install", "--no-index", "--no-deps", "--force-reinstall", str(mv_wheel)],
+        [str(venv_python), "-m", "pip", "install", "--no-index", "--no-deps", *plan["local_wheel_flags"], "--find-links", str(wheelhouse), *local_wheel_packages],
     ]
+    if not base_only:
+        commands.append([str(venv_python), "-m", "pip", "install", "--no-index", "--no-deps", "--force-reinstall", str(mv_wheel)])
     if plan["natten_command"] is not None:
         commands.append(plan["natten_command"])
     results: list[dict[str, Any]] = []
@@ -410,7 +421,12 @@ def _install_prepare_dependencies(
         "optional_natten_packages": [f"natten=={plan['policy']['natten']}"],
         "runtime_evidence": runtime_evidence,
         "dependency_policy": plan["policy"],
-        "natten_runtime": _natten_runtime_status(venv_python, workspace_root),
+        "natten_runtime": ({"importable": True, "version": runtime_check.get("natten_version"),
+                            "HAS_LIBNATTEN": runtime_check.get("natten_has_libnatten")}
+                           if base_only else _natten_runtime_status(venv_python, workspace_root)),
+        "runtime_prepared": True,
+        "inference_validated": False,
+        **({"channel": "experimental", "scope": "base-only"} if base_only else {}),
         "pip_check": pip_check,
         "runtime_check": runtime_check,
         "commands": results,
@@ -449,6 +465,9 @@ def _validate_runtime_probe(probe: dict[str, Any], policy: dict[str, Any]) -> di
             missing = sorted(set(policy.get(policy_key, [])) - set(probe.get(key, [])))
             if missing:
                 errors.append(f"missing {key}: {', '.join(missing)}")
+        for name in ("torch_stack", "native_imports", "natten_lib", "device", "torch_cuda", "natten_sm120"):
+            if probe.get("checks", {}).get(name, {}).get("status") != "PASS":
+                errors.append(f"{name} did not PASS")
     return {**probe, "ok": not errors, "validation_errors": errors}
 
 
@@ -516,17 +535,38 @@ def _runtime_cuda_check(
         "    payload['error'] = f'{type(exc).__name__}: {exc}'\n"
         "print(json.dumps(payload, sort_keys=True))\n"
     )
-    result = _run_setup_command([str(venv_python), "-c", code], cwd=workspace_root)
-    try:
-        payload = json.loads(result.get("stdout_tail", "").strip().splitlines()[-1])
-    except Exception:
-        payload = {"ok": False, "error": "runtime CUDA probe did not return JSON"}
+    blackwell = policy["lane"] == BLACKWELL_RUNTIME_LANE
+    if blackwell:
+        code = ("import json; from pixal3d_extension.setup_probe import run_blackwell_probe; "
+                f"print(json.dumps(run_blackwell_probe({policy!r}), sort_keys=True))")
+    result = _run_setup_command([str(venv_python), "-c", code], cwd=workspace_root,
+                                **({"timeout": 180} if blackwell else {}))
+    payload = {"ok": False, "error": "runtime CUDA probe did not return JSON"}
+    lines = result.get("stdout_tail", "").strip().splitlines()
+    for line in reversed(lines if blackwell else lines[-1:]):
+        try:
+            observed = json.loads(line)
+            if isinstance(observed, dict) and (not blackwell or "checks" in observed):
+                payload = observed
+                break
+        except (ValueError, TypeError):
+            continue
     combined = {
         **result,
         **payload,
         "ok": bool(result.get("ok") and payload.get("ok") and payload.get("transformers_version") == TRANSFORMERS_VERSION),
     }
-    return _validate_runtime_probe(combined, policy)
+    if blackwell:
+        from pixal3d_extension.setup_probe import CHECK_NAMES
+        checks = combined.setdefault("checks", {name: {"status": "NOT_RUN"} for name in CHECK_NAMES})
+        for check in checks.values():
+            if check["status"] == "RUNNING":
+                check.update(status="FAIL", error=result.get("error", "probe process failed"))
+        combined.update(runtime_prepared=bool(combined["ok"]), inference_validated=False)
+    validated = _validate_runtime_probe(combined, policy)
+    if blackwell:
+        validated["runtime_prepared"] = validated["ok"]
+    return validated
 
 
 def _native_import_modules_for_wheelhouse(wheelhouse: Path) -> list[str]:

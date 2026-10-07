@@ -76,9 +76,14 @@ Windows wheelhouses must follow the exact-stack policy used by Pixal3D-ComfyUI r
 
 RTX 50-series / Blackwell support is tracked separately in `BLACKWELL-SM120.md`. The published CUDA 12.4 Windows wheelhouses are not Blackwell lanes; do not mark RTX 5090 supported until an exact-stack Blackwell wheelhouse is rebuilt, checksum-pinned, and validated on real RTX 50-series hardware.
 
-The experimental Blackwell candidate workflow is `.github/workflows/wheelhouse-windows-x64-cp311-cuda128-blackwell-candidate.yml`. It targets `windows-x64-cp311-cuda128-blackwell`, builds NATTEN against `torch==2.7.1+cu128` with `TORCH_CUDA_ARCH_LIST=12.0`, and packages exact-stack `cu128torch2.7` Windows native wheels. It is candidate-only and must remain outside `wheelhouse.manifest.json` until real RTX 50-series validation succeeds.
+The experimental Blackwell candidate workflow is `.github/workflows/wheelhouse-windows-x64-cp311-cuda128-blackwell-candidate.yml`. It targets `windows-x64-cp311-cuda128-blackwell`, builds NATTEN against `torch==2.7.1+cu128` with `TORCH_CUDA_ARCH_LIST=12.0`, and packages exact-stack `cu128torch2.7` Windows native wheels. The immutable r3 archive is now selected automatically as an **experimental base-only** asset; full RTX 50-series qualification remains unverified.
 
-Setup has a prepared but inactive payload route for this candidate. A payload containing `cuda_version` and `gpu_sm` is normalized before wheelhouse selection; CUDA 12.8 plus SM120 selects `cuda128-blackwell`. While that asset is not present in `wheelhouse.manifest.json`, setup must fail closed with `unsupported_lane` before filesystem preparation, download, or install. Do not use the prepared dependency policy as a support claim: publication still requires the exact RTX 50-series hardware checks in `BLACKWELL-SM120.md` and a newly checksum-pinned stable release asset.
+Setup normalizes the Modly payload before selection: `cuda_version` 12.8 and
+`gpu_sm` 120 on Windows x64 CPython 3.11 selects the r3 experimental base-only
+asset. Other Blackwell ABIs/devices fail closed rather than falling back to cu124.
+The candidate core/NAF retain natten 0.21.6; the older MV overlay is not installed.
+The setup probe exercises the same `cutlass-fna` backend used by candidate NAF.
+Hardware setup success is not a full-inference or production-support claim.
 
 ## Windows NATTEN candidate workflow
 

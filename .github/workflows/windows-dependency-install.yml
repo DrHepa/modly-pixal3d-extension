@@ -20,7 +20,11 @@ permissions:
 
 jobs:
   dependency-install:
-    name: Clean Windows cp311 install (GPU not qualified)
+    name: Clean Windows cp311 ${{ matrix.lane }} install (GPU blocked)
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [cuda124, blackwell]
     runs-on: windows-2022
     timeout-minutes: 60
     steps:
@@ -35,13 +39,13 @@ jobs:
       - name: Run unmodified setup and collect real dependency evidence
         shell: pwsh
         run: |
-          python tools/validation/windows_dependency_install.py --evidence "$env:RUNNER_TEMP/pixal3d-windows-dependency-evidence"
+          python tools/validation/windows_dependency_install.py --lane "${{ matrix.lane }}" --evidence "$env:RUNNER_TEMP/pixal3d-windows-dependency-evidence"
           if ($LASTEXITCODE -ne 0) { throw 'Unexpected dependency-install validation failure' }
 
       - name: Upload evidence even on failure
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: windows-cp311-dependency-evidence
+          name: windows-cp311-${{ matrix.lane }}-dependency-evidence
           path: ${{ runner.temp }}/pixal3d-windows-dependency-evidence/
           if-no-files-found: error

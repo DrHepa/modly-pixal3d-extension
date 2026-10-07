@@ -94,7 +94,7 @@ test('wheelhouse manifest is pinned, checksum-verifiable, and selects supported 
   assert.equal(manifest.release.immutable_commit, '47e78252f5cb185623ba3aad564d879d30809bb6')
   assert.notEqual(manifest.release.tag, 'latest')
   assert.match(manifest.release.immutable_commit, /^[0-9a-f]{40}$/)
-  assert.equal(manifest.assets.length, 4)
+  assert.equal(manifest.assets.length, 5)
   for (const asset of manifest.assets) {
     assert.match(asset.sha256, /^[0-9a-f]{64}$/)
     assert.ok(asset.size_bytes > 0)
@@ -2370,7 +2370,7 @@ test('linux x64 cp312 cuda124 wheelhouse workflow is documented and manifest-bac
   const scriptPath = join(repoRoot, 'tools', 'wheelhouse', 'build-linux-x64-cp312-cuda124.sh')
   const recipe = readFileSync(join(repoRoot, 'tools', 'wheelhouse', 'README.md'), 'utf8')
 
-  assert.deepEqual([...manifest.assets.map((asset) => asset.id)].sort(), [
+  assert.deepEqual([...manifest.assets.filter((asset) => asset.channel !== 'experimental').map((asset) => asset.id)].sort(), [
     'linux-aarch64-cp312-cuda124',
     'linux-x64-cp312-cuda124',
     'windows-x64-cp311-cuda124',
@@ -2579,7 +2579,7 @@ test('windows cp311 cuda124 NATTEN candidate workflow is manual, exact-stack, an
   assert.ok(!manifest.includes('v0.21.0'))
 })
 
-test('Blackwell sm120 investigation remains probe-only and outside published wheelhouse lanes', () => {
+test('Blackwell historical build probe remains evidence-only while r3 installation is experimental', () => {
   const workflowPath = join(repoRoot, '.github', 'workflows', 'blackwell-windows-x64-cp311-cuda128-probe.yml')
   const workflow = readFileSync(workflowPath, 'utf8')
   const docs = readFileSync(join(repoRoot, 'tools', 'wheelhouse', 'BLACKWELL-SM120.md'), 'utf8')
@@ -2604,19 +2604,19 @@ test('Blackwell sm120 investigation remains probe-only and outside published whe
   assert.doesNotMatch(workflow, /upload-release-asset/i)
 
   assert.match(docs, /RTX 5090 as compute capability `12\.0`/)
-  assert.match(docs, /not\*\* a supported Pixal3D wheelhouse lane/i)
+  assert.match(docs, /experimental base-only/)
   assert.match(docs, /CUDA 12\.4\.1 `nvcc` documentation lists.*`compute_90` \/ `sm_90`/s)
   assert.match(docs, /does not list `compute_120` \/ `sm_120`/)
   assert.match(docs, /rebuilding only NATTEN for `sm_120` would not prove/)
   for (const wheel of ['flex_gemm_ap', 'cumesh_vb', 'o_voxel_vb_ap', 'drtk', 'flash_attn', 'nvdiffrast', 'nvdiffrec_render']) {
     assert.match(docs, new RegExp(wheel))
   }
-  assert.match(docs, /Until those conditions are met, RTX 5090 \/ Blackwell remains experimental and unsupported/)
+  assert.match(docs, /not production-qualified/)
   assert.match(recipe, /BLACKWELL-SM120\.md/)
   assert.match(recipe, /do not mark RTX 5090 supported/i)
-  assert.ok(!manifest.includes('cuda128'))
-  assert.ok(!manifest.includes('blackwell'))
-  assert.ok(!manifest.includes('sm120'))
+  const candidate = JSON.parse(manifest).assets.find(asset => asset.id === 'windows-x64-cp311-cuda128-blackwell')
+  assert.equal(candidate.channel, 'experimental')
+  assert.equal(candidate.provenance.scope, 'base-only')
 })
 
 test('Blackwell Windows wheelhouse candidate is exact-stack and artifact-only', () => {
@@ -2718,62 +2718,26 @@ test('Blackwell Windows wheelhouse candidate is exact-stack and artifact-only', 
   assert.match(recipe, /wheelhouse-windows-x64-cp311-cuda128-blackwell-candidate\.yml/)
   assert.match(recipe, /candidate-only/)
   assert.match(recipe, /payload.*`cuda_version`.*`gpu_sm`/s)
-  assert.match(recipe, /not present in `wheelhouse\.manifest\.json`.*fail.*`unsupported_lane`/s)
-  assert.ok(!manifest.includes('windows-x64-cp311-cuda128-blackwell'))
+  assert.match(recipe, /Other Blackwell ABIs\/devices fail closed/)
+  assert.equal(JSON.parse(manifest).assets.find(asset => asset.id === 'windows-x64-cp311-cuda128-blackwell').channel, 'experimental')
 })
 
-test('Blackwell runtime lane selection is driven by CUDA and SM payload without activating the official manifest', () => {
+test('Blackwell real Windows payload selects the immutable experimental r3 asset automatically', () => {
   const result = runPython(`
 import json
 from pathlib import Path
-from modly_wheelhouse import WheelhouseError, detect_runtime_lane, load_manifest, select_asset
-
-payload = {'cuda_version': '12.8.1', 'gpu_sm': 'sm_120'}
-runtime = detect_runtime_lane(payload, system='Windows', machine='AMD64', python_tag='cp311')
-manifest = load_manifest(Path('wheelhouse.manifest.json'))
-official_error = None
-try:
-    select_asset(manifest, runtime)
-except WheelhouseError as exc:
-    official_error = exc.code
-
-candidate_manifest = json.loads(json.dumps(manifest))
-candidate_manifest['assets'].append({
-    'id': 'windows-x64-cp311-cuda128-blackwell',
-    'filename': 'candidate.zip',
-    'size_bytes': 1,
-    'sha256': '0' * 64,
-    'compression': 'zip',
-    'selectors': {
-        'os': 'windows',
-        'arch': 'x64',
-        'python_tag': 'cp311',
-        'accelerator_lane': 'cuda128-blackwell',
-    },
-})
-selected = select_asset(candidate_manifest, runtime)
-print(json.dumps({
-    'runtime': runtime,
-    'official_error': official_error,
-    'selected': selected['id'],
-    'official_has_candidate': any(asset['id'] == selected['id'] for asset in manifest['assets']),
-}, sort_keys=True))
+from modly_wheelhouse import detect_runtime_lane, load_manifest, select_asset
+runtime = detect_runtime_lane({'cuda_version': '12.8.1', 'gpu_sm': 'sm_120'}, system='Windows', machine='AMD64', python_tag='cp311')
+asset = select_asset(load_manifest(Path('wheelhouse.manifest.json')), runtime)
+print(json.dumps({'runtime': runtime, 'asset': asset}))
 `)
-
-  assert.deepEqual(result.runtime, {
-    accelerator_lane: 'cuda128-blackwell',
-    arch: 'x64',
-    cuda_version: '12.8',
-    gpu_sm: '120',
-    os: 'windows',
-    python_tag: 'cp311',
-  })
-  assert.equal(result.official_error, 'unsupported_lane')
-  assert.equal(result.selected, 'windows-x64-cp311-cuda128-blackwell')
-  assert.equal(result.official_has_candidate, false)
+  assert.equal(result.runtime.accelerator_lane, 'cuda128-blackwell')
+  assert.equal(result.asset.id, 'windows-x64-cp311-cuda128-blackwell')
+  assert.equal(result.asset.channel, 'experimental')
+  assert.equal(result.asset.release.tag, 'wheelhouse-blackwell-candidate-v0.1.0-r3')
 })
 
-test('setup hard-gates explicit Blackwell payload before filesystem preparation or network access', () => {
+test('setup rejects Blackwell payload on unsupported Linux host before side effects', () => {
   const result = runPython(`
 import json, shutil, tempfile
 from pathlib import Path
@@ -2795,7 +2759,7 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.equal(result.outcome.failure_code, 'unsupported_lane')
   assert.equal(result.outcome.downloads_started, false)
   assert.equal(result.outcome.installs_started, false)
-  assert.equal(result.outcome.runtime_evidence.accelerator_lane, 'cuda128-blackwell')
+  assert.equal(result.outcome.runtime_evidence.accelerator_lane, 'cuda128')
   assert.deepEqual(result.calls, [])
 })
 
@@ -2929,7 +2893,7 @@ print(json.dumps(out))
   assert.deepEqual(result, Array(9).fill('invalid_runtime_evidence'))
 })
 
-test('setup hard-gates the real numeric Modly Blackwell payload before side effects', () => {
+test('setup rejects numeric Blackwell payload on unsupported Linux host before side effects', () => {
   const result = runPython(`
 import json, shutil, tempfile
 from pathlib import Path
@@ -2954,7 +2918,7 @@ with tempfile.TemporaryDirectory() as tmp:
   assert.deepEqual(result.calls, [])
 })
 
-test('legacy positional Blackwell evidence reaches the same fail-closed preflight before side effects', () => {
+test('legacy positional Blackwell evidence remains rejected on unsupported Linux host', () => {
   const result = runPython(`
 import json, shutil, tempfile
 from pathlib import Path
@@ -3061,7 +3025,8 @@ base = {
     'gpu_sm': '120',
     'natten_version': '0.21.6',
     'natten_has_libnatten': True,
-    'imports': ['cumesh_vb', 'flex_gemm_ap', 'o_voxel_vb_ap', 'nvdiffrast', 'nvdiffrec_render', 'natten'],
+    'imports': list(policy['required_imports']),
+    'checks': {name: {'status': 'PASS'} for name in ('torch_stack', 'device', 'native_imports', 'natten_lib', 'torch_cuda', 'natten_sm120')},
     'upstream_imports': ['cumesh', 'flex_gemm', 'o_voxel'],
 }
 cases = {'valid': base}
@@ -3767,7 +3732,7 @@ print(json.dumps(setup.run_setup(['--json'])))
     status: 'available',
     release_tag: 'wheelhouse-v0.1.0',
     wheelhouse_version: '0.1.0',
-    asset_count: 4,
+    asset_count: 5,
   })
 })
 

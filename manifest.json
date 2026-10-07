@@ -3,7 +3,7 @@
   "kind": "model",
   "type": "model",
   "name": "Pixal3D",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "source": "https://github.com/DrHepa/modly-pixal3d-extension",
   "author": "DrHepa",
   "description": "Pixal3D single-image, multi-image, and WorldSculpt workflows with scene preparation using official SAM3 and DA3.",

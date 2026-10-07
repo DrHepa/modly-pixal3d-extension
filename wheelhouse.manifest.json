@@ -126,6 +126,48 @@
         "python_tag": "cp311",
         "accelerator_lane": "cuda124"
       }
+    },
+    {
+      "id": "windows-x64-cp311-cuda128-blackwell",
+      "filename": "pixal3d-wheelhouse-v0.1.0-windows-x64-cp311-cuda128-blackwell.zip",
+      "size_bytes": 295071843,
+      "sha256": "162f43973de2dcde2987c0322dbf9f143bed87d267e8f0374618bcbe1f760a97",
+      "compression": "zip",
+      "packages": [
+        "utils3d",
+        "pipeline",
+        "moge",
+        "naf",
+        "natten",
+        "o-voxel-vb-ap",
+        "cumesh-vb",
+        "flex-gemm-ap",
+        "drtk",
+        "flash-attn",
+        "nvdiffrast",
+        "nvdiffrec-render",
+        "pixal3d-core"
+      ],
+      "selectors": {
+        "os": "windows",
+        "arch": "x64",
+        "python_tag": "cp311",
+        "accelerator_lane": "cuda128-blackwell"
+      },
+      "url": "https://github.com/DrHepa/modly-pixal3d-extension/releases/download/wheelhouse-blackwell-candidate-v0.1.0-r3/pixal3d-wheelhouse-v0.1.0-windows-x64-cp311-cuda128-blackwell.zip",
+      "channel": "experimental",
+      "release": {
+        "owner": "DrHepa",
+        "repo": "modly-pixal3d-extension",
+        "tag": "wheelhouse-blackwell-candidate-v0.1.0-r3",
+        "immutable_commit": "bc4c9f4173161b470fac69c99ab462a7251bced1"
+      },
+      "provenance": {
+        "build_run_id": 35537470167,
+        "build_commit": "bc4c9f4173161b470fac69c99ab462a7251bced1",
+        "scope": "base-only",
+        "inference_validation": "NOT_RUN"
+      }
     }
   ],
   "checksums": {
