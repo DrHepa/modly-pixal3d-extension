@@ -20,7 +20,19 @@ EXPECTED = {"torch": "2.6.0+cu124", "torchvision": "0.21.0+cu124",
 NATIVE = {"cumesh_vb", "flex_gemm_ap", "o_voxel_vb_ap", "nvdiffrast", "nvdiffrec_render", "natten"}
 
 
-def classify_probe(probe):
+def classify_probe(probe, blackwell=False):
+    if blackwell:
+        assert probe.get("torch_version") == "2.7.1+cu128", probe
+        assert probe.get("torchvision_version") == "0.22.1+cu128", probe
+        assert probe.get("torch_cuda_version") == "12.8", probe
+        assert probe.get("torch_cuda_available") is False, "Hosted runner is not GPU-qualified"
+        assert not probe.get("timed_out"), probe
+        assert ("Found no NVIDIA driver" in probe.get("error", "") or
+                (probe.get("checks", {}).get("device", {}).get("status") == "FAIL" and
+                 "hardware checks BLOCKED" in probe.get("error", ""))), probe
+        assert probe.get("checks", {}).get("natten_sm120", {}).get("status") == "NOT_RUN", probe
+        return "BLOCKED"
+
     for key, expected in (("torch_version", EXPECTED["torch"]),
                           ("torchvision_version", EXPECTED["torchvision"]), ("torch_cuda_version", "12.4")):
         assert probe.get(key) == expected, (key, probe)
@@ -37,7 +49,10 @@ def classify_probe(probe):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence", type=Path, required=True)
+    parser.add_argument("--lane", choices=("cuda124", "blackwell"), default="cuda124")
     args = parser.parse_args()
+    blackwell = args.lane == "blackwell"
+    expected = {**EXPECTED, **({"torch": "2.7.1+cu128", "torchvision": "0.22.1+cu128", "natten": "0.21.6"} if blackwell else {})}
     evidence = args.evidence.resolve()
     evidence.mkdir(parents=True, exist_ok=True)
     summary = {"package_installation": "NOT_RUN", "dependency_graph": "NOT_RUN",
@@ -60,7 +75,7 @@ def main():
             target = extension / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(root / name, target)
-        payload = {"python_exe": sys.executable, "ext_dir": str(extension), "cuda_version": 128, "gpu_sm": 86}
+        payload = {"python_exe": sys.executable, "ext_dir": str(extension), "cuda_version": 128, "gpu_sm": 120 if blackwell else 86}
         summary["routing_payload_not_hardware_evidence"] = payload
         env = {**os.environ, "PIP_LOG": str(evidence / "pip-complete.log"),
                "HF_HOME": str(extension / "hf-cache"), "TORCH_HOME": str(extension / "torch-cache")}
@@ -70,7 +85,7 @@ def main():
         summary["full_setup"] = "FAIL" if completed.returncode else "PASS"
         assert completed.returncode == 1 and result["status"] == "failed", "Full setup must retain no-GPU failure"
         prepared = result["wheelhouse_prepare"]
-        assert prepared["selected_asset"] == "windows-x64-cp311-cuda124"
+        assert prepared["selected_asset"] == ("windows-x64-cp311-cuda128-blackwell" if blackwell else "windows-x64-cp311-cuda124")
         assert prepared["downloaded"] is True and prepared["sha256_verified"] is True
         manifest = json.loads((extension / "wheelhouse.manifest.json").read_text())
         asset = next(item for item in manifest["assets"] if item["id"] == prepared["selected_asset"])
@@ -78,17 +93,17 @@ def main():
         assert len(archives) == 1 and hashlib.sha256(archives[0].read_bytes()).hexdigest() == asset["sha256"]
         summary["archive_sha256"] = asset["sha256"]
         install = result["dependency_install"]
-        assert len(install["commands"]) == 7 and all(command["ok"] for command in install["commands"]), install
+        assert len(install["commands"]) == (6 if blackwell else 7) and all(command["ok"] for command in install["commands"]), install
         assert install["code"] == "dependency_runtime_check_failed", install
         assert install["pip_check"]["ok"] is True, install
         python = str(extension / "venv/Scripts/python.exe")
         versions = run([python, "-c", "import json; from importlib.metadata import version; "
-                        f"print(json.dumps({{name: version(name) for name in {list(EXPECTED)!r}}}))"], extension, "versions", env)
+                        f"print(json.dumps({{name: version(name) for name in {list(expected)!r}}}))"], extension, "versions", env)
         assert versions.returncode == 0, versions.stderr
         installed = json.loads(versions.stdout)
-        for name, expected in EXPECTED.items():
+        for name, pinned in expected.items():
             actual = installed[name]
-            assert actual == expected or ("+" not in expected and actual.split("+")[0] == expected), (name, actual, expected)
+            assert actual == pinned or ("+" not in pinned and actual.split("+")[0] == pinned), (name, actual, pinned)
         check = run([python, "-m", "pip", "check"], extension, "pip-check", env)
         assert check.returncode == 0, check.stdout + check.stderr
         summary.update(package_installation="PASS", dependency_graph="PASS", installed_versions=installed)
@@ -96,8 +111,14 @@ def main():
         probe_result = run(install["runtime_check"]["args"], extension, "native-probe", env)
         assert probe_result.returncode == 0, probe_result.stderr
         probe = json.loads(probe_result.stdout.strip().splitlines()[-1])
-        summary["native_imports"] = classify_probe(probe)
-        assert summary["native_imports"] == classify_probe(install["runtime_check"]), "Probe evidence must agree"
+        summary["native_imports"] = classify_probe(probe, blackwell)
+        assert summary["native_imports"] == classify_probe(install["runtime_check"], blackwell), "Probe evidence must agree"
+        summary["full_setup"] = "BLOCKED"  # Package graph is valid; no GPU means runtime is not prepared.
+        summary["hardware"] = "BLOCKED"
+        if blackwell:
+            assert prepared["channel"] == "experimental" and prepared["release_tag"] == asset["release"]["tag"]
+            summary["checks"] = install["runtime_check"]["checks"]
+            summary["asset_provenance"] = prepared["provenance"]
         summary["dependency_installation"] = "PASS" if summary["native_imports"] == "PASS" else "NOT_QUALIFIED"
         model_files = [path.relative_to(extension / "models").as_posix()
                        for path in (extension / "models").rglob("*") if path.is_file()]

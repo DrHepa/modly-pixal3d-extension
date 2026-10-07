@@ -36,6 +36,7 @@ SUPPORTED_RUNTIME_LANES = {
     "windows-x64-cp311-cuda124",
     "windows-x64-cp312-cuda124",
 }
+EXPERIMENTAL_BASE_RUNTIME_LANES = {"windows-x64-cp311-cuda128-blackwell"}
 SUPPORTED_RUNTIME_LANE = "linux-aarch64-cp312-cuda124"
 
 
@@ -804,8 +805,8 @@ def _preflight_runtime(job: dict) -> tuple[dict | None, dict | None]:
         return auxiliary_error, None
 
     runtime_lane = job.get("runtime_lane")
-    if runtime_lane and runtime_lane not in SUPPORTED_RUNTIME_LANES:
-        return _failure("unsupported_lane", f"runtime lane {runtime_lane!r} is not production-supported"), auxiliary_source
+    if runtime_lane and runtime_lane not in SUPPORTED_RUNTIME_LANES | EXPERIMENTAL_BASE_RUNTIME_LANES:
+        return _failure("unsupported_lane", f"runtime lane {runtime_lane!r} is not eligible for base generation"), auxiliary_source
 
     asset_readiness = job.get("asset_readiness") or {}
     if asset_readiness.get("code") == "missing_assets" or job.get("assets_ready") is False:

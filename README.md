@@ -17,6 +17,16 @@ Model weights are downloaded through Modly Models; they are not bundled here.
 Normal setup automatically attempts the special scene-preparation and WorldSculpt
 environments on supported hosts. No separate manual setup is needed for a fresh install.
 
+**Windows RTX 5090 (experimental base-only):** normal Install/Reinstall/Repair
+selects the checksum-pinned r3 CPython 3.11 / SM120 / CUDA 12.8 archive automatically.
+No PowerShell script or experimental opt-in manifest is required. Setup checks the
+exact torch 2.7.1+cu128 / torchvision 0.22.1+cu128 / NATTEN 0.21.6 stack, native
+imports, and synchronized tiny Torch/NATTEN CUDA operations (180-second bound).
+`runtime_prepared` is **not** `inference_validated`: real Low VRAM generation,
+GLB/viewer quality, restart and lifecycle qualification remain unverified on RTX 5090.
+MV, scene preparation and WorldSculpt Windows paths are not enabled by this lane.
+Weights still come only from Modly Models.
+
 **Upgrading from the older single-node extension?** Existing checkpoints can be
 moved—not copied—into the host's shared group roots. Preserve the auxiliary
 subdirectories and check Models readiness before deleting anything; do not download

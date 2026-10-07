@@ -56,15 +56,31 @@ class WindowsCudaLaneTests(unittest.TestCase):
                     select_asset(self.manifest, runtime)
                 self.assertEqual(failure.exception.code, "unsupported_lane")
 
-    def test_blackwell_never_selects_cuda124_even_with_older_driver_metadata(self):
+    def test_only_exact_blackwell_lane_is_eligible_and_never_falls_back_to_cuda124(self):
         for sm in (100, 101, 103, 110, 120, 121):
-            for version in (124, 126, 128, 130):
+            for version in (124, 126, 128, 129, 130, 136):
                 with self.subTest(sm=sm, version=version):
+                    if sm == 120 and version >= 128:
+                        self.assertEqual(select_asset(self.manifest, windows_runtime({"cuda_version": version, "gpu_sm": sm}))["id"], setup.BLACKWELL_RUNTIME_LANE)
+                        continue
                     with self.assertRaises(WheelhouseError) as failure:
                         select_asset(self.manifest, windows_runtime({"cuda_version": version, "gpu_sm": sm}))
                     self.assertEqual(failure.exception.code, "unsupported_lane")
         candidate = windows_runtime({"cuda_version": 128, "gpu_sm": 120})
         self.assertEqual(candidate["accelerator_lane"], "cuda128-blackwell")
+
+    def test_newer_blackwell_driver_capability_preserves_evidence_and_pins_cu128(self):
+        for value, dotted in ((128, '12.8'), (129, '12.9'), (130, '13.0'), (136, '13.6'), ('13.0', '13.0')):
+            with self.subTest(value=value):
+                runtime = windows_runtime({'cuda_version': value, 'gpu_sm': 120})
+                self.assertEqual(runtime['cuda_version'], dotted)
+                self.assertEqual(runtime['accelerator_lane'], 'cuda128-blackwell')
+                self.assertEqual(select_asset(self.manifest, runtime)['id'], setup.BLACKWELL_RUNTIME_LANE)
+                self.assertEqual(setup._dependency_policy(runtime)['expected_torch_cuda'], '12.8')
+        for system, machine, python_tag in (('Windows', 'AMD64', 'cp312'), ('Windows', 'ARM64', 'cp311'), ('Linux', 'AMD64', 'cp311'), ('Darwin', 'AMD64', 'cp311')):
+            with self.subTest(system=system, machine=machine, python_tag=python_tag):
+                with self.assertRaises(WheelhouseError):
+                    select_asset(self.manifest, detect_runtime_lane({'cuda_version': 130, 'gpu_sm': 120}, system=system, machine=machine, python_tag=python_tag))
 
     def test_invalid_and_partial_metadata_fail_closed(self):
         cases = [
@@ -108,7 +124,6 @@ class WindowsCudaLaneTests(unittest.TestCase):
         cases = [({"cuda_version": 123, "gpu_sm": 86}, "cp311", "AMD64"),
                  ({"cuda_version": 128, "gpu_sm": 100}, "cp311", "AMD64"),
                  ({"cuda_version": 124, "gpu_sm": 120}, "cp311", "AMD64"),
-                 ({"cuda_version": 128, "gpu_sm": 120}, "cp311", "AMD64"),
                  ({"cuda_version": 128}, "cp311", "AMD64"),
                  ({"cuda_version": "invalid", "gpu_sm": 86}, "cp311", "AMD64"),
                  ({"cuda_version": None, "gpu_sm": None}, "cp311", "AMD64"),
@@ -133,7 +148,7 @@ class WindowsCudaLaneTests(unittest.TestCase):
                 self.assertEqual(sorted(path.name for path in root.iterdir()), ["wheelhouse.manifest.json"])
 
     def test_setup_json_and_legacy_forms_choose_same_windows_published_lane(self):
-        for sm in (75, 86):
+        for sm in (75, 86, 120):
             for legacy in (False, True):
                 with self.subTest(sm=sm, legacy=legacy), tempfile.TemporaryDirectory() as temp:
                     root = Path(temp) / "extension"
@@ -144,7 +159,7 @@ class WindowsCudaLaneTests(unittest.TestCase):
                          patch.object(setup, "_create_prepare_paths", return_value=([], [])):
                         result = setup.run_setup([*arguments, "--skip-install"])
                     self.assertEqual(result["status"], "prepared")
-                    self.assertEqual(result["runtime_lane_preflight"]["selected_asset"], "windows-x64-cp311-cuda124")
+                    self.assertEqual(result["runtime_lane_preflight"]["selected_asset"], setup.BLACKWELL_RUNTIME_LANE if sm == 120 else "windows-x64-cp311-cuda124")
                     self.assertEqual(result["runtime_evidence"]["cuda_version"], "12.8")
                     self.assertEqual(result["runtime_evidence"]["gpu_sm"], str(sm))
 

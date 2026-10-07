@@ -203,6 +203,7 @@ function Add-TemporaryBlackwellManifestAsset {
     packages = @('utils3d','pipeline','moge','naf','o-voxel-vb-ap','cumesh-vb','flex-gemm-ap','drtk','flash-attn','nvdiffrast','nvdiffrec-render','pixal3d-core','natten')
     selectors = [ordered]@{ os = 'windows'; arch = 'x64'; python_tag = 'cp311'; accelerator_lane = 'cuda128-blackwell' }
   }
+  $manifest.assets = @($manifest.assets | Where-Object { $_.id -ne $assetId })
   $manifest.assets += $asset
   $manifest | ConvertTo-Json -Depth 100 | Set-Content -Encoding UTF8 -LiteralPath $manifestPath
 
