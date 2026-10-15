@@ -65,7 +65,12 @@ def verify_wheels(manifest: Path = MANIFEST, wheel_dir: Path = WHEELS) -> list[P
 def _probe(python: Path) -> dict:
     code = '''import json,platform,sys,sysconfig,torch
 print(json.dumps({"machine":platform.machine(),"python":list(sys.version_info[:2]),"site":sysconfig.get_paths()["purelib"],"prefix":sys.prefix,"executable":sys.executable,"torch":torch.__version__,"cuda":torch.version.cuda}))'''
-    completed = subprocess.run([str(python), "-c", code], text=True, capture_output=True, check=True)
+    completed = subprocess.run([str(python), "-c", code], text=True, capture_output=True)
+    if completed.returncode:
+        raise RuntimeError(
+            f"WorldSculpt runtime probe failed (returncode={completed.returncode}, python={python})\n"
+            f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+        )
     return json.loads(completed.stdout)
 
 
@@ -189,8 +194,11 @@ def provision(root: Path = ROOT) -> dict:
     link = overlay_site / "primary-pixal3d.pth"
     if link.is_symlink():
         raise RuntimeError("WorldSculpt primary site-packages link cannot be a symlink")
-    if not link.is_file() or link.read_text(encoding="utf-8") != str(site) + "\n":
-        link.write_text(str(site) + "\n", encoding="utf-8")
+    # CPython 3.11 reads .pth files with the Windows locale, even in UTF-8 mode.
+    # Python ascii() preserves non-BMP codepoints without JSON surrogate pairs.
+    expected_pth = f"import sys; sys.path.append({ascii(str(site))})\n".encode("ascii")
+    if not link.is_file() or link.read_bytes() != expected_pth:
+        link.write_bytes(expected_pth)
     try:
         _validate_runtime(root, python_path(root), wheels, overlay_site, native=False)
     except (RuntimeError, subprocess.CalledProcessError):

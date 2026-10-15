@@ -373,3 +373,120 @@ class WorldSculptLocalizationTests(unittest.TestCase):
             original.write_text(json.dumps({"model_name": "owner/other-model"}))
             with self.assertRaisesRegex(ValueError, "unlocalized"):
                 ws._local_adapter_config(original, root / "private.json", root / "base")
+
+
+class WorldSculptPthTests(unittest.TestCase):
+    """Locale-reader source semantics and probe diagnostics, not Windows/Torch proof."""
+
+    @staticmethod
+    def _fixture(root):
+        from pixal3d_extension import worldsculpt_lane as lane
+        primary = lane.primary_python(root)
+        primary.parent.mkdir(parents=True)
+        primary.write_bytes(b'fixture interpreter, never executed')
+        primary_site = root/'venv/Lib/site-packages'
+        primary_site.mkdir(parents=True)
+        overlay_site = root/'venv-worldsculpt/Lib/site-packages'
+        overlay_site.mkdir(parents=True)
+        info = {'site':str(primary_site),'prefix':str(root/'venv'),'executable':str(primary)}
+        return primary_site, overlay_site, info
+
+    def test_repair_ascii_pth_preserves_locale_unicode_non_bmp_and_overlay_precedence(self):
+        import importlib
+        import io
+        import site
+        from pixal3d_extension import worldsculpt_lane as lane
+        with tempfile.TemporaryDirectory(prefix='worldsculpt pth \u00e9 spaces \U0001f984 ') as directory:
+            root = Path(directory)
+            primary_site, overlay_site, info = self._fixture(root)
+            link = overlay_site/'primary-pixal3d.pth'
+            link.write_bytes((str(primary_site)+'\n').encode('utf-8'))
+            old_write = Path.write_bytes
+            with patch.object(lane,'_probe',return_value=info), patch.object(lane,'_platform_gate'), \
+                 patch.object(lane,'verify_wheels',return_value=[]), patch.object(lane,'_validate_target',return_value=overlay_site), \
+                 patch.object(lane,'_validate_runtime'), patch.object(Path,'write_bytes',autospec=True,side_effect=old_write) as writes:
+                lane.provision(root)
+                lane.provision(root)
+            wrapper = io.TextIOWrapper
+            def cp1252_reader(*args,**kwargs):
+                if kwargs.get('encoding')=='locale':
+                    kwargs['encoding']='cp1252'
+                return wrapper(*args,**kwargs)
+            shared = '_modly_worldsculpt_pth_shared_probe'
+            primary_only = '_modly_worldsculpt_pth_primary_probe'
+            (overlay_site/(shared+'.py')).write_text("origin='overlay'\n",encoding='ascii')
+            (primary_site/(shared+'.py')).write_text("origin='primary'\n",encoding='ascii')
+            (primary_site/(primary_only+'.py')).write_text("origin='primary'\n",encoding='ascii')
+            try:
+                with patch.object(sys,'path',list(sys.path)), patch.object(site.io,'TextIOWrapper',side_effect=cp1252_reader) as reader:
+                    site.addsitedir(str(overlay_site))
+                    self.assertTrue(any(call.kwargs.get('encoding')=='locale' for call in reader.call_args_list))
+                    self.assertIn(str(primary_site),sys.path)
+                    self.assertLess(sys.path.index(str(overlay_site)),sys.path.index(str(primary_site)))
+                    self.assertEqual(importlib.import_module(shared).origin,'overlay')
+                    self.assertEqual(importlib.import_module(primary_only).origin,'primary')
+            finally:
+                sys.modules.pop(shared,None)
+                sys.modules.pop(primary_only,None)
+            expected=('import sys; sys.path.append('+ascii(str(primary_site))+')\n').encode('ascii')
+            self.assertEqual(link.read_bytes(),expected)
+            self.assertIn(b'\\U0001f984',expected)
+            self.assertNotIn(b'\\ud83e\\udd84',expected)
+            self.assertNotIn(b'\r',expected)
+            self.assertEqual(writes.call_count,1,'Repair rewrites legacy bytes once, then reuses canonical ASCII/LF')
+
+    def test_probe_failure_retains_returncode_stdout_and_stderr(self):
+        import subprocess
+        from pixal3d_extension import worldsculpt_lane as lane
+        stdout='child initialization reached\n'
+        stderr="ModuleNotFoundError: No module named 'torch'\n"
+        def failed(command,**kwargs):
+            if kwargs.get('check'):
+                raise subprocess.CalledProcessError(7,command,output=stdout,stderr=stderr)
+            return subprocess.CompletedProcess(command,7,stdout,stderr)
+        with patch.object(lane.subprocess,'run',side_effect=failed):
+            with self.assertRaisesRegex(RuntimeError,'returncode=7') as raised:
+                lane._probe(Path('/fixture/python.exe'))
+        message=str(raised.exception)
+        self.assertIn(stdout,message)
+        self.assertIn(stderr,message)
+        self.assertNotIn('BLOCKED',message)
+
+    def test_probe_success_keeps_existing_observation(self):
+        import subprocess
+        from pixal3d_extension import worldsculpt_lane as lane
+        info={'machine':'AMD64','python':[3,11],'torch':'2.7.1+cu128','cuda':'12.8'}
+        with patch.object(lane.subprocess,'run',return_value=subprocess.CompletedProcess([],0,json.dumps(info),'warning')):
+            self.assertEqual(lane._probe(Path('/fixture/python.exe')),info)
+
+    def test_foreign_overlay_custody_still_blocks_pth_rewrite(self):
+        from pixal3d_extension import worldsculpt_lane as lane
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            primary_site, overlay_site, info=self._fixture(root)
+            link=overlay_site/'primary-pixal3d.pth'
+            original=(str(primary_site)+'\n').encode('utf-8')
+            link.write_bytes(original)
+            with patch.object(lane,'_probe',return_value=info), patch.object(lane,'_platform_gate'), \
+                 patch.object(lane,'verify_wheels',return_value=[]), \
+                 patch.object(lane,'_validate_target',side_effect=RuntimeError('foreign environment')), \
+                 patch.object(lane,'_validate_runtime') as validation:
+                with self.assertRaisesRegex(RuntimeError,'foreign environment'):
+                    lane.provision(root)
+            self.assertEqual(link.read_bytes(),original)
+            validation.assert_not_called()
+
+    def test_primary_site_escape_still_blocks_pth_rewrite(self):
+        from pixal3d_extension import worldsculpt_lane as lane
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            primary_site, overlay_site, info=self._fixture(root)
+            outside=root/'not-primary'; outside.mkdir()
+            link=overlay_site/'primary-pixal3d.pth'
+            link.write_bytes(b'unchanged legacy content\n')
+            with patch.object(lane,'_probe',return_value={**info,'site':str(outside)}), \
+                 patch.object(lane,'_platform_gate'), patch.object(lane,'verify_wheels') as wheels:
+                with self.assertRaisesRegex(RuntimeError,'escapes Pixal3D venv'):
+                    lane.provision(root)
+            self.assertEqual(link.read_bytes(),b'unchanged legacy content\n')
+            wheels.assert_not_called()
