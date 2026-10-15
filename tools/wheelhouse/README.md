@@ -76,7 +76,7 @@ Windows wheelhouses must follow the exact-stack policy used by Pixal3D-ComfyUI r
 
 RTX 50-series / Blackwell support is tracked separately in `BLACKWELL-SM120.md`. The published CUDA 12.4 Windows wheelhouses are not Blackwell lanes; do not mark RTX 5090 supported until an exact-stack Blackwell wheelhouse is rebuilt, checksum-pinned, and validated on real RTX 50-series hardware.
 
-The experimental Blackwell candidate workflow is `.github/workflows/wheelhouse-windows-x64-cp311-cuda128-blackwell-candidate.yml`. It targets `windows-x64-cp311-cuda128-blackwell`, builds NATTEN against `torch==2.7.1+cu128` with `TORCH_CUDA_ARCH_LIST=12.0`, and packages exact-stack `cu128torch2.7` Windows native wheels. The immutable r3 archive is now selected automatically as an **experimental base-only** asset; full RTX 50-series qualification remains unverified.
+The experimental Blackwell candidate workflow is `.github/workflows/wheelhouse-windows-x64-cp311-cuda128-blackwell-candidate.yml`. It targets `windows-x64-cp311-cuda128-blackwell`, builds NATTEN against `torch==2.7.1+cu128` with `TORCH_CUDA_ARCH_LIST=12.0`, and packages exact-stack `cu128torch2.7` Windows native wheels. The immutable r3 archive is now selected automatically as an **experimental** asset; its bytes remain unchanged. A separately versioned `+modly.blackwell.mv` Python overlay selects NATTEN 0.21.6 without changing stable metadata. See [advanced Windows installation](BLACKWELL-ADVANCED.md); real advanced-node RTX 50-series qualification remains unverified.
 
 Setup normalizes the Modly payload before selection: `cuda_version` 12.8 and
 `gpu_sm` 120 on Windows x64 CPython 3.11 selects the r3 experimental base-only

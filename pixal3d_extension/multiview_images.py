@@ -631,7 +631,7 @@ def _estimate_cameras(
 
 def run_multiview_from_images(
     *, primary_image_bytes: bytes, extra_image_paths: list[str | None], workspace_dir: str | Path,
-    output_dir: str | Path, da3_root: str | Path, mv_root: str | Path, base_root: str | Path,
+    output_dir: str | Path, da3_root: str | Path | None, mv_root: str | Path, base_root: str | Path,
     naf_path: str | Path, params: dict[str, Any], progress_cb: Callable[[int, str], None] | None = None,
     cancel_event: Any | None = None, inference_runner: Callable[..., Any] | None = None,
 ) -> Path:
@@ -643,6 +643,8 @@ def run_multiview_from_images(
     _check_cancel(cancel_event)
     extension_root = Path(__file__).resolve().parent.parent
     if role_provenance is None:
+        if da3_root is None:
+            raise ValueError("Automatic camera calibration requires DA3 Base managed weights")
         validate_da3_weights(Path(da3_root))
         validate_da3_runtime(extension_root)
     _check_cancel(cancel_event)

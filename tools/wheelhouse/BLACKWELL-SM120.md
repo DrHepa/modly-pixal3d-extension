@@ -1,6 +1,6 @@
 # Blackwell / RTX 50-series investigation
 
-This document tracks an experimental investigation for NVIDIA Blackwell GPUs such as the GeForce RTX 5090. It is an **experimental base-only** Pixal3D install lane, not fully qualified hardware support.
+This document tracks an experimental investigation for NVIDIA Blackwell GPUs such as the GeForce RTX 5090. It is an **experimental** Pixal3D install lane, not fully qualified hardware support. The unchanged r3 payload is now paired with separate advanced-node overlays described in [BLACKWELL-ADVANCED.md](BLACKWELL-ADVANCED.md). Older investigation sections below are historical build evidence, not current installation instructions.
 
 ## Current finding
 

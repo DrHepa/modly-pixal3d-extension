@@ -191,7 +191,7 @@ class Pixal3DGenerator(BaseGenerator):
         modly_home = self._modly_home()
         return modly_home / "models/pixal3d/auxiliary/naf/naf_release.pth"
 
-    def _preflight_non_naf_shared_assets(self) -> None:
+    def _preflight_non_naf_shared_assets(self, params: dict | None = None) -> None:
         """Validate every host-managed shared asset before any NAF download."""
 
         node_id = self._effective_node_id()
@@ -231,8 +231,9 @@ class Pixal3DGenerator(BaseGenerator):
 
             try:
                 validate_mv_pipeline_config(self._model_source(), self._base_source())
-                validate_da3_weights(self._da3_source())
-                validate_da3_runtime(Path(__file__).resolve().parent)
+                if params is not None and params.get("view_layout", "auto") != "declared_roles":
+                    validate_da3_weights(self._da3_source())
+                    validate_da3_runtime(Path(__file__).resolve().parent)
             except (OSError, UnicodeError, ValueError, RuntimeError) as exc:
                 raise RuntimeError(
                     "mv_assets_missing: download or repair the Pixal3D base, MV, and DA3 Base shared groups in Modly Models UI: "
@@ -255,11 +256,14 @@ class Pixal3DGenerator(BaseGenerator):
     def _raise_if_generation_cancelled(self, cancel_evt: Any | None) -> None:
         self._check_cancelled(cancel_evt)
 
-    def _prepare_generation_assets(self, cancel_evt: Any | None = None) -> Path:
+    def _prepare_generation_assets(self, cancel_evt: Any | None = None, *, params: dict | None = None) -> Path:
         """Preflight shared assets, then bootstrap only the remaining NAF deficiency."""
 
         self._raise_if_generation_cancelled(cancel_evt)
-        self._preflight_non_naf_shared_assets()
+        if params is None:
+            self._preflight_non_naf_shared_assets()
+        else:
+            self._preflight_non_naf_shared_assets(params)
         self._raise_if_generation_cancelled(cancel_evt)
         checkpoint = self._ensure_naf_checkpoint()
         self._raise_if_generation_cancelled(cancel_evt)
@@ -389,7 +393,7 @@ class Pixal3DGenerator(BaseGenerator):
         ]
         return schema
 
-    def readiness_status(self) -> dict:
+    def readiness_status(self, params: dict | None = None) -> dict:
         if self._effective_node_id() == SCENE_NORMALIZE_NODE:
             return {"ok": True, "machine_code": "ready", "reason": "Annotated-scene normalization requires no model weights."}
         if self._effective_node_id() in SCENE_PREP_NODES:
@@ -433,26 +437,33 @@ class Pixal3DGenerator(BaseGenerator):
             try:
                 model_root = self._model_source()
                 base_root = self._base_source()
-                da3_root = self._da3_source()
             except RuntimeError as exc:
                 return {"ok": False, "machine_code": "mv_shared_groups_unavailable", "reason": str(exc)}
             modly_home = derive_modly_home(model_dir=self.model_dir, workspace_dir=self.workspace_dir)
             naf_path = (modly_home / "models/pixal3d/auxiliary/naf/naf_release.pth") if modly_home else Path("__missing_naf__")
             missing = missing_mv_assets(model_root, base_root, naf_path)
-            support = da3_capability()
-            if not support["supported"]:
-                return {"ok": False, "machine_code": "mv_calibration_unsupported_platform", "reason": support["reason"]}
-            try:
-                validate_da3_weights(da3_root)
-                validate_da3_runtime(Path(__file__).resolve().parent)
-            except (OSError, ValueError, RuntimeError) as exc:
-                missing.append(f"DA3 camera calibration: {exc}")
+            # Host load/readiness has no per-run parameters. It validates the
+            # shared MV core, not an unselected camera estimator. Generation
+            # validates auto calibration independently before any model work.
+            mode = params.get("view_layout", "auto") if params is not None else None
+            if mode not in {None, "auto", "declared_roles"}:
+                return {"ok": False, "machine_code": "mv_invalid_camera_mode", "reason": "view_layout must be auto or declared_roles"}
+            if mode == "auto":
+                support = da3_capability()
+                if not support["supported"]:
+                    return {"ok": False, "machine_code": "mv_calibration_unsupported_platform", "reason": support["reason"]}
+                try:
+                    validate_da3_weights(self._da3_source())
+                    validate_da3_runtime(Path(__file__).resolve().parent)
+                except (OSError, ValueError, RuntimeError) as exc:
+                    missing.append(f"DA3 camera calibration: {exc}")
             runtime_ready = mv_runtime_available()
             return {"ok": not missing and runtime_ready,
                     "machine_code": "mv_assets_missing" if missing else "mv_runtime_missing" if not runtime_ready else "ready",
                     "reason": "Download the Pixal3D MV group and provision NAF before generation." if missing else
                     "An exact-stack Pixal3D MV Python wheel is required; the published wheelhouse is single-view only." if not runtime_ready else
-                    "Multi-image assets, DA3 camera calibration, and Python module found; live GPU inference remains to be validated.",
+                    "MV core assets and Python module found; automatic calibration is checked only when selected. GPU inference remains unqualified.",
+                    "camera_mode": mode or "not-selected", "auto_calibration_requires": ["DA3 Base weights", "validated Scene Prep Python 3.12 runtime"],
                     "missing": missing}
         compatibility_error = self._single_view_compatibility_error()
         if compatibility_error is not None:
@@ -735,8 +746,8 @@ class Pixal3DGenerator(BaseGenerator):
             validate_ordered_images(bytes(image_or_job), extra_image_paths, self.workspace_dir)
             mv_root = self._model_source()
             base_root = self._base_source()
-            da3_root = self._da3_source()
-            naf_path = self._prepare_generation_assets(cancel_evt)
+            da3_root = self._da3_source() if values.get("view_layout", "auto") != "declared_roles" else None
+            naf_path = self._prepare_generation_assets(cancel_evt, params=values)
             output_dir = getattr(self, "outputs_dir", None) or self.workspace_dir / "Workflows"
             return run_multiview_from_images(
                 primary_image_bytes=bytes(image_or_job), extra_image_paths=extra_image_paths,

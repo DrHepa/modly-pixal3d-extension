@@ -17,15 +17,30 @@ Model weights are downloaded through Modly Models; they are not bundled here.
 Normal setup automatically attempts the special scene-preparation and WorldSculpt
 environments on supported hosts. No separate manual setup is needed for a fresh install.
 
-**Windows RTX 5090 (experimental base-only):** normal Install/Reinstall/Repair
-selects the checksum-pinned r3 CPython 3.11 / SM120 / CUDA 12.8 archive automatically.
-No PowerShell script or experimental opt-in manifest is required. Setup checks the
-exact torch 2.7.1+cu128 / torchvision 0.22.1+cu128 / NATTEN 0.21.6 stack, native
-imports, and synchronized tiny Torch/NATTEN CUDA operations (180-second bound).
-`runtime_prepared` is **not** `inference_validated`: real Low VRAM generation,
-GLB/viewer quality, restart and lifecycle qualification remain unverified on RTX 5090.
-MV, scene preparation and WorldSculpt Windows paths are not enabled by this lane.
-Weights still come only from Modly Models.
+**Version 0.7.2 — Windows RTX 5090 / SM120 (experimental):** normal Install/Reinstall/Repair
+keeps the checksum-pinned r3 CPython 3.11 / CUDA 12.8 native archive unchanged.
+It adds a separate MV Python overlay, a private WorldSculpt dependency overlay,
+and extension-owned CPython 3.12 + SAM3/DA3 for scene preparation and automatic
+MV camera calibration. No PowerShell, administrator rights, Developer Mode,
+manual Python installation, model copies, or implicit model downloads are needed.
+The primary stack stays torch 2.7.1+cu128 / torchvision 0.22.1+cu128 / NATTEN 0.21.6.
+The four stable wheelhouse lanes are unchanged.
+
+Scene Prep provisioning checks the real SAM3 builder/tracker and DA3 inference
+imports before its GPU qualification, without constructing models; missing
+dependencies or DLLs fail clearly.
+Portable Python Repair preserves its previous owned runtime until atomic promotion
+and interpreter validation succeed, and rolls back failed promotion.
+Setup retains bounded, synchronized native probes. The separate Scene Prep lane
+also probes Torch SDPA, TorchVision NMS and SAM3 Triton EDT, connected components,
+and NMS before reporting runtime readiness. Package installation is **not** GPU
+qualification. Community feedback confirmed actual RTX 5090 single-image generation on
+12 October (quality tuning pending); it was not independently reproduced in this change. MV, WorldSculpt, scene
+preparation, GLB/viewer quality and lifecycle remain **experimental and not
+GPU-inference-qualified** until real Windows hardware tests pass. A complete
+model inference is not required merely to try the experimental UI nodes.
+Weights still come from Modly Models (the existing verified NAF bootstrap is
+unchanged). SAM3 retains its gated custom licence.
 
 **Upgrading from the older single-node extension?** Existing checkpoints can be
 moved—not copied—into the host's shared group roots. Preserve the auxiliary
@@ -37,7 +52,7 @@ a duplicate set blindly.
 | Node | Input | Output | Required groups |
 | --- | --- | --- | --- |
 | **Image to 3D** | One image | Textured GLB | Base |
-| **Multi-Image to 3D** | 2–4 images | Textured GLB | Base, MV, DA3 |
+| **Multi-Image to 3D** | 2–4 images | Textured GLB | Base, MV, DA3 (host readiness gate) |
 | **Prepare Scene from Images** | 2–8 images | Scene bundle | SAM3, DA3 |
 | **Normalize Annotated Scene** | Existing annotated scene | Scene bundle | None |
 | **WorldSculpt Scene to 3D** | Prepared/normalized scene | Geometry-only GLB | Base, WorldSculpt adapters |
@@ -53,6 +68,11 @@ Use a fixed seed for repeatable comparisons. Higher resolution and texture size
 cost more memory and time.
 
 ### Multiple views → one asset
+
+Declared view roles skip DA3 runtime/calibration, but stock Modly 0.4.3 checks all
+referenced shared groups before loading a node. Therefore DA3 **weights still
+need downloading in Models even for declared roles**. Only automatic cameras
+execute the DA3 runtime; this extension does not invent an optional-weight schema.
 
 Connect 2–4 images of the **same object**, with clear overlap between views.
 Use consecutive connected image slots, starting at Primary view. In stock Modly
@@ -113,9 +133,9 @@ with CUDA 12.4 wheels; available lanes are not blanket hardware qualification.
 - **Current feature evidence:** Linux ARM64 / NVIDIA GB10 runs exercised base,
   MV, scene preparation, and WorldSculpt. Viewport/perceptual validation remains partial.
 - Other feature/platform paths remain **UNTESTED**; no AMD/ROCm inference claim is made.
-- **Scene-preparation lane:** Linux ARM64, CPython 3.12, CUDA ≥12.6.
+- **Scene-preparation lanes:** Linux ARM64, CPython 3.12, CUDA ≥12.6; experimental Windows x64, private CPython 3.12.10, torch 2.7.1+cu128 and Triton Windows 3.3.1.post21.
 - **WorldSculpt lane:** exact Linux ARM64, Python 3.12, PyTorch 2.12.0+cu130,
-  CUDA 13.0 environment, isolated from the primary runtime.
+  CUDA 13.0 environment; experimental Windows x64 inherits the exact primary cp311/cu128 stack through one controlled `.pth`. Its locked dependencies remain isolated from the primary runtime.
 
 Memory needs depend on input, resolution, and reconstruction complexity. Low VRAM
 mode reduces pressure; it is not an OOM guarantee. Maintainer packaging details
@@ -135,10 +155,12 @@ not the installed PyTorch CUDA ABI. Pre-Blackwell GPUs with capability ≥12.4 s
 the published cu124 wheelhouse, including newer drivers reporting 12.8. Setup
 verifies torch `2.6.0+cu124`, torchvision `0.21.0+cu124`, and CUDA runtime `12.4`.
 This selects an installation ABI; it does not qualify GPU kernels or inference.
-Blackwell remains unsupported by the published wheelhouse. Historical invocations
+SM120 selects the experimental cu128 r3 archive and the separate advanced overlays. Historical invocations
 without GPU metadata retain the default cu124 lane.
-For targeted recovery only, run `python3 setup.py --repair-scene-prep --json` or
-`python3 setup.py --repair-worldsculpt --json` from the extension directory.
+Scene Prep runtime errors identify the failed private environment, dependency,
+source-provenance or native probe; use **Repair** and retain the exact error.
+The Windows Python runtime is downloaded from the official checksum-pinned
+CPython NuGet package, including `Python.h` and `python312.lib` for Triton.
 If NAF is corrupt or its automatic download fails, use the exact bootstrap repair
 command shown in the error. Do not replace checkpoints or native wheels blindly.
 

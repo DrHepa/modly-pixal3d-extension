@@ -3026,7 +3026,7 @@ base = {
     'natten_version': '0.21.6',
     'natten_has_libnatten': True,
     'imports': list(policy['required_imports']),
-    'checks': {name: {'status': 'PASS'} for name in ('torch_stack', 'device', 'native_imports', 'natten_lib', 'torch_cuda', 'natten_sm120')},
+    'checks': {name: {'status': 'PASS'} for name in ('torch_stack', 'device', 'native_imports', 'natten_lib', 'torch_cuda', 'torch_sdpa', 'natten_sm120')},
     'upstream_imports': ['cumesh', 'flex_gemm', 'o_voxel'],
 }
 cases = {'valid': base}

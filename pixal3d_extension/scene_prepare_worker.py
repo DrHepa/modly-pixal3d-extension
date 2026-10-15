@@ -207,7 +207,7 @@ def _extract_sam_outputs(outputs: object) -> tuple[np.ndarray, np.ndarray, np.nd
 def _run_sam3(frame_dir: Path, sam_root: Path, labels: tuple[str, ...], threshold: float) -> list[dict]:
     from sam3.model_builder import build_sam3_video_predictor
 
-    predictor = build_sam3_video_predictor(checkpoint_path=str(sam_root / "sam3.pt"), gpus_to_use=[0])
+    predictor = build_sam3_video_predictor(checkpoint_path=str(sam_root / "sam3.pt"), gpus_to_use=[0], compile=False)
     tracked: dict[tuple[str, int], dict] = {}
     try:
         for label in labels:

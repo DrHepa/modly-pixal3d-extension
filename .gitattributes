@@ -1,0 +1,2 @@
+# Preserve the exact upstream license bytes, including original whitespace.
+licenses/CPython-3.12.10-LICENSE.txt -text whitespace=cr-at-eol,-blank-at-eol,-blank-at-eof
