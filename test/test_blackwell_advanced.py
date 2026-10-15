@@ -1,11 +1,15 @@
 """Portable contracts for the experimental advanced Windows lanes (not GPU proof)."""
 import ast
+import hashlib
 import importlib.util
+import io
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from zipfile import ZipFile
 
 from pixal3d_extension import worldsculpt as ws, worldsculpt_lane as lane
 from pixal3d_extension import scene_prepare_lane as scene
@@ -28,6 +32,38 @@ class BlackwellAdvancedTests(unittest.TestCase):
             self.assertTrue(scene.da3_capability()['supported'])
 
     def test_worldsculpt_overlay_never_uses_symlinks_and_constants_compile(self):
+        self._assert_worldsculpt_overlay()
+
+    def test_worldsculpt_clean_distribution_preserves_every_pinned_blob_and_overlay(self):
+        expected = {'worldsculpt_upstream/' + name: digest for digest, name in (
+            line.split(None, 1) for line in (ws.SOURCE / 'EXPECTED_GIT_BLOBS').read_text().splitlines())}
+        self.assertEqual(len(expected), 118)
+        if (ROOT / '.git').exists():
+            files = subprocess.check_output(['git', 'ls-files', '-z', '--', 'worldsculpt_upstream'], cwd=ROOT).decode().split('\0')
+            files = [name for name in files if name]
+        else:
+            # A GitHub/CI export has no Git metadata; validate its shipped bytes.
+            files = [path.relative_to(ROOT).as_posix() for path in ws.SOURCE.rglob('*')
+                     if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc']
+        self.assertFalse(set(expected) - set(files), 'Pinned source missing from the published inventory')
+        payload = io.BytesIO()
+        with ZipFile(payload, 'w') as archive:
+            for name in sorted(files):
+                self.assertFalse((ROOT / name).is_symlink())
+                archive.write(ROOT / name, name)
+        with tempfile.TemporaryDirectory(prefix='tracked WorldSculpt é ') as directory, ZipFile(payload) as archive:
+            projection = Path(directory).resolve()
+            for name, digest in expected.items():
+                data = archive.read(name)
+                self.assertEqual(hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest(), digest, name)
+            archive.extractall(projection)
+            with patch.object(ws, 'SOURCE', projection / 'worldsculpt_upstream'), patch.object(ws.sys, 'platform', 'win32'):
+                self._assert_worldsculpt_overlay()
+        ignore = (ROOT / '.gitignore').read_text().splitlines()
+        self.assertIn('/models/', ignore)
+        self.assertNotIn('models/', ignore)
+
+    def _assert_worldsculpt_overlay(self):
         with tempfile.TemporaryDirectory(prefix='advanced unicode é ') as directory:
             root = Path(directory).resolve()
             base = root / 'managed base'

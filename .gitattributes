@@ -1,2 +1,13 @@
 # Preserve the exact upstream license bytes, including original whitespace.
 licenses/CPython-3.12.10-LICENSE.txt -text whitespace=cr-at-eol,-blank-at-eol,-blank-at-eof
+
+# Preserve immutable upstream source bytes across Windows and Linux checkouts.
+worldsculpt_upstream/** -text
+# These exact pinned files retain upstream whitespace; do not normalize them.
+worldsculpt_upstream/pixal3d/models/__init__.py whitespace=-blank-at-eol,-blank-at-eof
+worldsculpt_upstream/pixal3d/models/sc_vaes/fdg_vae.py whitespace=-blank-at-eol,-blank-at-eof
+worldsculpt_upstream/pixal3d/models/sc_vaes/sparse_unet_vae.py whitespace=-blank-at-eol,-blank-at-eof
+worldsculpt_upstream/pixal3d/models/sparse_elastic_mixin.py whitespace=-blank-at-eol,-blank-at-eof
+worldsculpt_upstream/pixal3d/models/sparse_structure_flow.py whitespace=-blank-at-eol,-blank-at-eof
+worldsculpt_upstream/pixal3d/models/sparse_structure_vae.py whitespace=-blank-at-eol,-blank-at-eof
+worldsculpt_upstream/pixal3d/models/structured_latent_flow.py whitespace=-blank-at-eol,-blank-at-eof
