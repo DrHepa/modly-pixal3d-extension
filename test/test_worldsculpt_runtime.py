@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,7 +16,7 @@ from pixal3d_extension import naf_checkpoint, worldsculpt as ws
 class WorldSculptRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
 
     def tearDown(self):
         self.temp.cleanup()
@@ -112,6 +113,27 @@ class WorldSculptRuntimeTests(unittest.TestCase):
         self.assertIn(ws._DINO, (ws.SOURCE / "inference.py").read_text())
 
     def test_stages_use_real_entrypoints_and_validate_boundaries(self):
+        self._assert_staged_orchestration()
+
+    def test_stages_canonicalize_owned_aliased_temp_before_artifact_validation(self):
+        owned = self.root / "owned TEMP é spaces"
+        owned.mkdir()
+        temporary_directory = tempfile.TemporaryDirectory
+
+        @contextmanager
+        def aliased_temp(*args, **kwargs):
+            with temporary_directory(*args, **kwargs, dir=owned) as directory:
+                actual = Path(directory)
+                aliased = actual / ".." / actual.name
+                self.assertNotEqual(aliased, actual)
+                self.assertEqual(aliased.resolve(strict=True), actual)
+                yield str(aliased)
+
+        with patch.object(ws.tempfile, "TemporaryDirectory", aliased_temp):
+            self._assert_staged_orchestration()
+        self.assertEqual(list(owned.iterdir()), [])
+
+    def _assert_staged_orchestration(self):
         scene = self.root / "scene"
         scene.mkdir()
         adapters = self.root / "adapters"
@@ -357,7 +379,7 @@ if __name__ == "__main__":
 class WorldSculptLocalizationTests(unittest.TestCase):
     def test_adapter_config_localized_in_private_copy(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             original = root / "source.json"
             original.write_text(json.dumps({"models": {"image_cond": {"args": {"model_name": ws._DINO}}}}))
             private = root / "private.json"
@@ -368,7 +390,7 @@ class WorldSculptLocalizationTests(unittest.TestCase):
 
     def test_adapter_config_rejects_unknown_remote_model(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             original = root / "source.json"
             original.write_text(json.dumps({"model_name": "owner/other-model"}))
             with self.assertRaisesRegex(ValueError, "unlocalized"):
@@ -397,7 +419,7 @@ class WorldSculptPthTests(unittest.TestCase):
         import site
         from pixal3d_extension import worldsculpt_lane as lane
         with tempfile.TemporaryDirectory(prefix='worldsculpt pth \u00e9 spaces \U0001f984 ') as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             primary_site, overlay_site, info = self._fixture(root)
             link = overlay_site/'primary-pixal3d.pth'
             link.write_bytes((str(primary_site)+'\n').encode('utf-8'))
@@ -462,7 +484,7 @@ class WorldSculptPthTests(unittest.TestCase):
     def test_foreign_overlay_custody_still_blocks_pth_rewrite(self):
         from pixal3d_extension import worldsculpt_lane as lane
         with tempfile.TemporaryDirectory() as directory:
-            root=Path(directory)
+            root=Path(directory).resolve()
             primary_site, overlay_site, info=self._fixture(root)
             link=overlay_site/'primary-pixal3d.pth'
             original=(str(primary_site)+'\n').encode('utf-8')
@@ -479,7 +501,7 @@ class WorldSculptPthTests(unittest.TestCase):
     def test_primary_site_escape_still_blocks_pth_rewrite(self):
         from pixal3d_extension import worldsculpt_lane as lane
         with tempfile.TemporaryDirectory() as directory:
-            root=Path(directory)
+            root=Path(directory).resolve()
             primary_site, overlay_site, info=self._fixture(root)
             outside=root/'not-primary'; outside.mkdir()
             link=overlay_site/'primary-pixal3d.pth'

@@ -29,7 +29,7 @@ class BlackwellAdvancedTests(unittest.TestCase):
 
     def test_worldsculpt_overlay_never_uses_symlinks_and_constants_compile(self):
         with tempfile.TemporaryDirectory(prefix='advanced unicode é ') as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             base = root / 'managed base'
             base.mkdir()
             (base / 'pipeline.json').write_text(json.dumps({'name':'Pixal3DImageTo3DPipeline', 'args': {'models': {'ss': 'ckpts/' + ws._BASE_MODELS[0]}}}))

@@ -12,7 +12,7 @@ from pixal3d_extension import windows_scene_runtime as runtime
 class WindowsSceneRuntimeCustodyTests(unittest.TestCase):
     def test_local_artifact_is_used_only_with_exact_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             wheel = root / 'wheels/scene-prep/fixture.whl'
             wheel.parent.mkdir(parents=True)
             wheel.write_bytes(b'locked fixture')
@@ -24,7 +24,7 @@ class WindowsSceneRuntimeCustodyTests(unittest.TestCase):
 
     def test_artifact_rejects_parent_symlinks_without_following_them(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             outside = root / 'outside'; outside.mkdir()
             (root / 'wheels').symlink_to(outside, target_is_directory=True)
             with self.assertRaisesRegex(RuntimeError, 'symlinks or reparse'):
@@ -33,7 +33,7 @@ class WindowsSceneRuntimeCustodyTests(unittest.TestCase):
 
     def test_portable_python_rejects_archive_traversal_before_execution(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             archive = root / 'fixture.nupkg'
             with zipfile.ZipFile(archive, 'w') as package:
                 package.writestr('../escape', 'unsafe')
@@ -46,7 +46,7 @@ class WindowsSceneRuntimeCustodyTests(unittest.TestCase):
 
     def test_runtime_repair_restores_only_owned_directory_and_members(self):
         with tempfile.TemporaryDirectory(prefix='runtime unicode é ') as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             archive = root / 'fixture.nupkg'
             files = {'python.exe': b'fixture runtime', 'include/Python.h':b'header', 'libs/python312.lib':b'lib'}
             with zipfile.ZipFile(archive, 'w') as package:

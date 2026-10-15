@@ -17,7 +17,7 @@ from pixal3d_extension import worldsculpt as ws, windows_scene_runtime as runtim
 class BlackwellReviewRegressions(unittest.TestCase):
     def test_actual_windows_crop_helper_materializes_frames_masks_and_directories_without_symlinks(self):
         with tempfile.TemporaryDirectory(prefix='crop unicode é ') as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             base = root/'managed weights'; base.mkdir()
             weight = base/'do-not-copy.safetensors'; weight.write_bytes(b'original weights')
             (base/'pipeline.json').write_text(json.dumps({'name':'Pixal3DImageTo3DPipeline','args':{'models':{}}}))
@@ -52,7 +52,7 @@ class BlackwellReviewRegressions(unittest.TestCase):
     def test_failed_runtime_promotion_rolls_back_old_interpreter_without_touching_models(self):
         for lock_existing in (False,True):
             with self.subTest(lock_existing=lock_existing), tempfile.TemporaryDirectory() as directory:
-                root = Path(directory)
+                root = Path(directory).resolve()
                 archive = root/'fixture.nupkg'
                 files = {'python.exe':b'original interpreter','include/Python.h':b'header','libs/python312.lib':b'lib'}
                 with zipfile.ZipFile(archive,'w') as package:
@@ -66,12 +66,15 @@ class BlackwellReviewRegressions(unittest.TestCase):
                     (owned/'include/Python.h').write_bytes(b'needs repair')
                     before = {p.relative_to(owned).as_posix():p.read_bytes() for p in owned.rglob('*') if p.is_file()}
                     original_replace = Path.replace
+                    blocked_promotions = []
                     def replace(path,destination):
                         if (lock_existing and path==owned) or (not lock_existing and Path(destination)==owned and path.name.startswith('.python-scene-prep-')):
+                            blocked_promotions.append((path,Path(destination)))
                             raise PermissionError('injected Windows runtime promotion lock')
                         return original_replace(path,destination)
                     with patch.object(Path,'replace',replace), self.assertRaises((PermissionError,RuntimeError)):
                         runtime.ensure_python(root)
+                    self.assertEqual(len(blocked_promotions),1,'The intended runtime promotion fault must fire')
                 self.assertTrue((owned/'python.exe').is_file())
                 self.assertEqual({p.relative_to(owned).as_posix():p.read_bytes() for p in owned.rglob('*') if p.is_file()},before)
                 self.assertEqual(sentinel.read_bytes(),b'untouched')

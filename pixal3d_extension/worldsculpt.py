@@ -494,7 +494,7 @@ def run_worldsculpt(*, scene_dir: Path, adapter_root: Path, base_root: Path,
     adapters = Path(adapter_root).resolve(strict=True)
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="modly-worldsculpt-") as temporary:
-        case = prepare_case_root(Path(temporary) / "case")
+        case = prepare_case_root(Path(temporary).resolve(strict=True) / "case")
         overlay = _private_overlay(case, base)
         env = os.environ.copy()
         env.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", HF_DATASETS_OFFLINE="1",
