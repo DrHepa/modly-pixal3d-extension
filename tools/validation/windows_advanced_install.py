@@ -44,9 +44,9 @@ def main() -> None:
     evidence = args.evidence.resolve(); evidence.mkdir(parents=True, exist_ok=True)
     summary = {'full_setup':'NOT_RUN', 'primary_native':'NOT_RUN', 'scene_prep_native':'NOT_RUN',
                'package_installation':'NOT_RUN', 'repair':'NOT_RUN', 'weights':'NOT_DOWNLOADED', 'inference':'NOT_RUN'}
-    def run(command, cwd, label, *, check=True):
+    def run(command, cwd, label, *, check=True, environment=None):
         completed = subprocess.run(list(map(str, command)), cwd=cwd, text=True, capture_output=True,
-                                   timeout=3600, env={**os.environ, 'PYTHONUTF8':'1', 'PIP_NO_CACHE_DIR':'1'})
+                                   timeout=3600, env={**os.environ, 'PYTHONUTF8':'1', 'PIP_NO_CACHE_DIR':'1', **(environment or {})})
         (evidence / (label+'.json')).write_text(json.dumps({'args':list(map(str, command)), 'returncode':completed.returncode,
                                                           'stdout':completed.stdout, 'stderr':completed.stderr}, indent=2), encoding='utf-8')
         if check and completed.returncode:
@@ -133,19 +133,56 @@ def main() -> None:
         scene_code = "import json; from pixal3d_extension.windows_scene_runtime import provision; print(json.dumps(provision(__import__('pathlib').Path.cwd())))"
         run([primary,'-c',scene_code], extension, 'scene-prep-provision')
         scene_site = extension/'venv-scene-prep/Lib/site-packages'
+        compiler = scene_site/lock['ptxas']['member']
+        assert compiler.stat().st_size == lock['ptxas']['size']
+        assert hashlib.sha256(compiler.read_bytes()).hexdigest() == lock['ptxas']['sha256']
+        run([compiler,'--version'], extension, 'scene-prep-bundled-ptxas-version')
+        # No GPU is needed to execute the real bundled assembler or to exercise
+        # Triton's exact compiler-selection/version-parser boundary. The poison
+        # is deliberately not executable: selecting it must fail this evidence.
+        poison = extension/'.ci-external-cuda-13.4/ptxas.exe'
+        poison.parent.mkdir(); poison.write_bytes(b'External CUDA 13.4 must never execute')
+        poison_env = {'TRITON_PTXAS_PATH': str(poison)}
+        compiler_code = '''import json,os,subprocess,sys
+from pathlib import Path
+from pixal3d_extension.windows_scene_runtime import managed_ptxas_environment
+root=Path.cwd()
+parent=dict(os.environ)
+env=managed_ptxas_environment(root,parent)
+assert dict(os.environ)==parent, 'Managed policy changed parent environment'
+code="import json,os; from triton.backends.nvidia.compiler import get_ptxas,ptx_get_version; path,release=get_ptxas(120); print(json.dumps({'path':path,'release':release,'ptx_version':ptx_get_version(release),'override':os.environ['TRITON_PTXAS_PATH']}))"
+result=subprocess.run([sys.executable,'-c',code],env=env,capture_output=True,text=True,check=True,timeout=60)
+receipt=json.loads(result.stdout.strip().splitlines()[-1])
+assert receipt['path']==env['TRITON_PTXAS_PATH']==receipt['override']
+assert receipt['release']=='12.8'
+print(json.dumps(receipt,sort_keys=True))
+'''
+        compiler_probe = run([extension/'venv-scene-prep/Scripts/python.exe','-c',compiler_code], extension,
+                             'scene-prep-managed-ptxas-poison', environment=poison_env)
+        compiler_receipt = json.loads(compiler_probe.stdout.strip().splitlines()[-1])
+        assert Path(compiler_receipt['path']) == compiler
+        summary['scene_prep_ptxas'] = {**lock['ptxas'], **compiler_receipt, 'poison_ignored': True, 'status': 'PASS'}
+        # A genuine private-wheel Repair must restore a corrupt compiler without
+        # consulting the poisoned inherited override or modifying primary bytes.
+        compiler.write_bytes(b'tampered private compiler')
+        run([primary,'-c',scene_code], extension, 'scene-prep-ptxas-repair', environment=poison_env)
+        assert hashlib.sha256(compiler.read_bytes()).hexdigest() == lock['ptxas']['sha256']
+        compiler.unlink()
+        run([primary,'-c',scene_code], extension, 'scene-prep-missing-ptxas-repair', environment=poison_env)
+        assert hashlib.sha256(compiler.read_bytes()).hexdigest() == lock['ptxas']['sha256']
         scene_original = (scene_site/'sam3/__init__.py').read_bytes()
         (scene_site/'sam3/__init__.py').write_bytes(b'tampered')
         (scene_site/'depth_anything_3/api.py').unlink()
         run([primary,'-c',scene_code], extension, 'scene-prep-source-repair')
         assert (scene_site/'sam3/__init__.py').read_bytes() == scene_original
         run([primary,'-c',scene_code], extension, 'scene-prep-idempotent-repair')
-        source_imports = run([primary,'-c',"import json; from pathlib import Path; from pixal3d_extension.windows_scene_runtime import validate_source_imports; print(json.dumps(validate_source_imports(Path.cwd(),allow_no_driver=True)))"], extension, 'scene-prep-source-imports')
+        source_imports = run([primary,'-c',"import json; from pathlib import Path; from pixal3d_extension.windows_scene_runtime import validate_source_imports; print(json.dumps(validate_source_imports(Path.cwd(),allow_no_driver=True)))"], extension, 'scene-prep-source-imports', environment=poison_env)
         source_receipt = json.loads(source_imports.stdout.strip().splitlines()[-1])
         assert source_receipt['status'] in {'PASS','BLOCKED'} and source_receipt['runtime_prepared'] is False
         summary['scene_prep_source_imports'] = source_receipt['status']
         summary['scene_prep_source_import_checks'] = source_receipt['checks']
         summary['scene_prep_gpu_kernels'] = 'NOT_RUN'
-        blocked = run([primary,'-c',"from pixal3d_extension.scene_prepare_lane import repair; repair()"], extension, 'scene-prep-production-gpu-gate', check=False)
+        blocked = run([primary,'-c',"from pixal3d_extension.scene_prepare_lane import repair; repair()"], extension, 'scene-prep-production-gpu-gate', check=False, environment=poison_env)
         expected_block = HOSTED_GPU_BLOCK if source_receipt['status']=='PASS' else 'Scene Prep source imports BLOCKED:'
         assert blocked.returncode != 0 and expected_block in blocked.stderr, blocked.stderr
         assert not any(value in blocked.stderr for value in ('DLL load failed','ModuleNotFoundError','ImportError','TimeoutExpired')), blocked.stderr
@@ -157,7 +194,7 @@ def main() -> None:
         assert (extension/'python-scene-prep312/libs/python312.lib').is_file()
         assert [p.relative_to(extension/'models').as_posix() for p in (extension/'models').rglob('*') if p.is_file()] == ['pixal3d/readiness.json']
         assert not any(p.is_file() for cache in ('hf-cache','torch-cache') for p in (extension/cache).rglob('*'))
-        for pattern in ('test_blackwell_advanced.py', 'test_blackwell_review_regressions.py', 'test_windows_scene_runtime.py', 'test_windows_advanced_artifacts.py',
+        for pattern in ('test_blackwell_advanced.py', 'test_blackwell_review_regressions.py', 'test_windows_scene_runtime.py', 'test_windows_scene_ptxas.py', 'test_windows_advanced_artifacts.py',
                         'test_worldsculpt_runtime.py', 'test_scene_prepare_runtime.py'):
             run([primary,'-m','unittest','discover','-s','test','-p',pattern], extension, pattern.removesuffix('.py'))
         summary.update(package_installation='PASS', repair='PASS', scene_prep_native='BLOCKED', hardware='NOT_QUALIFIED')

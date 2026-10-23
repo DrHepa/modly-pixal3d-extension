@@ -6,6 +6,7 @@ import json
 import os
 import queue
 import subprocess
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -64,6 +65,10 @@ def offline_environment(cache_root: Path, package_root: Path | None = None) -> d
     if package_root is not None:
         existing = env.get("PYTHONPATH")
         env["PYTHONPATH"] = str(Path(package_root).resolve()) + (os.pathsep + existing if existing else "")
+    if sys.platform == "win32":
+        from .windows_scene_runtime import managed_ptxas_environment
+        root = Path(package_root) if package_root is not None else Path(__file__).resolve().parents[1]
+        env = managed_ptxas_environment(root, env)
     return env
 
 

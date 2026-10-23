@@ -8,9 +8,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import urllib.request
 import zipfile
@@ -21,6 +23,7 @@ from pathlib import Path, PurePosixPath
 LOCK_NAME = "scene-prep-windows.lock.json"
 RUNTIME_NAME = "python-scene-prep312"
 EXPECTED = {"python": [3, 12], "torch": "2.7.1+cu128", "torchvision": "0.22.1+cu128", "cuda": "12.8", "triton-windows": "3.3.1.post21"}
+PTXAS_MEMBER = "triton/backends/nvidia/bin/ptxas.exe"
 
 
 def _reject_alias(path: Path) -> None:
@@ -194,9 +197,47 @@ def ensure_python(root: Path) -> Path:
     return _probe_python(root, item)
 
 
-def _run(command: list[str], root: Path, *, timeout: int = 900) -> subprocess.CompletedProcess:
+def managed_ptxas_environment(root: Path, environment: dict[str, str]) -> dict[str, str]:
+    """Pin owned Windows children to the verified compiler from the locked wheel.
+
+    Never fall back to an inherited override or system CUDA toolkit. Bootstrap
+    venv/pip commands deliberately do not use this post-install policy.
+    """
+    repair = "use Modly extension Repair to reinstall the locked private triton-windows wheel"
+    try:
+        _reject_alias(root)
+        root = root.resolve(strict=True)
+        item = load_lock(root)["ptxas"]
+        if item["member"] != PTXAS_MEMBER:
+            raise RuntimeError("locked member is not the canonical bundled compiler")
+        site = root / "venv-scene-prep/Lib/site-packages"
+        compiler = site / PTXAS_MEMBER
+        _reject_alias(compiler)
+        metadata = compiler.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or not compiler.resolve(strict=True).is_relative_to(site.resolve(strict=True)):
+            raise RuntimeError("compiler is not a confined regular file")
+        if metadata.st_size != item["size"] or _sha(compiler) != item["sha256"]:
+            raise RuntimeError("bundled compiler size/checksum mismatch")
+        env = {key: value for key, value in environment.items() if key.upper() != "TRITON_PTXAS_PATH"}
+        env["TRITON_PTXAS_PATH"] = str(compiler)
+        result = subprocess.run([str(compiler), "--version"], cwd=root, env=env, capture_output=True,
+                                text=True, check=True, timeout=30)
+        version = re.search(r"\brelease\s+(\d+\.\d+),\s+V(\d+\.\d+\.\d+)\b", result.stdout + result.stderr)
+        if result.returncode or version is None or version.groups() != (item["release"], item["version"]):
+            raise RuntimeError("bundled compiler release/version mismatch")
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"Windows Scene Prep bundled PTXAS invalid: {exc}; {repair}") from exc
+    identity = {"path": str(compiler), "sha256": item["sha256"], "size": metadata.st_size,
+                "release": version.group(1), "version": version.group(2)}
+    print("Windows Scene Prep managed PTXAS: " + json.dumps(identity, sort_keys=True), file=sys.stderr, flush=True)
+    return env
+
+
+def _run(command: list[str], root: Path, *, timeout: int = 900, managed_compiler: bool = False) -> subprocess.CompletedProcess:
     env = {**os.environ, "PYTHONNOUSERSITE": "1", "PYTHONUTF8": "1"}
     env.pop("PYTHONPATH", None); env.pop("PYTHONHOME", None); env.pop("PYTHONOPTIMIZE", None)
+    if managed_compiler:
+        env = managed_ptxas_environment(root, env)
     result = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True, timeout=timeout)
     if result.returncode:
         raise RuntimeError("Windows Scene Prep provisioning failed: " + result.stdout[-2000:] + result.stderr[-2000:])
@@ -231,7 +272,7 @@ for path in sys.argv[1:]:
   result[fields['Name']]={'release_wheel':True,'wheel_sha256':hashlib.sha256(Path(path).read_bytes()).hexdigest(),'provenance':provenance}
 print(json.dumps(result,sort_keys=True))
 '''
-    result = _run([str(python), "-c", code, *map(str, wheels)], root)
+    result = _run([str(python), "-c", code, *map(str, wheels)], root, managed_compiler=True)
     metadata = json.loads(result.stdout)
     from .scene_prepare_lane import SOURCE_DISTRIBUTIONS, _normalize_repository_url
     if set(metadata) != set(SOURCE_DISTRIBUTIONS):
@@ -290,7 +331,7 @@ def validate_source_imports(root: Path, *, allow_no_driver: bool = False) -> dic
     """Missing dependencies/DLLs fail; only an exact no-driver error may be blocked."""
     python = root / "venv-scene-prep/Scripts/python.exe"
     try:
-        completed = _run([str(python), "-c", source_import_probe_code()], root, timeout=180)
+        completed = _run([str(python), "-c", source_import_probe_code()], root, timeout=180, managed_compiler=True)
         output = completed.stdout
     except subprocess.TimeoutExpired as exc:
         output = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout or ""
@@ -351,7 +392,7 @@ def validate(root: Path, *, require_gpu: bool = True) -> dict:
         raise RuntimeError("Windows Scene Prep runtime/interpreter custody mismatch; run Repair: " + json.dumps(custody))
     python = root / "venv-scene-prep/Scripts/python.exe"
     sources = source_metadata(root)
-    observed = json.loads(_run([str(python), "-c", probe_code(require_gpu=False)], root, timeout=180).stdout.strip().splitlines()[-1])
+    observed = json.loads(_run([str(python), "-c", probe_code(require_gpu=False)], root, timeout=180, managed_compiler=True).stdout.strip().splitlines()[-1])
     torch_file = Path(observed.get("torch_file", "")).resolve()
     site = root / "venv-scene-prep/Lib/site-packages"
     if not torch_file.is_relative_to(site.resolve()):
@@ -360,13 +401,13 @@ def validate(root: Path, *, require_gpu: bool = True) -> dict:
         raise RuntimeError("Windows Scene Prep Python/torch/CUDA/Triton stack drift")
     pins = {item["name"]: item["version"] for item in lock["dependencies"]}
     versions_code = "import importlib.metadata as md,json; print(json.dumps({name:md.version(name) for name in " + repr(list(pins)) + "}))"
-    installed = json.loads(_run([str(python), "-c", versions_code], root).stdout)
+    installed = json.loads(_run([str(python), "-c", versions_code], root, managed_compiler=True).stdout)
     if installed != pins:
         raise RuntimeError("Windows Scene Prep locked dependency versions drifted")
-    _run([str(python), "-m", "pip", "check"], root)
+    _run([str(python), "-m", "pip", "check"], root, managed_compiler=True)
     imports = validate_source_imports(root, allow_no_driver=not require_gpu)
     if require_gpu:
-        observed = json.loads(_run([str(python), "-c", probe_code(require_gpu=True)], root, timeout=180).stdout.strip().splitlines()[-1])
+        observed = json.loads(_run([str(python), "-c", probe_code(require_gpu=True)], root, timeout=180, managed_compiler=True).stdout.strip().splitlines()[-1])
     return {"status": "ready" if require_gpu else "installed-not-gpu-qualified", "sources": sources,
             "source_imports": imports, **observed}
 
@@ -398,6 +439,9 @@ def provision(root: Path) -> dict:
         ready = None
     was_installed = ready is not None
     if ready is None:
+        # Repair may replace missing/corrupt private bytes, never write through
+        # a compiler-directory alias into an unrelated CUDA installation.
+        _reject_alias(target / "Lib/site-packages" / PTXAS_MEMBER)
         # Each wheel is obtained and checked before pip sees it; dependency resolution
         # cannot silently replace either primary stack or the locked private stack.
         wheels = [artifact(root, item) for item in lock["dependencies"]] + source_wheels(root)

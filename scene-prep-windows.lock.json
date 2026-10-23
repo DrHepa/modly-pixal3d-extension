@@ -806,6 +806,13 @@
       9
     ]
   },
+  "ptxas": {
+    "member": "triton/backends/nvidia/bin/ptxas.exe",
+    "release": "12.8",
+    "sha256": "882bdaf6121883e4363726dc8706902459300f336296214e4c3759ac73cb6fa0",
+    "size": 24732160,
+    "version": "12.8.61"
+  },
   "python_runtime": {
     "archive_prefix": "tools",
     "file": "python.3.12.10.nupkg",

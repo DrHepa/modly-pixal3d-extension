@@ -17,7 +17,7 @@ Model weights are downloaded through Modly Models; they are not bundled here.
 Normal setup automatically attempts the special scene-preparation and WorldSculpt
 environments on supported hosts. No separate manual setup is needed for a fresh install.
 
-**Version 0.7.2 — Windows RTX 5090 / SM120 (experimental):** normal Install/Reinstall/Repair
+**Version 0.7.3 — Windows RTX 5090 / SM120 (experimental):** normal Install/Reinstall/Repair
 keeps the checksum-pinned r3 CPython 3.11 / CUDA 12.8 native archive unchanged.
 It adds a separate MV Python overlay, a private WorldSculpt dependency overlay,
 and extension-owned CPython 3.12 + SAM3/DA3 for scene preparation and automatic
@@ -159,6 +159,13 @@ SM120 selects the experimental cu128 r3 archive and the separate advanced overla
 without GPU metadata retain the default cu124 lane.
 Scene Prep runtime errors identify the failed private environment, dependency,
 source-provenance or native probe; use **Repair** and retain the exact error.
+For the misleading Triton error `CUDA 10.0 or higher, but got CUDA version: 13.4`,
+update the extension and use **Repair**. Windows Scene Prep probes and workers now
+select only the checksum/version-verified PTXAS 12.8.61 bundled in their locked
+private Triton wheel, ignoring inherited `TRITON_PTXAS_PATH` for these children.
+The selected path, SHA256 and version are logged. Missing/corrupt bundled bytes
+trigger private-wheel Repair, never a system CUDA fallback; global CUDA settings,
+the primary stack and model weights are unchanged. This does not bypass GPU qualification.
 The Windows Python runtime is downloaded from the official checksum-pinned
 CPython NuGet package, including `Python.h` and `python312.lib` for Triton.
 If NAF is corrupt or its automatic download fails, use the exact bootstrap repair

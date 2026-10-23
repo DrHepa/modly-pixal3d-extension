@@ -49,7 +49,8 @@ class ScenePrepareRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(FileNotFoundError, "Models UI"):
             validate_scene_prepare_weights(self.sam, self.da3)
 
-    def test_worker_uses_only_isolated_lane_and_offline_hf_environment(self):
+    @patch("pixal3d_extension.windows_scene_runtime.managed_ptxas_environment", side_effect=lambda root, env: dict(env))
+    def test_worker_uses_only_isolated_lane_and_offline_hf_environment(self, _managed_compiler):
         for platform_name, interpreter in (("linux", "bin/python"), ("win32", "Scripts/python.exe")):
             with self.subTest(platform=platform_name), patch("pixal3d_extension.scene_prepare_lane.sys.platform", platform_name):
                 command = worker_command(self.root, self.root / "job.json")
@@ -62,7 +63,8 @@ class ScenePrepareRuntimeTests(unittest.TestCase):
         self.assertEqual(env["PYTHONPATH"].split(os.pathsep)[0], str(self.root.resolve()))
         self.assertNotIn("HF_TOKEN", env)
 
-    def test_worker_module_launches_from_explicit_extension_root(self):
+    @patch("pixal3d_extension.windows_scene_runtime.managed_ptxas_environment", side_effect=lambda root, env: dict(env))
+    def test_worker_module_launches_from_explicit_extension_root(self, _managed_compiler):
         venv.EnvBuilder(with_pip=False, symlinks=False).create(self.root / "venv-scene-prep")
         package = self.root / "pixal3d_extension"
         package.mkdir()
