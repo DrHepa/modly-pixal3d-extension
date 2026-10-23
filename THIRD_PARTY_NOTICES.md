@@ -49,3 +49,29 @@ datasets retain their own terms.
 Warm thanks to [jtydhr88/ComfyUI-WorldSculpt](https://github.com/jtydhr88/ComfyUI-WorldSculpt)
 for the SAM3 + DA3 scene-preparation idea and workflow that inspired this Modly
 integration. Official upstream code and model licenses remain as listed above.
+
+## Experimental Windows advanced runtime distributions
+
+- CPython 3.12.10 is automatically provisioned from the official Python NuGet
+  package, SHA256 `0eb85c2dfccccf1b17352de4c397f69194035b7d37149eacc16f1147d93de3b8`.
+  It retains Python Software Foundation and historical/component licences;
+  the package's exact licence is also preserved at
+  `licenses/CPython-3.12.10-LICENSE.txt`. This is runtime code, not model weights.
+- The separate downstream SAM3 and DA3 `+modly.inference.1` wheels preserve all
+  packaged upstream runtime bytes and upstream licences. Their distribution
+  metadata describes only the extension's ordered-image inference path, not
+  training, demo apps, direct video decoders or DA3 export extras. Their
+  `.dist-info/provenance.json` records exact commits and source-file hashes;
+  it is not presented as a VCS installation record.
+- ANTLR4 Python runtime 4.9.3 retains its BSD-3-Clause terms. The upstream PyPI
+  source distribution omits the licence file referenced by its runtime headers;
+  the exact official `antlr/antlr4` tag `4.9.3` licence is therefore included at
+  `licenses/ANTLR4-4.9.3-LICENSE.txt` alongside the faithfully built wheel.
+- Windows runtime dependencies retain their own packaged licences. The immutable
+  Windows lock records genuine wheel/source hashes. No inclusion changes the
+  gated SAM3 checkpoint's custom terms or redistributes model weights.
+- Triton Windows 3.3.1.post21, including its compiler binaries, is **not vendored
+  or rehosted** by this extension. Setup obtains the genuine checksum-pinned
+  upstream PyPI wheel directly. The wheel's compiler licence/notice completeness
+  has not been established here; no compiler redistribution clearance is claimed.
+  See the [upstream project](https://github.com/woct0rdho/triton-windows).

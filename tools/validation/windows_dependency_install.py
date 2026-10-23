@@ -29,7 +29,7 @@ def classify_probe(probe, blackwell=False):
         assert not probe.get("timed_out"), probe
         assert ("Found no NVIDIA driver" in probe.get("error", "") or
                 (probe.get("checks", {}).get("device", {}).get("status") == "FAIL" and
-                 "hardware checks BLOCKED" in probe.get("error", ""))), probe
+                 probe.get("error", "") == "RuntimeError: CUDA GPU/driver unavailable; hardware checks BLOCKED")), probe
         assert probe.get("checks", {}).get("natten_sm120", {}).get("status") == "NOT_RUN", probe
         return "BLOCKED"
 
@@ -52,7 +52,7 @@ def main():
     parser.add_argument("--lane", choices=("cuda124", "blackwell"), default="cuda124")
     args = parser.parse_args()
     blackwell = args.lane == "blackwell"
-    expected = {**EXPECTED, **({"torch": "2.7.1+cu128", "torchvision": "0.22.1+cu128", "natten": "0.21.6"} if blackwell else {})}
+    expected = {**EXPECTED, **({"torch": "2.7.1+cu128", "torchvision": "0.22.1+cu128", "natten": "0.21.6", "pixal3d-core": "0.1.0+modly.blackwell.mv"} if blackwell else {})}
     evidence = args.evidence.resolve()
     evidence.mkdir(parents=True, exist_ok=True)
     summary = {"package_installation": "NOT_RUN", "dependency_graph": "NOT_RUN",
@@ -93,7 +93,7 @@ def main():
         assert len(archives) == 1 and hashlib.sha256(archives[0].read_bytes()).hexdigest() == asset["sha256"]
         summary["archive_sha256"] = asset["sha256"]
         install = result["dependency_install"]
-        assert len(install["commands"]) == (6 if blackwell else 7) and all(command["ok"] for command in install["commands"]), install
+        assert len(install["commands"]) == 7 and all(command["ok"] for command in install["commands"]), install
         assert install["code"] == "dependency_runtime_check_failed", install
         assert install["pip_check"]["ok"] is True, install
         python = str(extension / "venv/Scripts/python.exe")
@@ -113,7 +113,7 @@ def main():
         probe = json.loads(probe_result.stdout.strip().splitlines()[-1])
         summary["native_imports"] = classify_probe(probe, blackwell)
         assert summary["native_imports"] == classify_probe(install["runtime_check"], blackwell), "Probe evidence must agree"
-        summary["full_setup"] = "BLOCKED"  # Package graph is valid; no GPU means runtime is not prepared.
+        summary["full_setup"] = "FAIL"  # Expected production failure: no GPU means runtime is not prepared.
         summary["hardware"] = "BLOCKED"
         if blackwell:
             assert prepared["channel"] == "experimental" and prepared["release_tag"] == asset["release"]["tag"]

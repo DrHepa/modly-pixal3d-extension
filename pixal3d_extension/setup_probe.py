@@ -7,7 +7,7 @@ from importlib.metadata import version
 
 from pixal3d_extension.readiness import TRANSFORMERS_VERSION
 
-CHECK_NAMES = ("torch_stack", "native_imports", "natten_lib", "device", "torch_cuda", "natten_sm120")
+CHECK_NAMES = ("torch_stack", "native_imports", "natten_lib", "device", "torch_cuda", "torch_sdpa", "natten_sm120")
 
 
 def run_blackwell_probe(policy):
@@ -73,6 +73,13 @@ def run_blackwell_probe(policy):
         torch.cuda.synchronize()
         if not torch.equal(output.cpu(), torch.full((8,), 2.0)):
             raise RuntimeError("Tiny synchronized CUDA operation returned incorrect data")
+        passed()
+        begin("torch_sdpa")
+        query = torch.ones((1, 1, 4, 8), device="cuda", dtype=torch.float16)
+        attention = torch.nn.functional.scaled_dot_product_attention(query, query, query)
+        torch.cuda.synchronize()
+        if attention.shape != query.shape or not torch.allclose(attention.cpu(), query.cpu(), atol=0.002, rtol=0.002):
+            raise RuntimeError("Tiny synchronized SDPA operation returned incorrect data")
         passed()
         begin("natten_sm120")
         # Genuine r3 NAF uses this public backend, not blackwell-fna (CC100/103 only).

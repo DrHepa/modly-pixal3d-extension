@@ -1,0 +1,107 @@
+{
+  "schema": "modly.worldsculpt-wheelhouse.v1",
+  "platform": "win_amd64",
+  "python": "3.11",
+  "cuda": "12.8",
+  "torch": "2.7.1+cu128",
+  "channel": "experimental",
+  "source_iopath_sdist_sha256": "3311c16a4d9137223e20f141655759933e1eda24f8bff166af834af3c645ef01",
+  "wheels": [
+    {
+      "file": "ftfy-6.3.1-py3-none-any.whl",
+      "sha256": "7c70eb532015cd2f9adb53f101fb6c7945988d023a085d127d1573dc49dd0083"
+    },
+    {
+      "file": "huggingface_hub-0.36.2-py3-none-any.whl",
+      "sha256": "48f0c8eac16145dfce371e9d2d7772854a4f591bcb56c9cf548accf531d54270"
+    },
+    {
+      "file": "iopath-0.1.10-py3-none-any.whl",
+      "sha256": "78d0ba9ff80bcebe4c3b3b62e966f3953a0c9ff49f0d0abcd00aeadd18bfb9a2"
+    },
+    {
+      "file": "peft-0.18.0-py3-none-any.whl",
+      "sha256": "624f69ca6393b765ccc6734adda7ca57d80b238f0900a42c357d8b67a03d62ff"
+    },
+    {
+      "file": "portalocker-4.3.2-py3-none-any.whl",
+      "sha256": "42f0362e7343af78b25eb095c0cde300e746a0ab6647a835cc30764918490c93"
+    },
+    {
+      "file": "transformers-4.57.1-py3-none-any.whl",
+      "sha256": "b10d05da8fa67dc41644dbbf9bc45a44cb86ae33da6f9295f5fbf5b7890bd267"
+    },
+    {
+      "file": "wcwidth-0.8.4-py3-none-any.whl",
+      "sha256": "2097bb1d28a0ba8fe177c2eb607317f9b1627b03f33ebebfd3da670b337a65ba"
+    },
+    {
+      "name": "fpsample",
+      "version": "0.3.3",
+      "file": "fpsample-0.3.3-cp311-none-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/7d/3b/250c57927df998ea27695794bd55f77b959e357af64eee46bf8fe9b64aec/fpsample-0.3.3-cp311-none-win_amd64.whl",
+      "sha256": "4c741f4e8648bf192c427474352cef5a8a599df94e8a358505c1e5744c1f48a5",
+      "size": 174550,
+      "license": null,
+      "license_expression": null,
+      "license_files": [
+        {
+          "member": "fpsample-0.3.3.dist-info/licenses/LICENSE",
+          "sha256": "9ce674229964feb02166e7f312eefdbbef5cf5b96bc1cfaf26c42be0fc662166",
+          "size": 1086
+        }
+      ],
+      "requires_dist": [],
+      "custody_at_authoring": "verified-local"
+    },
+    {
+      "name": "pycocotools",
+      "version": "2.0.11",
+      "file": "pycocotools-2.0.11-cp311-cp311-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/a2/23/d17f6111c2a6ae8631d4fa90202bea05844da715d61431fbc34d276462d5/pycocotools-2.0.11-cp311-cp311-win_amd64.whl",
+      "sha256": "8e159232adae3aef6b4e2d37b008bff107b26e9ed3b48e70ea6482302834bd34",
+      "size": 80519,
+      "license": "FreeBSD",
+      "license_expression": null,
+      "license_files": [],
+      "requires_dist": [
+        "numpy"
+      ],
+      "custody_at_authoring": "verified-local"
+    },
+    {
+      "name": "pywin32",
+      "version": "311",
+      "file": "pywin32-311-cp311-cp311-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/51/8f/9bb81dd5bb77d22243d33c8397f09377056d5c687aa6d4042bea7fbf8364/pywin32-311-cp311-cp311-win_amd64.whl",
+      "sha256": "3ce80b34b22b17ccbd937a6e78e7225d80c52f5ab9940fe0506a1a16f3dab503",
+      "size": 9508308,
+      "license": "PSF",
+      "license_expression": null,
+      "license_files": [
+        {
+          "member": "adodbapi/license.txt",
+          "sha256": "5ea2f23c7f00c3006bacf267183e816d8d4b6dc95ea57a4ddb0ff81de6d8719e",
+          "size": 26925
+        },
+        {
+          "member": "pythonwin/license.txt",
+          "sha256": "11d8462e134e8efe8f4bd52372292a72ff0b670753d2f49f71675eed0dbfd085",
+          "size": 1540
+        },
+        {
+          "member": "win32/license.txt",
+          "sha256": "11d8462e134e8efe8f4bd52372292a72ff0b670753d2f49f71675eed0dbfd085",
+          "size": 1540
+        },
+        {
+          "member": "win32com/License.txt",
+          "sha256": "c3bdfa1152a9b9d404ddc90b817e1b6945803879ac53a14d2dde30d677f883bd",
+          "size": 1569
+        }
+      ],
+      "requires_dist": [],
+      "custody_at_authoring": "verified-local"
+    }
+  ]
+}

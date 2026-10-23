@@ -1,0 +1,19 @@
+{
+  "schema": "modly.pixal3d-mv-wheel.v1",
+  "repository": "https://github.com/TencentARC/Pixal3D",
+  "source_commit": "f7cf38429b0bd264f1995f0f8743a88b1c728b94",
+  "base_wheel_sha256": "c46502c5ed195351efd150a229856095119435d356511f9343f71b8974a872f2",
+  "source_hashes": {
+    "pixal3d/pipelines/pixal3d_mv_image_to_3d.py": "b4cf20f0cfc5028efd790d1878753cf63182941223ed75d594879c2c5ffbe12b",
+    "pixal3d/pipelines/__init__.py": "ea43e99063ae919c6791a6200a842d612c8bb2d29708b9814834c2df4e36d0d2",
+    "pixal3d/trainers/__init__.py": "6d8ef6bac127813d3130347e2cbe3c424e5fd09afccc3fd6d5fdcf403309f8c8",
+    "pixal3d/trainers/flow_matching/mixins/image_conditioned_proj.py": "3e02246e00a047d1bc8be170a4313632c32a4077b22447f044956b9810340f56"
+  },
+  "metadata_policy": "blackwell",
+  "version": "0.1.0+modly.blackwell.mv",
+  "wheel": "pixal3d_core-0.1.0+modly.blackwell.mv-py3-none-any.whl",
+  "wheel_sha256": "3b42a385384cdd2033c5f4810d762575ae4fd6b03580466948a12a5a17ca7587",
+  "wheel_size": 206112,
+  "native_payload_changed": false,
+  "inference_qualified": false
+}

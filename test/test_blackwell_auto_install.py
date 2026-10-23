@@ -45,7 +45,7 @@ class BlackwellAutomaticInstallTests(unittest.TestCase):
                 self.assertEqual(observed['channel'], 'experimental')
                 self.assertEqual(observed['provenance']['build_run_id'], 35537470167)
 
-    def test_base_install_never_checks_or_installs_mv_overlay(self):
+    def test_blackwell_install_checks_and_force_installs_its_separate_mv_overlay(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             python = root / 'venv/Scripts/python.exe'
@@ -53,6 +53,9 @@ class BlackwellAutomaticInstallTests(unittest.TestCase):
             python.touch()
             (root / 'natten-0.21.6-cp311-cp311-win_amd64.whl').touch()
             (root / 'cumesh_vb-1.0-cp311-cp311-win_amd64.whl').touch()
+            overlay = root / setup.BLACKWELL_MV_CORE_WHEEL
+            overlay.parent.mkdir(parents=True)
+            shutil.copy2(ROOT / setup.BLACKWELL_MV_CORE_WHEEL, overlay)
             commands = []
             def run(args, **kwargs):
                 commands.append(args)
@@ -60,13 +63,14 @@ class BlackwellAutomaticInstallTests(unittest.TestCase):
             with patch.object(setup, 'SCRIPT_DIR', root), patch.object(setup, '_run_setup_command', side_effect=run), patch.object(setup, '_runtime_cuda_check', return_value={'ok': True, 'args': []}):
                 result = setup._install_prepare_dependencies(root, wheelhouse_path=root, runtime_evidence=RUNTIME)
             self.assertEqual(result['status'], 'installed')
-            self.assertEqual(len(commands), 7)  # Six installs plus pip check; no overlay.
+            self.assertEqual(len(commands), 8)  # Seven installs (including overlay) plus pip check.
             local = [args for args in commands if '--find-links' in args]
             self.assertEqual(len(local), 2)
             for args in local:
                 self.assertIn('--force-reinstall', args)
                 self.assertIn('--no-index', args)
                 self.assertIn('--no-deps', args)
+            self.assertTrue(any(str(root / setup.BLACKWELL_MV_CORE_WHEEL) in args and "--force-reinstall" in args for args in commands))
             self.assertFalse(any(str(root / setup.MV_CORE_WHEEL) in args for args in commands))
             self.assertTrue(any('natten==0.21.6' in args for args in commands))
 
@@ -97,7 +101,7 @@ class BlackwellAutomaticInstallTests(unittest.TestCase):
         policy = setup._dependency_policy(RUNTIME)
         probe = dict(ok=True, torch_version=policy['torch'], torchvision_version=policy['torchvision'], torch_cuda_version='12.8', gpu_sm='120', torch_cuda_available=True, natten_version='0.21.6', natten_has_libnatten=True, imports=policy['required_imports'], upstream_imports=policy['required_upstream_imports'])
         self.assertFalse(setup._validate_runtime_probe(probe, policy)['ok'])
-        probe['checks'] = {name: {'status': 'PASS'} for name in ('torch_stack', 'device', 'native_imports', 'natten_lib', 'torch_cuda', 'natten_sm120')}
+        probe['checks'] = {name: {'status': 'PASS'} for name in ('torch_stack', 'device', 'native_imports', 'natten_lib', 'torch_cuda', 'torch_sdpa', 'natten_sm120')}
         self.assertTrue(setup._validate_runtime_probe(probe, policy)['ok'])
         probe['checks']['natten_sm120']['status'] = 'NOT_RUN'
         self.assertFalse(setup._validate_runtime_probe(probe, policy)['ok'])
@@ -124,6 +128,7 @@ class BlackwellAutomaticInstallTests(unittest.TestCase):
         torch.__version__, torch.version = policy['torch'], types.SimpleNamespace(cuda='12.8')
         torch.compile = lambda function=None, **kwargs: function
         torch.float32, torch.float16 = 'float32', 'float16'
+        torch.nn = types.SimpleNamespace(functional=types.SimpleNamespace(scaled_dot_product_attention=lambda q,k,v: q))
         torch.ones = lambda shape, **kwargs: Tensor(shape, 1)
         torch.zeros = lambda shape, **kwargs: Tensor(shape, 0)
         torch.ones_like = lambda tensor: Tensor(tensor.shape, 1)

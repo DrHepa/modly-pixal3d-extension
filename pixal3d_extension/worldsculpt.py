@@ -5,10 +5,13 @@ and the vendored upstream tree are never patched in place.
 """
 from __future__ import annotations
 
+import ast
+import hashlib
 import importlib.util
 import json
 import os
-import selectors
+import queue
+import threading
 import shutil
 import subprocess
 import sys
@@ -21,7 +24,7 @@ from .process_tree import popen_process_group_kwargs, terminate_process_tree
 from .worldsculpt_contract import (ADAPTER_DIRS, prepare_case_root,
                                     validate_adapters, validate_crops,
                                     validate_output, validate_scene)
-from .worldsculpt_lane import ROOT as EXTENSION_ROOT, python_path
+from .worldsculpt_lane import ROOT as EXTENSION_ROOT, python_path, expected_stack
 
 SOURCE = Path(__file__).resolve().parent.parent / "worldsculpt_upstream"
 _REQUIRED_IMPORTS = ("peft", "fpsample", "iopath", "pycocotools", "ftfy", "natten", "src.model.naf")
@@ -52,11 +55,13 @@ def missing_runtime() -> list[str]:
     interpreter = python_path()
     if not interpreter.is_file():
         return ["venv-worldsculpt (run setup.py --repair-worldsculpt)"]
-    code = '''import json,torch,peft,fpsample,iopath,pycocotools,ftfy,natten,o_voxel
-from importlib.metadata import version
-assert torch.__version__ == "2.12.0+cu130" and torch.version.cuda == "13.0"
-assert version("transformers") == "4.57.1"
-print("ready")'''
+    expected = expected_stack()
+    code = ("import torch; from pixal3d_extension.runtime import _prepare_runtime_compat, _install_windows_native_module_aliases, _install_natten_fallback\n"
+            "_prepare_runtime_compat(); _install_windows_native_module_aliases(); _install_natten_fallback()\n"
+            "import peft,fpsample,iopath,pycocotools,ftfy,natten,o_voxel\n"
+            "from importlib.metadata import version\n"
+            f"assert torch.__version__ == {expected['torch']!r} and torch.version.cuda == {expected['cuda']!r}\n"
+            "assert version('transformers') == '4.57.1'\nprint('ready')")
     check = subprocess.run([str(interpreter), "-c", code], cwd=EXTENSION_ROOT, text=True, capture_output=True)
     return [] if check.returncode == 0 and check.stdout.strip() == "ready" else ["venv-worldsculpt runtime/ABI (run setup.py --repair-worldsculpt)"]
 
@@ -102,14 +107,125 @@ def validate_base(base_root: Path, naf_path: Path | None) -> None:
         verify_naf_checkpoint(_regular(Path(naf_path), "NAF checkpoint"))
 
 
+def _write_ast(path: Path, tree: ast.AST) -> None:
+    ast.fix_missing_locations(tree)
+    source = ast.unparse(tree) + "\n"
+    compile(source, str(path), "exec")
+    path.write_text(source, encoding="utf-8")
+
+
+def _rewrite_constants(path: Path, replacements: dict[str, str], *, expected: int) -> None:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    count = 0
+    class Constants(ast.NodeTransformer):
+        def visit_Constant(self, node):
+            nonlocal count
+            if isinstance(node.value, str) and node.value in replacements:
+                count += 1
+                return ast.copy_location(ast.Constant(replacements[node.value]), node)
+            return node
+    tree = Constants().visit(tree)
+    if count != expected:
+        raise RuntimeError(f"WorldSculpt local path override anchor changed: {path.name}")
+    _write_ast(path, tree)
+
+
+def _rewrite_assignments(path: Path, replacements: dict) -> None:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found = set()
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            name = node.targets[0].id
+            if name not in replacements:
+                continue
+            original, replacement = replacements[name]
+            expected = ast.Constant(original) if isinstance(original, str) else original
+            if name in found or ast.dump(node.value) != ast.dump(expected):
+                raise RuntimeError(f"WorldSculpt local checkpoint anchor changed: {name}")
+            node.value = ast.Constant(replacement)
+            found.add(name)
+    if found != set(replacements):
+        raise RuntimeError("WorldSculpt checkpoint constants changed")
+    _write_ast(path, tree)
+
+
+def _patch_windows_crop_materialization(path: Path) -> None:
+    """Patch only the private Windows crop helper, never upstream source/weights."""
+    source_text = path.read_text(encoding="utf-8")
+    tree = ast.parse(source_text)
+    helpers = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_symlink"]
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_symlink"]
+    anchors = [ast.parse(source, mode="eval").body for source in (
+        "_symlink(gt_png, work_png)", "_symlink(gt_mask, work_mask_dir / f'{full_i:04d}.png')",
+    )]
+    if (len(helpers) != 1 or hashlib.sha256(ast.get_source_segment(source_text, helpers[0]).encode()).hexdigest() !=
+            "25f695fb2e1a188d699787f389241de991b0a0d33c328c1a6eb4e48fd7fa1649" or
+            sorted(ast.dump(node) for node in calls) != sorted(ast.dump(node) for node in anchors)):
+        raise RuntimeError("WorldSculpt crop materialization anchors changed")
+    replacement = ast.parse('''def _symlink(src: Path, dst: Path):
+    """Materialize image inputs in the private work case without Windows links."""
+    import os
+    import shutil
+    import stat
+    import tempfile
+    from pathlib import Path
+    source = Path(src)
+    destination = Path(dst)
+    case = Path(__file__).resolve(strict=True).parent.parent
+    try:
+        relative = destination.relative_to(case)
+    except ValueError as exc:
+        raise ValueError("WorldSculpt crop destination escapes private case") from exc
+    if not relative.parts or relative.parts[0] not in {"frames", "masks"} or ".." in relative.parts:
+        raise ValueError("WorldSculpt crop destination must be private frames/masks")
+    def reject_alias(path):
+        for candidate in (path, *path.parents):
+            try:
+                metadata = candidate.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(metadata.st_mode) or getattr(metadata, "st_file_attributes", 0) & 1024:
+                raise ValueError("WorldSculpt crop input/destination cannot use links or reparse points")
+    reject_alias(source)
+    reject_alias(destination)
+    if source.is_dir():
+        if destination.resolve(strict=False).is_relative_to(source.resolve(strict=True)):
+            raise ValueError("WorldSculpt crop input directory overlaps destination")
+        if destination.exists() and not destination.is_dir():
+            raise ValueError("WorldSculpt crop directory path conflict")
+        destination.mkdir(parents=True, exist_ok=True)
+        for child in sorted(source.iterdir()):
+            _symlink(child, destination / child.name)
+        return
+    if not source.is_file() or source.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}:
+        raise ValueError("WorldSculpt crop materialization accepts only regular image inputs, never weights")
+    if destination.exists() and not destination.is_file():
+        raise ValueError("WorldSculpt crop image path conflict")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, pending = tempfile.mkstemp(prefix=".crop-input-", dir=destination.parent)
+    os.close(descriptor)
+    temporary = Path(pending)
+    try:
+        shutil.copy2(source, temporary, follow_symlinks=False)
+        reject_alias(source)
+        reject_alias(destination)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+''').body[0]
+    tree.body[tree.body.index(helpers[0])] = replacement
+    _write_ast(path, tree)
+
+
 def _private_overlay(root: Path, base: Path) -> Path:
     if not SOURCE.is_dir() or not (SOURCE / "reconstruct_batch.py").is_file():
         raise RuntimeError("Pinned WorldSculpt upstream source is absent")
     overlay = root / "source"
     shutil.copytree(SOURCE, overlay, ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"), symlinks=False)
+    if sys.platform == "win32":
+        _patch_windows_crop_materialization(overlay / "prepare_crops_scene.py")
     local_base = overlay / "pretrained" / "Pixal3D"
     local_base.mkdir(parents=True)
-    (local_base / "ckpts").symlink_to(base / "ckpts", target_is_directory=True)
     data = json.loads((base / "pipeline.json").read_text())
     # The upstream pipeline reads its config from this private path; do not edit shared assets.
     def localize(value):
@@ -123,15 +239,41 @@ def _private_overlay(root: Path, base: Path) -> Path:
             return str(base / "auxiliary" / "rmbg")
         return value
     localized = localize(data)
+    models = localized.get("args", {}).get("models", {})
+    for key, value in list(models.items()):
+        if not isinstance(value, str) or not value.startswith("ckpts/") or ".." in Path(value).parts:
+            raise ValueError("WorldSculpt base pipeline contains a nonlocal model reference")
+        models[key] = str(_under(base, base / (value + ".json"), key).with_suffix(""))
     serialized = json.dumps(localized)
     if any(reference in serialized for reference in (*_DINO_REFS, *_RMBG_REFS)):
         raise ValueError("WorldSculpt base pipeline retains a remote DINO/RMBG reference")
     (local_base / "pipeline.json").write_text(serialized, encoding="utf-8")
     inference = overlay / "inference.py"
-    source = inference.read_text(encoding="utf-8")
-    if source.count(_DINO) != 4:
-        raise RuntimeError("WorldSculpt DINO override anchor changed; refusing remote fallback")
-    inference.write_text(source.replace(_DINO, str(base / "auxiliary" / "dinov3")), encoding="utf-8")
+    _rewrite_constants(inference, {_DINO: str(base / "auxiliary" / "dinov3")}, expected=4)
+    _rewrite_assignments(overlay / "reconstruct_object.py", {
+        "SS_BASE": ("pretrained/Pixal3D/ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors", str(base / "ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors")),
+        "SHAPE_BASE": ("pretrained/Pixal3D/ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors", str(base / "ckpts/slat_flow_img2shape_dit_1_3B_1024_bf16.safetensors")),
+        "TEX_BASE": ("pretrained/Pixal3D/ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors", str(base / "ckpts/slat_flow_imgshape2tex_dit_1_3B_1024_bf16.safetensors")),
+    })
+    _rewrite_assignments(overlay / "mv_inference_common.py", {
+        "PRETRAINED_CKPTS": (ast.parse("os.path.join(PROJ_ROOT, 'pretrained', 'Pixal3D', 'ckpts')", mode="eval").body, str(base / "ckpts")),
+    })
+    pipeline_base = overlay / "pixal3d/pipelines/base.py"
+    tree = ast.parse(pipeline_base.read_text(encoding="utf-8"))
+    old = ast.parse('models.from_pretrained(f"{path}/{v}")', mode="eval").body
+    new = ast.parse('models.from_pretrained(v if os.path.isabs(v) else os.path.join(path, v))', mode="eval").body
+    count = 0
+    class AbsoluteModels(ast.NodeTransformer):
+        def visit_Call(self, node):
+            nonlocal count
+            if ast.dump(node) == ast.dump(old):
+                count += 1
+                return ast.copy_location(new, node)
+            return self.generic_visit(node)
+    tree = AbsoluteModels().visit(tree)
+    if count != 1:
+        raise RuntimeError("WorldSculpt absolute model loader anchor changed")
+    _write_ast(pipeline_base, tree)
     feature = overlay / "pixal3d/trainers/flow_matching/mixins/image_conditioned_proj.py"
     source = feature.read_text(encoding="utf-8")
     if source.count(_NAF_CALL) != 1:
@@ -158,6 +300,8 @@ def _private_overlay(root: Path, base: Path) -> Path:
                 raise RuntimeError("WorldSculpt DINO loader anchor changed")
             source = source.replace(anchor, "DINOv3ViTModel.from_pretrained(dino_model_name, local_files_only=True)")
         target.write_text(source, encoding="utf-8")
+    for target in overlay.rglob("*.py"):
+        compile(target.read_text(encoding="utf-8"), str(target), "exec")
     return overlay
 
 
@@ -179,37 +323,80 @@ def _local_adapter_config(source: Path, destination: Path, base: Path) -> Path:
     return destination
 
 
+def _bootstrap_code() -> str:
+    return '''import runpy,sys
+from pathlib import Path
+extension, directory, script, *arguments = sys.argv[1:]
+source = Path(directory).resolve(strict=True)
+sys.path.insert(0, extension)
+if (source / "pixal3d").is_dir():
+    from pixal3d_extension.runtime import (_prepare_runtime_compat,
+        _install_windows_native_module_aliases, _install_natten_fallback,
+        _silence_flex_gemm_autotuners)
+    _prepare_runtime_compat()
+    _install_windows_native_module_aliases()
+    _install_natten_fallback()
+    _silence_flex_gemm_autotuners()
+    if any(name == "pixal3d" or name.startswith("pixal3d.") for name in sys.modules):
+        raise RuntimeError("WorldSculpt bootstrap imported installed Pixal3D before vendored source")
+sys.path.insert(0, str(source))
+sys.argv = [script, *arguments]
+runpy.run_path(str(source / script), run_name="__main__")
+'''
+
+
 def _run(args: list[str], cwd: Path, env: dict[str, str], cancel_event) -> str:
     if cancel_event is not None and cancel_event.is_set():
         raise RuntimeError("WorldSculpt cancelled")
-    # No shell and no inherited network cache; process termination is bounded by stage.
-    proc = subprocess.Popen([str(python_path()), *args], cwd=cwd, env=env,
+    proc = subprocess.Popen([str(python_path()), "-c", _bootstrap_code(),
+                            str(EXTENSION_ROOT), str(cwd), *args], cwd=cwd, env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             **popen_process_group_kwargs())
+    assert proc.stdout is not None
+    chunks = queue.Queue(maxsize=16)
+    stopped = threading.Event()
+    def enqueue(chunk):
+        while not stopped.is_set():
+            try:
+                chunks.put(chunk, timeout=0.05)
+                return
+            except queue.Full:
+                continue
+    def read_chunks():
+        try:
+            while not stopped.is_set():
+                chunk = proc.stdout.read1(65536) if hasattr(proc.stdout, "read1") else proc.stdout.read(65536)
+                if not chunk:
+                    break
+                enqueue(chunk)
+        finally:
+            enqueue(None)
+    reader = threading.Thread(target=read_chunks, daemon=True)
+    reader.start()
     tail = bytearray()
-    selector = selectors.DefaultSelector()
+    active = True
     try:
-        selector.register(proc.stdout, selectors.EVENT_READ)
-        while True:
-            for key, _ in selector.select(timeout=0.5):
-                chunk = os.read(key.fd, 65536)
-                if chunk:
-                    tail.extend(chunk)
-                    del tail[:-3000]
-                else:
-                    selector.unregister(key.fileobj)
+        while active or proc.poll() is None:
             if cancel_event is not None and cancel_event.is_set():
                 terminate_process_tree(proc)
                 raise RuntimeError("WorldSculpt cancelled")
-            if proc.poll() is not None and not selector.get_map():
-                break
+            try:
+                chunk = chunks.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if chunk is None:
+                active = False
+            else:
+                tail.extend(chunk)
+                del tail[:-3000]
         if proc.returncode:
             raise RuntimeError(f"WorldSculpt stage {args[0]} failed ({proc.returncode}): {tail.decode(errors='replace')}")
         return tail.decode(errors="replace")
     finally:
-        selector.close()
+        stopped.set()
         terminate_process_tree(proc, force=proc.poll() is None)
         proc.stdout.close()
+        reader.join(timeout=2)
 
 
 def _artifact_error(stage: str, tail: str, exc: Exception) -> RuntimeError:
@@ -307,12 +494,13 @@ def run_worldsculpt(*, scene_dir: Path, adapter_root: Path, base_root: Path,
     adapters = Path(adapter_root).resolve(strict=True)
     output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="modly-worldsculpt-") as temporary:
-        case = prepare_case_root(Path(temporary) / "case")
+        case = prepare_case_root(Path(temporary).resolve(strict=True) / "case")
         overlay = _private_overlay(case, base)
         env = os.environ.copy()
         env.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", HF_DATASETS_OFFLINE="1",
                    WORLDSCULPT_NAF_CHECKPOINT=str(Path(naf_path).resolve(strict=True)),
                    HF_HOME=str(case / "hf-cache"), TORCH_HOME=str(case / "torch-cache"),
+                   FLEX_GEMM_AUTOTUNE_CACHE_PATH=str(overlay / "autotune_cache.json"),
                    PYTHONNOUSERSITE="1", ATTN_BACKEND="sdpa", SPARSE_ATTN_BACKEND="sdpa")
         env.pop("PYTHONPATH", None)
         if progress_cb: progress_cb(5, "WorldSculpt: crop")

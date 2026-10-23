@@ -1,0 +1,42 @@
+name: Windows Blackwell advanced installation (GPU blocked)
+
+on:
+  pull_request:
+    paths:
+      - 'setup.py'
+      - 'generator.py'
+      - '*requirements*'
+      - '*lock.json'
+      - '*manifest.json'
+      - 'pixal3d_extension/**'
+      - 'tools/validation/windows_advanced_install.py'
+      - 'tools/wheelhouse/build-scene-inference-wheels.py'
+      - 'wheels/**'
+      - 'test/**'
+      - '.github/workflows/windows-blackwell-advanced-install.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  advanced-install:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+      - name: Run actual Modly PBS 3.11.9 setup and production optional provisioning
+        shell: pwsh
+        run: |
+          python tools/validation/windows_advanced_install.py --evidence "$env:RUNNER_TEMP/pixal3d-advanced-evidence"
+          if ($LASTEXITCODE -ne 0) { throw 'Advanced installation evidence failed' }
+      - name: Upload evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-sm120-advanced-install-evidence
+          path: ${{ runner.temp }}/pixal3d-advanced-evidence/
+          if-no-files-found: error

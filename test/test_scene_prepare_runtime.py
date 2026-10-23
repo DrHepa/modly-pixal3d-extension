@@ -6,6 +6,7 @@ import threading
 import time
 import types
 import unittest
+import venv
 from pathlib import Path
 from unittest.mock import patch
 
@@ -25,7 +26,7 @@ from pixal3d_extension.da3_official_adapter import load_depth_anything3
 class ScenePrepareRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.sam = self.root / "sam3"
         self.da3 = self.root / "da3"
         self.sam.mkdir()
@@ -49,9 +50,11 @@ class ScenePrepareRuntimeTests(unittest.TestCase):
             validate_scene_prepare_weights(self.sam, self.da3)
 
     def test_worker_uses_only_isolated_lane_and_offline_hf_environment(self):
-        command = worker_command(self.root, self.root / "job.json")
-        self.assertEqual(command[0], str(self.root / "venv-scene-prep/bin/python"))
-        self.assertEqual(command[1:3], ["-m", "pixal3d_extension.scene_prepare_worker"])
+        for platform_name, interpreter in (("linux", "bin/python"), ("win32", "Scripts/python.exe")):
+            with self.subTest(platform=platform_name), patch("pixal3d_extension.scene_prepare_lane.sys.platform", platform_name):
+                command = worker_command(self.root, self.root / "job.json")
+                self.assertEqual(command[0], str(self.root / "venv-scene-prep" / interpreter))
+                self.assertEqual(command[1:3], ["-m", "pixal3d_extension.scene_prepare_worker"])
         env = offline_environment(self.root / "cache", self.root)
         self.assertEqual(env["HF_HUB_OFFLINE"], "1")
         self.assertEqual(env["TRANSFORMERS_OFFLINE"], "1")
@@ -60,9 +63,7 @@ class ScenePrepareRuntimeTests(unittest.TestCase):
         self.assertNotIn("HF_TOKEN", env)
 
     def test_worker_module_launches_from_explicit_extension_root(self):
-        interpreter = self.root / "venv-scene-prep/bin/python"
-        interpreter.parent.mkdir(parents=True)
-        interpreter.symlink_to(sys.executable)
+        venv.EnvBuilder(with_pip=False, symlinks=False).create(self.root / "venv-scene-prep")
         package = self.root / "pixal3d_extension"
         package.mkdir()
         (package / "__init__.py").write_text("", encoding="utf-8")

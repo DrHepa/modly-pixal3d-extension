@@ -2,7 +2,13 @@ venv/
 __pycache__/
 .pytest_cache/
 *.pyc
-models/
+/models/
 
 venv-worldsculpt/
 venv-scene-prep/
+
+python-scene-prep312/
+.runtime-cache/
+
+.python-scene-prep312-backup-*/
+.python-scene-prep-*/

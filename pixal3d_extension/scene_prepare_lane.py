@@ -33,13 +33,16 @@ SOURCE_DISTRIBUTIONS = {
 def capability() -> dict:
     system = sys.platform
     machine = platform.machine().lower()
-    supported = system == "linux" and machine in {"aarch64", "arm64"}
+    windows = system == "win32" and machine in {"amd64", "x86_64"}
+    supported = (system == "linux" and machine in {"aarch64", "arm64"}) or windows
     return {
         "supported": supported,
+        **({"channel": "experimental", "python": "3.12", "stack": "torch 2.7.1+cu128; SM120"} if windows else {}),
         "status": "supported" if supported else "unsupported-platform",
         "platform": system,
         "architecture": machine,
         "reason": (
+            "Scene preparation uses private CPython 3.12 on experimental Windows x64 SM120 (CUDA 12.8)." if windows else
             "Scene preparation supports Linux ARM64 with Python 3.12 and CUDA >=12.6."
             if supported
             else f"Scene preparation is unavailable on {system}/{machine}; the primary Pixal3D extension remains usable."
@@ -49,14 +52,14 @@ def capability() -> dict:
 
 def da3_capability() -> dict:
     machine = platform.machine().lower()
-    supported = sys.platform == "linux" and machine in {"aarch64", "arm64"}
+    supported = capability()["supported"]
     return {
         "supported": supported,
         "status": "supported" if supported else "unsupported-platform",
         "platform": sys.platform,
         "architecture": machine,
         "reason": (
-            "Pixal3D MV DA3 camera calibration supports Linux ARM64 with Python 3.12 and CUDA >=12.6."
+            "Pixal3D MV DA3 camera calibration requires the prepared private Python 3.12 Scene Prep lane."
             if supported
             else f"Pixal3D MV DA3 camera calibration is unavailable on {sys.platform}/{machine}."
         ),
@@ -64,7 +67,7 @@ def da3_capability() -> dict:
 
 
 def python_path(root: Path = ROOT) -> Path:
-    return Path(root) / VENV_NAME / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    return Path(root) / VENV_NAME / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
 
 
 def _python312() -> Path:
@@ -81,6 +84,12 @@ def _python312() -> Path:
 
 def install_plan(root: Path = ROOT) -> dict:
     root = Path(root)
+    if sys.platform == "win32":
+        from .windows_scene_runtime import load_lock
+        lock = load_lock(root)
+        return {"python": "3.12", "venv": str(root / VENV_NAME), "weights_managed_by_modly": True,
+                "source_revisions": {"sam3": SAM3_SOURCE_REVISION, "depth-anything-3": DA3_SOURCE_REVISION},
+                "lock": lock, "commands": []}
     interpreter = python_path(root)
     requirements = root / "scene-prep-requirements.txt"
     return {
@@ -145,6 +154,12 @@ def _source_metadata_probe_code() -> str:
 
 
 def _source_metadata(root: Path) -> dict | None:
+    if sys.platform == "win32":
+        from .windows_scene_runtime import source_metadata
+        try:
+            return source_metadata(Path(root))
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            return None
     interpreter = python_path(root)
     if not interpreter.is_file() or interpreter.is_symlink():
         return None
@@ -169,6 +184,13 @@ def _interpreter_custody(root: Path) -> tuple[bool, dict]:
     target = root / VENV_NAME
     interpreter = python_path(root)
     observation = {"status": "unsafe", "venv": str(target), "python": str(interpreter)}
+    if sys.platform == "win32":
+        from .windows_scene_runtime import _reject_alias
+        try:
+            _reject_alias(interpreter)
+        except RuntimeError as exc:
+            observation["reason"] = str(exc)
+            return False, observation
     if target.is_symlink() or not target.is_dir():
         observation["reason"] = "venv is missing, not a directory, or a symlink"
         return False, observation
@@ -188,12 +210,13 @@ def _interpreter_custody(root: Path) -> tuple[bool, dict]:
         return False, observation
     probe = (
         "import json,site,sys\n"
-        "print(json.dumps({'executable':sys.executable,'prefix':sys.prefix,"
+        "print(json.dumps({'python':list(sys.version_info[:2]),'executable':sys.executable,'prefix':sys.prefix,"
         "'base_prefix':sys.base_prefix,'site_packages':site.getsitepackages()}))\n"
     )
     try:
         completed = subprocess.run(
             [str(interpreter), "-c", probe], cwd=root, capture_output=True, text=True,
+            **({"env": {key: value for key, value in {**os.environ, "PYTHONNOUSERSITE": "1"}.items() if key not in {"PYTHONPATH", "PYTHONHOME"}}} if sys.platform == "win32" else {}),
         )
     except OSError as exc:
         observation["reason"] = f"python custody probe failed: {type(exc).__name__}"
@@ -219,6 +242,16 @@ def _interpreter_custody(root: Path) -> tuple[bool, dict]:
     if not sites or any(not site_path.is_relative_to(target_resolved) for site_path in sites):
         observation["reason"] = "site-packages escapes the scene-prep venv"
         return False, observation
+    if sys.platform == "win32":
+        from .windows_scene_runtime import RUNTIME_NAME, _reject_alias
+        try:
+            _reject_alias(interpreter)
+        except RuntimeError as exc:
+            observation["reason"] = str(exc)
+            return False, observation
+        if info.get("python") != [3, 12] or base_prefix != root / RUNTIME_NAME:
+            observation["reason"] = "interpreter ABI/base runtime does not match extension-owned CPython 3.12"
+            return False, observation
     observation.update(status="owned", prefix=str(prefix), base_prefix=str(base_prefix), site_packages=[str(path) for path in sites])
     return True, observation
 
@@ -234,6 +267,10 @@ def _remove_invalid_lane(root: Path, target: Path) -> None:
 
 
 def _installed_sources_exact(root: Path) -> tuple[bool, dict]:
+    if sys.platform == "win32":
+        metadata = _source_metadata(Path(root))
+        exact = isinstance(metadata, dict) and set(metadata) == set(SOURCE_DISTRIBUTIONS) and all(item.get("release_wheel") for item in metadata.values())
+        return exact, {"status": "exact" if exact else "mismatch", "distributions": metadata or {}}
     metadata = _source_metadata(Path(root))
     observation = {"status": "mismatch", "distributions": {}}
     if not isinstance(metadata, dict):
@@ -295,6 +332,9 @@ def _da3_runtime_probe_code() -> str:
 
 def validate_da3_runtime(root: Path = ROOT) -> dict:
     """Validate only the DA3 capability used by ordered Pixal3D MV images."""
+    if sys.platform == "win32":
+        from .windows_scene_runtime import validate
+        return validate(Path(root).resolve())
     root = Path(root).resolve()
     support = da3_capability()
     if not support["supported"]:
@@ -340,6 +380,12 @@ def validate_da3_runtime(root: Path = ROOT) -> dict:
 
 
 def validate_runtime(root: Path = ROOT) -> dict:
+    if sys.platform == "win32":
+        from .windows_scene_runtime import validate
+        owned, custody = _interpreter_custody(Path(root))
+        if not owned:
+            raise RuntimeError("Scene-prep Python is missing or unsafe; run Repair: " + json.dumps(custody))
+        return validate(Path(root).resolve())
     root = Path(root).resolve()
     support = capability()
     if not support["supported"]:
@@ -373,6 +419,11 @@ def validate_runtime(root: Path = ROOT) -> dict:
 
 def repair(root: Path = ROOT) -> dict:
     """Create/repair only venv-scene-prep; never mutate either existing lane."""
+    if sys.platform == "win32":
+        from .windows_scene_runtime import provision
+        result = provision(Path(root))
+        runtime = validate_runtime(root)  # Never bypass GPU/native validation in production.
+        return {**result, "runtime_prepared": True, "runtime": runtime}
     root = Path(root).resolve()
     support = capability()
     if not support["supported"]:

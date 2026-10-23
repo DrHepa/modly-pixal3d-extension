@@ -42,6 +42,8 @@ WHEELHOUSE_DIR = "wheels"
 WHEELHOUSE_MANIFEST = "wheelhouse.manifest.json"
 MV_CORE_WHEEL = "wheels/mv/pixal3d_core-0.1.0+modly-py3-none-any.whl"
 MV_CORE_WHEEL_SHA256 = "49d61a5f83c57b0d6670d1446a47a0cd7a2a8baf40b3d207fee60e90ee683cd0"
+BLACKWELL_MV_CORE_WHEEL = "wheels/mv/pixal3d_core-0.1.0+modly.blackwell.mv-py3-none-any.whl"
+BLACKWELL_MV_CORE_WHEEL_SHA256 = "3b42a385384cdd2033c5f4810d762575ae4fd6b03580466948a12a5a17ca7587"
 
 LOCAL_WHEEL_PACKAGES = [
     "utils3d==1.3+modly.headless",
@@ -375,9 +377,10 @@ def _install_prepare_dependencies(
     if not wheelhouse.exists():
         return {"status": "failed", "code": "wheelhouse_missing", "wheelhouse": str(wheelhouse), "commands": []}
     runtime_evidence = runtime_evidence or _runtime_evidence_for_wheelhouse(wheelhouse)
-    base_only = _dependency_policy(runtime_evidence)["lane"] == BLACKWELL_RUNTIME_LANE
-    mv_wheel = SCRIPT_DIR / MV_CORE_WHEEL
-    if not base_only and (not mv_wheel.is_file() or hashlib.sha256(mv_wheel.read_bytes()).hexdigest() != MV_CORE_WHEEL_SHA256):
+    blackwell = _dependency_policy(runtime_evidence)["lane"] == BLACKWELL_RUNTIME_LANE
+    mv_wheel = SCRIPT_DIR / (BLACKWELL_MV_CORE_WHEEL if blackwell else MV_CORE_WHEEL)
+    mv_sha256 = BLACKWELL_MV_CORE_WHEEL_SHA256 if blackwell else MV_CORE_WHEEL_SHA256
+    if not mv_wheel.is_file() or hashlib.sha256(mv_wheel.read_bytes()).hexdigest() != mv_sha256:
         return {"status": "failed", "code": "mv_core_wheel_missing_or_invalid", "wheel": str(mv_wheel), "commands": []}
 
     plan = _dependency_install_plan(workspace_root, wheelhouse, runtime_evidence)
@@ -390,8 +393,7 @@ def _install_prepare_dependencies(
         [str(venv_python), "-m", "pip", "install", *PYTORCH_PIP_FLAGS, *plan["metadata_packages"]],
         [str(venv_python), "-m", "pip", "install", "--no-index", "--no-deps", *plan["local_wheel_flags"], "--find-links", str(wheelhouse), *local_wheel_packages],
     ]
-    if not base_only:
-        commands.append([str(venv_python), "-m", "pip", "install", "--no-index", "--no-deps", "--force-reinstall", str(mv_wheel)])
+    commands.append([str(venv_python), "-m", "pip", "install", "--no-index", "--no-deps", "--force-reinstall", str(mv_wheel)])
     if plan["natten_command"] is not None:
         commands.append(plan["natten_command"])
     results: list[dict[str, Any]] = []
@@ -423,10 +425,10 @@ def _install_prepare_dependencies(
         "dependency_policy": plan["policy"],
         "natten_runtime": ({"importable": True, "version": runtime_check.get("natten_version"),
                             "HAS_LIBNATTEN": runtime_check.get("natten_has_libnatten")}
-                           if base_only else _natten_runtime_status(venv_python, workspace_root)),
+                           if blackwell else _natten_runtime_status(venv_python, workspace_root)),
         "runtime_prepared": True,
         "inference_validated": False,
-        **({"channel": "experimental", "scope": "base-only"} if base_only else {}),
+        **({"channel": "experimental", "scope": "advanced-experimental"} if blackwell else {}),
         "pip_check": pip_check,
         "runtime_check": runtime_check,
         "commands": results,
@@ -465,7 +467,7 @@ def _validate_runtime_probe(probe: dict[str, Any], policy: dict[str, Any]) -> di
             missing = sorted(set(policy.get(policy_key, [])) - set(probe.get(key, [])))
             if missing:
                 errors.append(f"missing {key}: {', '.join(missing)}")
-        for name in ("torch_stack", "native_imports", "natten_lib", "device", "torch_cuda", "natten_sm120"):
+        for name in ("torch_stack", "native_imports", "natten_lib", "device", "torch_cuda", "torch_sdpa", "natten_sm120"):
             if probe.get("checks", {}).get(name, {}).get("status") != "PASS":
                 errors.append(f"{name} did not PASS")
     return {**probe, "ok": not errors, "validation_errors": errors}
@@ -964,10 +966,13 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
                 "status": "skipped",
                 "reason": "installation disabled by --skip-install",
             }
-        elif not install_failed and (workspace_root / "worldsculpt-wheelhouse.manifest.json").is_file() and (workspace_root / "venv/bin/python").is_file() and sys.platform == "linux" and platform.machine() == "aarch64":
+        elif not install_failed and (
+            (sys.platform == "linux" and platform.machine() == "aarch64" and (workspace_root / "venv/bin/python").is_file()) or
+            (sys.platform == "win32" and runtime_evidence and _dependency_policy(runtime_evidence)["lane"] == BLACKWELL_RUNTIME_LANE)
+        ):
             from pixal3d_extension import worldsculpt_lane
             try:
-                info = worldsculpt_lane._probe(workspace_root / "venv/bin/python")
+                info = worldsculpt_lane._probe(worldsculpt_lane.primary_python(workspace_root))
                 try:
                     worldsculpt_lane._platform_gate(info)
                 except RuntimeError:
@@ -979,6 +984,8 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
         if not install_failed and not args.skip_install and not args.skip_scene_prep:
             from pixal3d_extension import scene_prepare_lane
             support = scene_prepare_lane.capability()
+            if sys.platform == "win32" and (not runtime_evidence or _dependency_policy(runtime_evidence)["lane"] != BLACKWELL_RUNTIME_LANE):
+                support = {**support, "supported": False, "status": "unsupported-platform", "reason": "Scene Prep Windows is limited to the experimental SM120/cu128 lane; stable lanes are unchanged."}
             if not support["supported"]:
                 result["scene_prep_lane"] = support
             else:
@@ -992,10 +999,11 @@ def run_setup(argv: list[str] | None = None) -> dict[str, Any]:
                         "reason": str(exc),
                     }
                     result["installs_started"] = True
+                    if sys.platform == "win32":
+                        result.update(status="failed", failure_code="scene_prep_lane_failed", reason=str(exc))
                     result["next_steps"] = [
                         *result.get("next_steps", []),
-                        "install Python 3.12 and a CUDA >=12.6 runtime for scene-from-images/scene-from-video",
-                        "rerun setup.py --repair-scene-prep",
+                        "use Modly extension Repair to provision the isolated Scene Prep runtime; inspect the reported dependency or native GPU failure",
                     ]
         return result
 
