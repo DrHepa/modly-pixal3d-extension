@@ -17,6 +17,15 @@ Model weights are downloaded through Modly Models; they are not bundled here.
 Normal setup automatically attempts the special scene-preparation and WorldSculpt
 environments on supported hosts. No separate manual setup is needed for a fresh install.
 
+**Version 0.7.4 — selected image inputs:** Multi-Image to 3D and Prepare Scene
+from Images accept native absolute image paths outside the workspace, including
+Windows drives and UNC shares. Relative paths remain workspace-relative. Selected
+originals are validated without modification, then converted into private per-job
+PNGs that are removed on completion, failure, or cooperative cancellation. Final
+outputs still stay in the current workspace output directory. Symlinks, Windows
+reparse points/devices/streams, traversal, and invalid images remain rejected.
+This does not qualify GPU inference or change camera modes.
+
 **Version 0.7.3 — Windows RTX 5090 / SM120 (experimental):** normal Install/Reinstall/Repair
 keeps the checksum-pinned r3 CPython 3.11 / CUDA 12.8 native archive unchanged.
 It adds a separate MV Python overlay, a private WorldSculpt dependency overlay,
@@ -76,8 +85,9 @@ execute the DA3 runtime; this extension does not invent an optional-weight schem
 
 Connect 2–4 images of the **same object**, with clear overlap between views.
 Use consecutive connected image slots, starting at Primary view. In stock Modly
-0.4.3, secondary images must be workspace-owned files; empty slots are compacted
-by the host, so do not rely on gaps preserving camera roles.
+0.4.3, the primary image arrives as bytes and secondary images as native file
+paths; you do not need to copy selected images into the workspace.
+Empty slots are compacted by the host, so do not rely on gaps preserving camera roles.
 
 Auto cameras use DA3 estimates, not guaranteed camera calibration. Declared camera
 roles must match your actual camera rig; their FOV defaults to **20°**.
