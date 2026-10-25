@@ -137,7 +137,8 @@ test('MV docs distinguish UI-managed model weights from intentional first-use NA
   assert.match(docs, /Hugging Face weights are UI-managed and local-only/i)
   assert.match(docs, /NAF checkpoint[\s\S]*?automatically downloads[\s\S]*?first base\/MV\/WorldSculpt use/i)
   assert.match(docs, /consecutive connected image slots/i)
-  assert.match(docs, /secondary images must be workspace-owned files/i)
+  assert.match(docs, /primary image arrives as bytes and secondary images as native file\s+paths/i)
+  assert.match(docs, /do not need to copy selected images into the workspace/i)
   assert.match(docs, /empty slots are compacted[\s\S]*?do not rely on gaps/i)
   assert.match(docs, /Every MV camera mode currently requires DA3 weights and runtime/i)
   assert.doesNotMatch(docs, /null gaps are ignored|secondary byte uploads/i)
@@ -149,6 +150,11 @@ test('Windows MV custody workflow is SHA-pinned and exercises the real Windows f
   assert.match(workflow, /actions\/checkout@11d5960a326750d5838078e36cf38b85af677262\s*#\s*v4/)
   assert.match(workflow, /actions\/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065\s*#\s*v5/)
   assert.match(workflow, /test_windows_multiview_custody\.py/)
+  assert.match(workflow, /test_external_image_inputs\.py/)
+  assert.match(workflow, /New-SmbShare/)
+  assert.match(workflow, /MODLY_TEST_IMAGE_UNC_ROOT/)
+  assert.match(workflow, /if:\s*always\(\)/)
+  assert.match(workflow, /Remove-SmbShare/)
 })
 
 test('WorldSculpt scene node uses pinned official adapters and the Pixal3D base group', () => {

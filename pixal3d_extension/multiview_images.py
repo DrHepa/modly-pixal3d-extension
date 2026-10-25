@@ -69,8 +69,11 @@ def _windows_extended_path(value: str) -> str:
         plain = value
         extended = None
     parsed = PureWindowsPath(plain)
-    if not parsed.is_absolute() or any(part in {".", ".."} for part in parsed.parts):
+    if not parsed.is_absolute() or any(part in {".", ".."} for part in plain.split("\\")):
         raise ValueError("Windows custody paths must be absolute without traversal segments")
+    for part in parsed.parts[1:]:
+        if ":" in part or part.endswith((".", " ")) or PureWindowsPath(part).is_reserved():
+            raise ValueError("Windows image paths must not use devices, streams, or ambiguous aliases")
     if extended is not None:
         if plain.startswith("\\\\") or (len(parsed.drive) == 2 and parsed.drive[1] == ":"):
             return extended
@@ -101,23 +104,14 @@ def _windows_parent_paths(value: str):
         current = parent
 
 
-def _windows_identity_chain_contains(
-    workspace: _WindowsFileIdentity,
-    candidate: _WindowsFileIdentity,
-    ancestors: list[_WindowsFileIdentity],
-) -> bool:
-    return (
-        _windows_file_identity_is_valid(workspace)
-        and _windows_file_identity_is_valid(candidate)
-        and candidate.volume_serial == workspace.volume_serial
-        and any(_windows_file_identity_is_valid(item) and item == workspace for item in ancestors)
-    )
-
-
 def _windows_stable_read(
     candidate: Path, workspace: Path, label: str, *, _opened_hook: Callable[[Path], None] | None = None,
 ) -> tuple[Path, bytes]:
-    """Read from a locked file while locked directory handles prove workspace custody."""
+    """Snapshot a selected regular file, locking and verifying its physical ancestry.
+
+    Inputs may belong to any native volume/share; workspace confinement applies
+    to generated outputs, not the image picker's original files.
+    """
 
     import ctypes
     from ctypes import wintypes
@@ -171,6 +165,9 @@ def _windows_stable_read(
     get_final_path = kernel32.GetFinalPathNameByHandleW
     get_final_path.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
     get_final_path.restype = wintypes.DWORD
+    get_file_type = kernel32.GetFileType
+    get_file_type.argtypes = [wintypes.HANDLE]
+    get_file_type.restype = wintypes.DWORD
     read_file = kernel32.ReadFile
     read_file.argtypes = [wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
     read_file.restype = wintypes.BOOL
@@ -227,6 +224,8 @@ def _windows_stable_read(
         if _opened_hook is not None:
             _opened_hook(candidate)
         info = metadata(handle, label)
+        if get_file_type(handle) != 1:  # FILE_TYPE_DISK; reject pipes and devices.
+            raise ValueError(f"{label} must be a regular disk file")
         if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT:
             raise ValueError(f"{label} must not be a Windows reparse point")
         if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY:
@@ -237,15 +236,6 @@ def _windows_stable_read(
 
         candidate_identity = identity(handle, label)
         final_candidate_path = final_path(handle, label)
-        workspace_handle = open_directory(str(workspace), f"{label} workspace")
-        workspace_info = metadata(workspace_handle, f"{label} workspace")
-        if workspace_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT:
-            raise ValueError(f"{label} workspace must not be a Windows reparse point")
-        if not workspace_info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY:
-            raise ValueError(f"{label} workspace must be a directory")
-        workspace_identity = identity(workspace_handle, f"{label} workspace")
-        if candidate_identity.volume_serial != workspace_identity.volume_serial:
-            raise ValueError(f"{label} must remain on the Modly workspace volume or share")
 
         def locked_ancestor_identities(path: str, description: str) -> list[_WindowsFileIdentity]:
             identities = []
@@ -258,31 +248,22 @@ def _windows_stable_read(
                     raise ValueError(f"{label} ancestor must remain a directory")
                 parent_identity = identity(parent_handle, description)
                 identities.append(parent_identity)
-                if parent_identity == workspace_identity:
-                    break
             return identities
 
-        # The handle-resolved chain proves the opened bytes are below the workspace,
-        # even if a lexical junction is swapped after the file handle is acquired.
+        # Lock both chains to their native roots. Compare physical identities,
+        # never case-folded path strings or a workspace/volume prefix.
         actual_ancestor_identities = locked_ancestor_identities(
             final_candidate_path, f"{label} final-path ancestor",
         )
-        if not _windows_identity_chain_contains(
-            workspace_identity, candidate_identity, actual_ancestor_identities,
-        ):
-            raise ValueError(f"{label} final handle path escapes the Modly workspace")
-
-        # The lexical chain separately rejects junctions/reparse points, including
-        # aliases that resolve to an otherwise in-workspace target.
         lexical_ancestor_identities = locked_ancestor_identities(
             str(candidate), f"{label} lexical ancestor",
         )
-        if not _windows_identity_chain_contains(
-            workspace_identity, candidate_identity, lexical_ancestor_identities,
-        ):
-            raise ValueError(f"{label} path does not descend from the Modly workspace")
+        if actual_ancestor_identities != lexical_ancestor_identities:
+            raise ValueError(f"{label} physical ancestry changed during input validation")
         if final_path(handle, label) != final_candidate_path:
             raise ValueError(f"{label} final handle path changed during custody validation")
+        if identity(handle, label) != candidate_identity:
+            raise ValueError(f"{label} file identity changed during input validation")
 
         chunks: list[bytes] = []
         remaining = size
@@ -324,8 +305,14 @@ def _decode(data: bytes, label: str) -> ValidatedImage:
         with Image.open(io.BytesIO(data)) as image:
             image_format = str(image.format or "").upper()
             width, height = image.size
+            if image_format not in SUPPORTED_FORMATS or width <= 0 or height <= 0 or width * height > MAX_IMAGE_PIXELS:
+                raise ValueError("Unsupported image format or unsafe dimensions")
             image.verify()
-    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
+        # JPEG verify() does not decode pixels. Reject truncated/corrupt data
+        # before asset preparation, rather than later while staging PNGs.
+        with Image.open(io.BytesIO(data)) as image:
+            image.load()
+    except (UnidentifiedImageError, Image.DecompressionBombError, OSError, SyntaxError, ValueError) as exc:
         raise ValueError(f"{label} must contain a supported image") from exc
     if image_format not in SUPPORTED_FORMATS or width <= 0 or height <= 0 or width * height > MAX_IMAGE_PIXELS:
         raise ValueError(f"{label} must contain a supported image (PNG, JPEG, or WebP) within safe dimensions")
@@ -333,48 +320,47 @@ def _decode(data: bytes, label: str) -> ValidatedImage:
 
 
 def _workspace_file(raw: object, workspace: Path, label: str) -> tuple[Path, bytes]:
+    """Read a native selected input; relative paths are workspace-relative.
+
+    The historical helper name is retained for internal callers. Absolute
+    inputs are not outputs and need not be inside the workspace.
+    """
     if not isinstance(raw, str) or not raw or raw != raw.strip() or "\x00" in raw:
-        raise TypeError(f"{label} must be a nonempty workspace image path")
+        raise TypeError(f"{label} must be a nonempty native image path")
     parsed = Path(raw)
     if PureWindowsPath(raw).is_absolute() and os.name != "nt":
-        raise ValueError(f"{label} must be a native workspace path")
-    if any(part in {".", ".."} for part in parsed.parts):
+        raise ValueError(f"{label} must be a native image path")
+    if any(part in {".", ".."} for part in raw.replace("\\", "/").split("/")):
         raise ValueError(f"{label} must not contain traversal segments")
+    if os.name == "nt" and parsed.anchor and not parsed.is_absolute():
+        raise ValueError(f"{label} must not use drive-relative or root-relative paths")
     candidate = parsed if parsed.is_absolute() else workspace / parsed
     if os.name == "nt":
         try:
             return _windows_stable_read(candidate, workspace, label)
         except OSError as exc:
-            raise ValueError(f"{label} must remain a locked regular file inside the Modly workspace") from exc
+            raise ValueError(f"{label} must remain a locked regular non-reparse image file") from exc
 
+    # Open every component from the native root, including external ancestors.
+    # O_NOFOLLOW prevents link swaps; O_NONBLOCK prevents a FIFO/device from
+    # blocking before fstat can reject non-regular files.
+    relative = candidate.relative_to(candidate.anchor)
+    opened = []
     try:
-        relative = candidate.relative_to(workspace)
-    except ValueError as exc:
-        raise ValueError(f"{label} must remain inside the Modly workspace") from exc
-
-    current = workspace
-    for part in relative.parts:
-        current = current / part
-        if current.is_symlink():
-            raise ValueError(f"{label} must not use symlinks")
-    resolved = candidate.resolve(strict=True)
-    if not resolved.is_relative_to(workspace) or not resolved.is_file():
-        raise ValueError(f"{label} must be a regular file inside the Modly workspace")
-
-    # Open every component relative to an already-open workspace descriptor.
-    # O_NOFOLLOW closes the symlink-swap window between custody validation and
-    # the immutable byte snapshot used by staging.
-    directory_fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY)
-    opened = [directory_fd]
-    try:
+        directory_fd = os.open(candidate.anchor, os.O_RDONLY | os.O_DIRECTORY)
+        opened.append(directory_fd)
         for part in relative.parts[:-1]:
             directory_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
             opened.append(directory_fd)
-        file_fd = os.open(relative.parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+        if not relative.parts:
+            raise ValueError(f"{label} must be a regular file")
+        file_fd = os.open(relative.parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
         try:
             info = os.fstat(file_fd)
             if not stat.S_ISREG(info.st_mode):
-                raise ValueError(f"{label} must be a regular file inside the Modly workspace")
+                raise ValueError(f"{label} must be a regular file")
+            if info.st_size > MAX_IMAGE_BYTES:
+                raise ValueError(f"{label} must be no larger than 64 MiB")
             chunks = []
             total = 0
             while True:
@@ -385,11 +371,15 @@ def _workspace_file(raw: object, workspace: Path, label: str) -> tuple[Path, byt
                 total += len(chunk)
                 if total > MAX_IMAGE_BYTES:
                     raise ValueError(f"{label} must be no larger than 64 MiB")
-            return resolved, b"".join(chunks)
+            after = os.fstat(file_fd)
+            signature = lambda value: (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+            if signature(info) != signature(after) or total != info.st_size:
+                raise ValueError(f"{label} changed during image snapshot")
+            return candidate, b"".join(chunks)
         finally:
             os.close(file_fd)
     except OSError as exc:
-        raise ValueError(f"{label} must remain a regular non-symlink file inside the Modly workspace") from exc
+        raise ValueError(f"{label} must remain a regular non-symlink image file") from exc
     finally:
         for descriptor in reversed(opened):
             os.close(descriptor)
@@ -411,7 +401,7 @@ def validate_ordered_images(
         if value is None:
             continue
         if not isinstance(value, str):
-            raise TypeError(f"view {index} must be None or a workspace image path")
+            raise TypeError(f"view {index} must be None or a native image path")
         connected_paths.append((index, value))
     if len(connected_paths) < 1:
         raise ValueError(f"{purpose} requires at least two connected images")
