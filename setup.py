@@ -404,7 +404,11 @@ def _install_prepare_dependencies(
             return {"status": "failed", "code": "dependency_install_failed", "failed_command": command, "commands": results}
     pip_check = _run_setup_command([str(venv_python), "-m", "pip", "check"], cwd=workspace_root)
     runtime_check = _runtime_cuda_check(venv_python, workspace_root, wheelhouse, runtime_evidence)
-    pip_check_acceptable = pip_check["ok"] or _is_known_aarch64_nvidia_platform_check_false_positive(pip_check, wheelhouse)
+    pip_check_acceptable = (
+        pip_check["ok"]
+        or _is_known_aarch64_nvidia_platform_check_false_positive(pip_check, wheelhouse)
+        or _is_optional_natten_absent_check(pip_check, wheelhouse)
+    )
     if not pip_check_acceptable or not runtime_check["ok"]:
         return {
             "status": "failed",
@@ -433,6 +437,16 @@ def _install_prepare_dependencies(
         "runtime_check": runtime_check,
         "commands": results,
     }
+
+
+def _is_optional_natten_absent_check(pip_check: dict[str, Any], wheelhouse: Path) -> bool:
+    # Linux x64 ships natten as optional (no libnatten wheel); naf and pixal3d-core
+    # still declare it, so pip check fails although the runtime installs a fallback.
+    if _wheelhouse_contains_natten(wheelhouse):
+        return False
+    output = f"{pip_check.get('stdout_tail', '')}\n{pip_check.get('stderr_tail', '')}"
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    return bool(lines) and all(line.endswith("requires natten, which is not installed.") for line in lines)
 
 
 def _is_known_aarch64_nvidia_platform_check_false_positive(pip_check: dict[str, Any], wheelhouse: Path) -> bool:

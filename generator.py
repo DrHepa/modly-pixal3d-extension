@@ -112,6 +112,60 @@ def _with_ui_managed_asset_guidance(result: dict) -> dict:
     return {**result, "message": message}
 
 
+def _release_cuda_cache() -> None:
+    """Return cached GPU blocks to the driver after each run.
+
+    A failed run (e.g. Standard mode OOM) otherwise leaves ~14 GB reserved in
+    this long-lived worker; cuBLAS allocates outside PyTorch's cache, so the next
+    run dies with CUBLAS_STATUS_ALLOC_FAILED even in Low VRAM mode.
+    """
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def _stage_external_images(paths: list, workspace_dir: Path) -> list:
+    """Copy connected images that live outside the workspace into it.
+
+    Modly passes extra image ports as the Image node's original file path (e.g.
+    ~/Desktop), but validate_ordered_images only accepts workspace files.
+    """
+    import hashlib
+    import shutil
+
+    workspace = workspace_dir.resolve(strict=True)
+    staged: list = []
+    for value in paths:
+        if not isinstance(value, str) or not value or not Path(value).is_absolute():
+            staged.append(value)
+            continue
+        source = Path(value)
+        try:
+            source.relative_to(workspace)
+            staged.append(value)
+            continue
+        except ValueError:
+            pass
+        if not source.is_file() or source.stat().st_size > 64 * 1024 * 1024:
+            staged.append(value)
+            continue
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()[:16]
+        target_dir = workspace / "Inputs" / "pixal3d-mv"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / f"{digest}{source.suffix.lower()}"
+        if not target.exists():
+            shutil.copyfile(source, target)
+        staged.append(str(target))
+    return staged
+
+
 class Pixal3DGenerator(BaseGenerator):
     """Root Modly model generator contract for Pixal3D.
 
@@ -743,6 +797,7 @@ class Pixal3DGenerator(BaseGenerator):
             if not isinstance(extra_image_paths, list):
                 raise ValueError("Pixal3D MV requires extra_image_paths from Modly's ordered multiple-image ports")
             self._raise_if_generation_cancelled(cancel_evt)
+            extra_image_paths = _stage_external_images(extra_image_paths, Path(self.workspace_dir))
             validate_ordered_images(bytes(image_or_job), extra_image_paths, self.workspace_dir)
             mv_root = self._model_source()
             base_root = self._base_source()
@@ -810,6 +865,7 @@ class Pixal3DGenerator(BaseGenerator):
                 raise RuntimeError(json.dumps(result, sort_keys=True))
             return Path(result["output"]["glb_path"])
         finally:
+            _release_cuda_cache()
             if input_path is not None:
                 try:
                     input_path.unlink(missing_ok=True)

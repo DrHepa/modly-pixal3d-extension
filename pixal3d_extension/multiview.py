@@ -557,6 +557,7 @@ def run_multiview(
                 runtime._install_windows_native_module_aliases()
                 runtime._install_natten_fallback()
                 runtime._silence_flex_gemm_autotuners()
+                runtime._guard_mesh_fill_holes()
                 from pixal3d_extension.vendor import inference_mv
                 dino_path = str(base / "auxiliary" / "dinov3")
                 for item in inference_mv.IMAGE_COND_CONFIGS.values():

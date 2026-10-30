@@ -111,11 +111,17 @@ class WindowsCudaLaneTests(unittest.TestCase):
                     select_asset(self.manifest, runtime)
                 self.assertEqual(failure.exception.code, "unsupported_lane")
 
-    def test_linux_exact_driver_mapping_and_no_metadata_behavior_are_unchanged(self):
+    def test_linux_newer_drivers_use_published_cu124_lane_and_no_metadata_behavior_is_unchanged(self):
+        # Linux wheelhouses are published only for cuda124; newer pre-Blackwell
+        # drivers run them, as on Windows.
         for machine in ("x86_64", "aarch64"):
-            for version, lane in ((124, "cuda124"), (126, "cuda126"), (128, "cuda128"), (130, "cuda130")):
+            for version in (124, 126, 128, 130):
                 with self.subTest(machine=machine, version=version):
                     runtime = detect_runtime_lane({"cuda_version": version, "gpu_sm": 86}, system="Linux", machine=machine, python_tag="cp312")
+                    self.assertEqual(runtime["accelerator_lane"], "cuda124")
+            for version, sm, lane in ((123, 86, "cuda123"), (128, 100, "cuda128"), (128, 120, "cuda128")):
+                with self.subTest(machine=machine, version=version, sm=sm):
+                    runtime = detect_runtime_lane({"cuda_version": version, "gpu_sm": sm}, system="Linux", machine=machine, python_tag="cp312")
                     self.assertEqual(runtime["accelerator_lane"], lane)
         for payload in ({}, {"ext_dir": "/extension"}):
             self.assertEqual(windows_runtime(payload), {"os": "windows", "arch": "x64", "python_tag": "cp311", "accelerator_lane": "cuda124"})

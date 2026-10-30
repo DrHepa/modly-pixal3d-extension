@@ -236,40 +236,56 @@ def _install_natten_fallback() -> None:
         neighborhood_size = kernel_h * kernel_w
         padding = ((kernel_h // 2) * dilation_h, (kernel_w // 2) * dilation_w)
 
-        q_heads = q.permute(0, 3, 4, 1, 2).reshape(bn, d_qk, h, w)
-        k_heads = k.permute(0, 3, 4, 1, 2).reshape(bn, d_qk, h, w)
-        v_heads = v.permute(0, 3, 4, 1, 2).reshape(bn, d_v, h, w)
+        # Process output rows in chunks, slicing q/k/v in place: unfolding the
+        # whole image at once materialises every neighbourhood (~20 GB for NAF's
+        # 9x9 windows), and full-size permuted/padded copies of NAF's texture
+        # features cost ~4 GB each on top of that.
+        pad_h, pad_w = padding
+        bytes_per_row = bn * w * neighborhood_size * (d_qk + d_v + 2) * q.element_size()
+        rows_per_chunk = max(1, min(h, (512 * 1024 * 1024) // max(1, bytes_per_row)))
+        out = v.new_empty((b, h, w, n, d_v))
+        scale = 1.0 / math.sqrt(d_qk)
+        unfold_args = {"kernel_size": (kernel_h, kernel_w), "dilation": (dilation_h, dilation_w), "stride": 1}
 
-        q_dense = q_heads.reshape(bn, d_qk, h * w).transpose(1, 2)
-        k_neighbors = torch_functional.unfold(
-            k_heads,
-            kernel_size=(kernel_h, kernel_w),
-            dilation=(dilation_h, dilation_w),
-            padding=padding,
-            stride=1,
-        ).reshape(bn, d_qk, neighborhood_size, h * w).permute(0, 3, 2, 1)
-        v_neighbors = torch_functional.unfold(
-            v_heads,
-            kernel_size=(kernel_h, kernel_w),
-            dilation=(dilation_h, dilation_w),
-            padding=padding,
-            stride=1,
-        ).reshape(bn, d_v, neighborhood_size, h * w).permute(0, 3, 2, 1)
+        def to_heads(x: torch.Tensor, d: int, rows: int) -> torch.Tensor:
+            return x.permute(0, 3, 4, 1, 2).reshape(bn, d, rows, w)
 
-        valid_neighbors = torch_functional.unfold(
-            torch.ones((1, 1, h, w), device=q.device, dtype=q.dtype),
-            kernel_size=(kernel_h, kernel_w),
-            dilation=(dilation_h, dilation_w),
-            padding=padding,
-            stride=1,
-        ).reshape(1, neighborhood_size, h * w).transpose(1, 2) > 0
+        for row_start in range(0, h, rows_per_chunk):
+            row_end = min(h, row_start + rows_per_chunk)
+            rows = row_end - row_start
+            src_start = max(0, row_start - pad_h)
+            src_end = min(h, row_end + pad_h)
+            pad = (pad_w, pad_w, src_start - (row_start - pad_h), (row_end + pad_h) - src_end)
 
-        scores = (q_dense.unsqueeze(2) * k_neighbors).sum(dim=-1) * (1.0 / math.sqrt(d_qk))
-        scores = scores.masked_fill(~valid_neighbors, torch.finfo(scores.dtype).min)
-        attention = torch.softmax(scores, dim=-1)
-        out = (attention.unsqueeze(-1) * v_neighbors).sum(dim=2)
+            q_dense = to_heads(q[:, row_start:row_end], d_qk, rows).reshape(bn, d_qk, rows * w).transpose(1, 2)
+            k_chunk = torch_functional.pad(to_heads(k[:, src_start:src_end], d_qk, src_end - src_start), pad)
+            k_neighbors = torch_functional.unfold(k_chunk, **unfold_args).reshape(
+                bn, d_qk, neighborhood_size, rows * w
+            ).permute(0, 3, 2, 1)
+            del k_chunk
+            ones_chunk = torch_functional.pad(
+                torch.ones((1, 1, src_end - src_start, w), device=q.device, dtype=q.dtype), pad
+            )
+            valid_neighbors = torch_functional.unfold(ones_chunk, **unfold_args).reshape(
+                1, neighborhood_size, rows * w
+            ).transpose(1, 2) > 0
 
-        return out.transpose(1, 2).reshape(b, n, d_v, h, w).permute(0, 3, 4, 1, 2)
+            scores = (q_dense.unsqueeze(2) * k_neighbors).sum(dim=-1) * scale
+            del k_neighbors, q_dense
+            scores = scores.masked_fill(~valid_neighbors, torch.finfo(scores.dtype).min)
+            attention = torch.softmax(scores, dim=-1)
+            del scores
+            v_chunk = torch_functional.pad(to_heads(v[:, src_start:src_end], d_v, src_end - src_start), pad)
+            v_neighbors = torch_functional.unfold(v_chunk, **unfold_args).reshape(
+                bn, d_v, neighborhood_size, rows * w
+            ).permute(0, 3, 2, 1)
+            del v_chunk
+            chunk = (attention.unsqueeze(-1) * v_neighbors).sum(dim=2)
+            del v_neighbors, attention
+            # chunk: [bn, rows*w, d_v] -> [b, rows, w, n, d_v]
+            out[:, row_start:row_end] = chunk.reshape(b, n, rows, w, d_v).permute(0, 2, 3, 1, 4)
+
+        return out
 
     natten_module = types.ModuleType("natten")
     natten_module.__loader__ = None
@@ -278,6 +294,77 @@ def _install_natten_fallback() -> None:
     natten_module.HAS_LIBNATTEN = False
     natten_module.na2d = na2d
     sys.modules["natten"] = natten_module
+
+
+def _is_cuda_oom(exc: BaseException) -> bool:
+    return "out of memory" in str(exc) or type(exc).__name__ == "OutOfMemoryError"
+
+
+def _retry_after_releasing_cuda_cache(function: Callable[..., Any], label: str, *args: Any, **kwargs: Any) -> Any:
+    """Release PyTorch's cached GPU blocks, run, and retry once after an OOM."""
+    import gc
+
+    import torch
+
+    gc.collect()
+    torch.cuda.empty_cache()
+    try:
+        return function(*args, **kwargs)
+    except RuntimeError as exc:
+        if not _is_cuda_oom(exc):
+            raise
+        print(f"[Pixal3D] {label} ran out of GPU memory; retrying after releasing cache (local patch)",
+              file=sys.stderr, flush=True)
+    gc.collect()
+    torch.cuda.empty_cache()
+    return function(*args, **kwargs)
+
+
+def _guard_mesh_fill_holes() -> None:
+    """Retry, then skip, Mesh.fill_holes when CuMesh runs out of GPU memory.
+
+    fill_holes runs on the raw decoded mesh (tens of millions of faces for some
+    inputs) before export simplification, and only closes small holes. On a
+    16 GB card it can OOM after all models are already offloaded.
+    """
+    import gc
+
+    try:
+        import torch
+        from pixal3d.representations.mesh.base import Mesh
+    except ImportError:
+        # Contract tests and custom inference shims do not ship the real mesh stack.
+        return
+
+    original = Mesh.fill_holes
+    if getattr(original, "_modly_oom_guard", False):
+        return
+
+    def is_oom(exc: BaseException) -> bool:
+        return isinstance(exc, torch.OutOfMemoryError) or "out of memory" in str(exc)
+
+    def fill_holes(self, *args, **kwargs):
+        gc.collect()
+        torch.cuda.empty_cache()
+        for attempt in (1, 2):
+            try:
+                return original(self, *args, **kwargs)
+            except RuntimeError as exc:
+                if not is_oom(exc):
+                    raise
+                del exc
+                gc.collect()
+                torch.cuda.empty_cache()
+                if attempt == 2:
+                    print(
+                        f"[Pixal3D] fill_holes skipped: out of GPU memory on {len(self.faces):,} faces (local patch)",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+        return None
+
+    fill_holes._modly_oom_guard = True
+    Mesh.fill_holes = fill_holes
 
 
 def _silence_flex_gemm_autotuners() -> None:
@@ -509,7 +596,9 @@ def _scoped_to_glb_texture_size(texture_size: Any, inference_module: Any | None 
 
         def selected_to_glb(*args, **kwargs):
             kwargs["texture_size"] = parsed_texture_size
-            return original(*args, **kwargs)
+            # CuMesh allocates with raw cudaMalloc, so blocks PyTorch cached
+            # during decoding are invisible to it until they are released.
+            return _retry_after_releasing_cuda_cache(original, "to_glb", *args, **kwargs)
 
         postprocess.to_glb = selected_to_glb
         try:
@@ -962,6 +1051,7 @@ def run_job(
                 checkpoint = "flex_gemm_silence"
                 _silence_flex_gemm_autotuners()
                 _diagnostic_checkpoint("flex_gemm_silence:done")
+                _guard_mesh_fill_holes()
 
                 checkpoint = "prepare_inference_args"
                 seed = int(params.get("seed", -1))
