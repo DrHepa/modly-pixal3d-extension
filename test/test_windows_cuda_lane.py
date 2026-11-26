@@ -119,10 +119,16 @@ class WindowsCudaLaneTests(unittest.TestCase):
                 with self.subTest(machine=machine, version=version):
                     runtime = detect_runtime_lane({"cuda_version": version, "gpu_sm": 86}, system="Linux", machine=machine, python_tag="cp312")
                     self.assertEqual(runtime["accelerator_lane"], "cuda124")
+                    self.assertEqual(runtime["cuda_version"], f"{version // 10}.{version % 10}")
+                    arch = "x64" if machine == "x86_64" else "aarch64"
+                    self.assertEqual(select_asset(self.manifest, runtime)["id"], f"linux-{arch}-cp312-cuda124")
             for version, sm, lane in ((123, 86, "cuda123"), (128, 100, "cuda128"), (128, 120, "cuda128")):
                 with self.subTest(machine=machine, version=version, sm=sm):
                     runtime = detect_runtime_lane({"cuda_version": version, "gpu_sm": sm}, system="Linux", machine=machine, python_tag="cp312")
                     self.assertEqual(runtime["accelerator_lane"], lane)
+                    with self.assertRaises(WheelhouseError) as failure:
+                        select_asset(self.manifest, runtime)
+                    self.assertEqual(failure.exception.code, "unsupported_lane")
         for payload in ({}, {"ext_dir": "/extension"}):
             self.assertEqual(windows_runtime(payload), {"os": "windows", "arch": "x64", "python_tag": "cp311", "accelerator_lane": "cuda124"})
 
