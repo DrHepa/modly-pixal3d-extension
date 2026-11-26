@@ -20,7 +20,7 @@ def png_bytes(color=(30, 40, 50, 255)) -> bytes:
 
 
 class MultiviewImageContractTests(unittest.TestCase):
-    def test_windows_extended_paths_and_identity_containment_are_structural(self):
+    def test_windows_extended_paths_and_stable_identities_are_structural(self):
         import pixal3d_extension.multiview_images as multiview_images
 
         self.assertEqual(
@@ -39,41 +39,21 @@ class MultiviewImageContractTests(unittest.TestCase):
             multiview_images._windows_extended_path(r"\\?\UNC\server\share\view.png"),
             r"\\?\UNC\server\share\view.png",
         )
-        for unsafe in (r"relative\view.png", r"\\.\PhysicalDrive0", r"\\?\GLOBALROOT\Device\HarddiskVolume1"):
+        for unsafe in (
+            r"relative\view.png", r"\\.\PhysicalDrive0", r"\\?\GLOBALROOT\Device\HarddiskVolume1",
+            r"C:\views\..\view.png", r"C:\views\.\view.png", r"C:\views\CON.png",
+            r"C:\views\view.png:stream", "C:\\views\\alias.\\view.png",
+        ):
             with self.subTest(unsafe=unsafe), self.assertRaises(ValueError):
                 multiview_images._windows_extended_path(unsafe)
 
         identity = multiview_images._WindowsFileIdentity
         workspace = identity(10, bytes.fromhex("01" * 16))
-        candidate = identity(10, bytes.fromhex("02" * 16))
-        case_only_distinct = identity(10, bytes.fromhex("03" * 16))
-        other_volume_or_share = identity(11, bytes.fromhex("02" * 16))
         unavailable = identity(10, bytes(16))
         no_unique_id = identity(10, bytes([0xFF]) * 16)
         self.assertTrue(multiview_images._windows_file_identity_is_valid(workspace))
         self.assertFalse(multiview_images._windows_file_identity_is_valid(unavailable))
         self.assertFalse(multiview_images._windows_file_identity_is_valid(no_unique_id))
-        self.assertTrue(multiview_images._windows_identity_chain_contains(
-            workspace, candidate, [case_only_distinct, workspace],
-        ))
-        self.assertFalse(multiview_images._windows_identity_chain_contains(
-            workspace, candidate, [case_only_distinct],
-        ))
-        self.assertFalse(multiview_images._windows_identity_chain_contains(
-            workspace, other_volume_or_share, [workspace],
-        ))
-        self.assertFalse(multiview_images._windows_identity_chain_contains(
-            unavailable, candidate, [unavailable],
-        ))
-        self.assertFalse(multiview_images._windows_identity_chain_contains(
-            no_unique_id, candidate, [no_unique_id],
-        ))
-        self.assertFalse(multiview_images._windows_identity_chain_contains(
-            workspace, unavailable, [workspace],
-        ))
-        self.assertFalse(multiview_images._windows_identity_chain_contains(
-            workspace, no_unique_id, [workspace],
-        ))
 
     def test_manifest_uses_upstream_ordered_image_ports_and_da3(self):
         manifest = json.loads((Path(__file__).parents[1] / "manifest.json").read_text())
@@ -169,10 +149,10 @@ class MultiviewImageContractTests(unittest.TestCase):
                     png_bytes(), [str(second), None, str(third), str(fourth), str(second)], workspace,
                 )
             for invalid in (False, 7, {}, []):
-                with self.subTest(invalid=invalid), self.assertRaisesRegex(TypeError, "None or a workspace image path"):
+                with self.subTest(invalid=invalid), self.assertRaisesRegex(TypeError, "None or a native image path"):
                     validate_ordered_images(png_bytes(), [invalid], workspace)
 
-    def test_validation_rejects_fewer_than_two_duplicates_escape_symlinks_and_spoofing_without_mutation(self):
+    def test_validation_rejects_fewer_than_two_duplicates_traversal_symlinks_and_spoofing_without_mutation(self):
         from pixal3d_extension.multiview_images import validate_ordered_images
 
         with tempfile.TemporaryDirectory() as directory:
@@ -190,7 +170,7 @@ class MultiviewImageContractTests(unittest.TestCase):
             cases = [
                 ([], "at least two"),
                 ([str(image), None, str(image)], "duplicate"),
-                ([str(outside)], "workspace"),
+                (["../outside.png"], "traversal"),
                 ([str(link)], "symlink"),
             ]
             for paths, message in cases:
@@ -543,7 +523,10 @@ class MultiviewImageContractTests(unittest.TestCase):
         self.assertNotIn("normcase", source)
         self.assertNotIn("commonpath", source)
         workspace_file = source.split("def _workspace_file", 1)[1].split("def validate_ordered_images", 1)[0]
-        self.assertLess(workspace_file.index('if os.name == "nt":'), workspace_file.index("resolve(strict=True)"))
+        self.assertIn("_windows_stable_read", workspace_file)
+        self.assertNotIn("resolve(strict=True)", workspace_file)
+        self.assertIn("actual_ancestor_identities != lexical_ancestor_identities", source)
+        self.assertNotIn("workspace_identity", source)
         windows_branch = source.split('if os.name == "nt":', 1)[1].split("# Open every component", 1)[0]
         self.assertNotIn("read_bytes", windows_branch)
 

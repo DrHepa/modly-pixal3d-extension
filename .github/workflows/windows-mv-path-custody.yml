@@ -5,11 +5,17 @@ on:
     paths:
       - 'pixal3d_extension/multiview_images.py'
       - 'test/test_windows_multiview_custody.py'
+      - 'test/test_external_image_inputs.py'
+      - 'pixal3d_extension/scene_prepare.py'
+      - 'generator.py'
       - '.github/workflows/windows-mv-path-custody.yml'
   push:
     paths:
       - 'pixal3d_extension/multiview_images.py'
       - 'test/test_windows_multiview_custody.py'
+      - 'test/test_external_image_inputs.py'
+      - 'pixal3d_extension/scene_prepare.py'
+      - 'generator.py'
       - '.github/workflows/windows-mv-path-custody.yml'
   workflow_dispatch:
 
@@ -33,6 +39,31 @@ jobs:
         shell: pwsh
         run: python -m pip install --disable-pip-version-check --no-cache-dir Pillow==11.3.0
 
-      - name: Exercise real Windows file and reparse-point custody
+      - name: Create isolated local SMB share for real UNC image inputs
         shell: pwsh
-        run: python -m unittest discover -s test -p 'test_windows_multiview_custody.py' -v
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'modly-selected-image-share'
+          New-Item -ItemType Directory -Path $root | Out-Null
+          $account = "$env:COMPUTERNAME\$env:USERNAME"
+          New-SmbShare -Name 'ModlyImageInputs' -Path $root -FullAccess $account | Out-Null
+          "MODLY_TEST_IMAGE_UNC_ROOT=\\localhost\ModlyImageInputs" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Verify real UNC share and all CPU-only external image adapters
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (!(Test-Path $env:MODLY_TEST_IMAGE_UNC_ROOT)) { throw 'Real UNC image share is unavailable' }
+          python -m unittest discover -s test -p 'test_windows_multiview_custody.py' -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s test -p 'test_external_image_inputs.py' -v
+          exit $LASTEXITCODE
+
+      - name: Remove isolated SMB share and fixtures
+        if: always()
+        shell: pwsh
+        run: |
+          $share = Get-SmbShare -Name 'ModlyImageInputs' -ErrorAction SilentlyContinue
+          if ($share) { Remove-SmbShare -Name 'ModlyImageInputs' -Force }
+          $root = Join-Path $env:RUNNER_TEMP 'modly-selected-image-share'
+          if (Test-Path $root) { Remove-Item -Recurse -Force $root }

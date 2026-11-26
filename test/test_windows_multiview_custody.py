@@ -36,7 +36,7 @@ class WindowsMultiviewCustodyTests(unittest.TestCase):
             self.assertEqual(resolved, source.resolve())
             self.assertEqual(data, source.read_bytes())
 
-    def test_directory_and_junction_escape_are_rejected(self):
+    def test_external_file_is_accepted_but_directory_and_junction_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             workspace = root / "workspace"
@@ -44,10 +44,11 @@ class WindowsMultiviewCustodyTests(unittest.TestCase):
             workspace.mkdir()
             outside.mkdir()
             Image.new("RGB", (8, 8), (1, 2, 3)).save(outside / "outside.png")
-            with self.assertRaisesRegex(ValueError, "regular file"):
+            with self.assertRaisesRegex(ValueError, "regular.*file"):
                 _workspace_file(str(workspace), workspace.resolve(), "view")
-            with self.assertRaisesRegex(ValueError, "workspace"):
-                _workspace_file(str(outside / "outside.png"), workspace.resolve(), "view")
+            resolved, data = _workspace_file(str(outside / "outside.png"), workspace.resolve(), "view")
+            self.assertTrue(resolved.is_file())
+            self.assertEqual(data, (outside / "outside.png").read_bytes())
             junction = workspace / "junction"
             created = subprocess.run(
                 ["cmd", "/c", "mklink", "/J", str(junction), str(outside)],
@@ -60,7 +61,7 @@ class WindowsMultiviewCustodyTests(unittest.TestCase):
             finally:
                 os.rmdir(junction)
 
-    def test_equivalent_short_and_long_workspace_aliases_are_accepted(self):
+    def test_equivalent_short_and_long_selected_file_aliases_are_accepted(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace alias regression"
             workspace.mkdir()
@@ -70,7 +71,7 @@ class WindowsMultiviewCustodyTests(unittest.TestCase):
             if os.path.normcase(str(short_workspace)) == os.path.normcase(str(workspace)):
                 self.skipTest("8.3 short names are unavailable on this Windows volume")
 
-            resolved, data = _workspace_file(str(source), short_workspace, "view")
+            resolved, data = _workspace_file(str(self._short_path(source)), workspace, "view")
 
             self.assertTrue(resolved.is_file())
             self.assertEqual(data, source.read_bytes())
@@ -96,7 +97,7 @@ class WindowsMultiviewCustodyTests(unittest.TestCase):
             finally:
                 shutil.rmtree(_windows_extended_path(str(first)), ignore_errors=True)
 
-    def test_case_sensitive_case_only_distinct_directory_is_not_workspace(self):
+    def test_case_sensitive_distinct_external_directory_is_read_by_physical_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             try:
@@ -123,8 +124,10 @@ class WindowsMultiviewCustodyTests(unittest.TestCase):
             resolved, data = _workspace_file(str(inside), workspace, "inside")
             self.assertTrue(resolved.is_file())
             self.assertEqual(data, inside.read_bytes())
-            with self.assertRaisesRegex(ValueError, "workspace"):
-                _workspace_file(str(outside), workspace, "outside")
+            outside_resolved, outside_data = _workspace_file(str(outside), workspace, "outside")
+            self.assertTrue(outside_resolved.is_file())
+            self.assertEqual(outside_data, outside.read_bytes())
+            self.assertNotEqual(data, outside_data)
             junction = workspace / "case-only-target"
             created = subprocess.run(
                 ["cmd", "/c", "mklink", "/J", str(junction), str(case_only_distinct)],
@@ -137,7 +140,7 @@ class WindowsMultiviewCustodyTests(unittest.TestCase):
             finally:
                 os.rmdir(junction)
 
-    def test_different_volume_is_rejected_when_writable_volume_exists(self):
+    def test_different_volume_is_accepted_when_writable_volume_exists(self):
         import ctypes
 
         current_drive = Path(tempfile.gettempdir()).drive.upper()
@@ -152,15 +155,45 @@ class WindowsMultiviewCustodyTests(unittest.TestCase):
             workspace.mkdir()
             for drive in candidates:
                 try:
-                    with tempfile.TemporaryDirectory(dir=drive) as other_directory:
-                        outside = Path(other_directory) / "outside.png"
-                        Image.new("RGB", (8, 8), (1, 2, 3)).save(outside)
-                        with self.assertRaisesRegex(ValueError, "workspace|volume"):
-                            _workspace_file(str(outside), workspace, "view")
-                        return
+                    selected = tempfile.TemporaryDirectory(dir=drive)
                 except (OSError, PermissionError):
                     continue
+                with selected as other_directory:
+                    outside = Path(other_directory) / "outside.png"
+                    Image.new("RGB", (8, 8), (1, 2, 3)).save(outside)
+                    resolved, data = _workspace_file(str(outside), workspace, "view")
+                    self.assertTrue(resolved.is_file())
+                    self.assertEqual(data, outside.read_bytes())
+                    return
         self.skipTest("No second writable Windows volume is available")
+
+    def test_real_unc_share_outside_local_workspace_is_accepted(self):
+        share = os.environ.get("MODLY_TEST_IMAGE_UNC_ROOT")
+        if not share:
+            self.skipTest("Set MODLY_TEST_IMAGE_UNC_ROOT to a real writable SMB share")
+        self.assertTrue(share.startswith("\\\\"), "UNC coverage must use a real share, not a local substitute")
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory(dir=share) as selected:
+            workspace = Path(directory) / "workspace"
+            workspace.mkdir()
+            source = Path(selected) / "selected image.png"
+            Image.new("RGB", (8, 8), (1, 2, 3)).save(source)
+            original = source.read_bytes()
+            resolved, data = _workspace_file(str(source), workspace, "view")
+            self.assertTrue(str(resolved).startswith("\\\\"))
+            self.assertEqual(data, original)
+            self.assertEqual(source.read_bytes(), original)
+
+    def test_devices_streams_traversal_and_ambiguous_aliases_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            for path in (
+                r"\\.\PhysicalDrive0", r"\\?\GLOBALROOT\Device\HarddiskVolume1",
+                str(workspace / "NUL"), str(workspace / "view.png") + ":hidden",
+                str(workspace / ".." / "outside.png"), "C:relative.png", r"\root-relative.png",
+                str(workspace / "alias.") + "\\view.png",
+            ):
+                with self.subTest(path=path), self.assertRaises(ValueError):
+                    _workspace_file(path, workspace, "view")
 
     def test_open_handle_blocks_path_swap_until_read_completes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -175,6 +208,10 @@ class WindowsMultiviewCustodyTests(unittest.TestCase):
             def attempt_swap(_path):
                 with self.assertRaises(PermissionError):
                     os.replace(replacement, source)
+                with self.assertRaises(PermissionError):
+                    source.open("r+b")
+                with self.assertRaises(PermissionError):
+                    source.unlink()
 
             resolved, data = _windows_stable_read(
                 source, workspace.resolve(), "view", _opened_hook=attempt_swap,
