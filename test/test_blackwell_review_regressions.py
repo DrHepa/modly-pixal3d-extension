@@ -121,8 +121,12 @@ class BlackwellReviewRegressions(unittest.TestCase):
             with self.subTest(failure=failure), patch.object(runtime,'_run',return_value=types.SimpleNamespace(stdout=json.dumps(receipt))), self.assertRaises(RuntimeError):
                 runtime.validate_source_imports(Path('/fixture'),allow_no_driver=True)
 
-    def test_release_version_is_074(self):
-        self.assertEqual(json.loads((Path(__file__).resolve().parents[1]/'manifest.json').read_text())['version'],'0.7.4')
+    def test_manifest_uses_a_stable_release_version_at_least_074(self):
+        manifest = Path(__file__).resolve().parents[1] / 'manifest.json'
+        version = json.loads(manifest.read_text(encoding='utf-8'))['version']
+        self.assertIsInstance(version, str)
+        self.assertRegex(version, r'\A(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}\Z')
+        self.assertGreaterEqual(tuple(map(int, version.split('.'))), (0, 7, 4))
 
 
 if __name__=='__main__':
