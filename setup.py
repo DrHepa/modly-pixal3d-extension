@@ -271,6 +271,7 @@ def _run_setup_command(args: list[str], *, cwd: Path, timeout: int | None = None
         "returncode": completed.returncode,
         "stdout_tail": completed.stdout[-4000:],
         "stderr_tail": completed.stderr[-4000:],
+        "output_truncated": len(completed.stdout) > 4000 or len(completed.stderr) > 4000,
         "ok": completed.returncode == 0,
         "attempts": attempts,
     }
@@ -404,7 +405,11 @@ def _install_prepare_dependencies(
             return {"status": "failed", "code": "dependency_install_failed", "failed_command": command, "commands": results}
     pip_check = _run_setup_command([str(venv_python), "-m", "pip", "check"], cwd=workspace_root)
     runtime_check = _runtime_cuda_check(venv_python, workspace_root, wheelhouse, runtime_evidence)
-    pip_check_acceptable = pip_check["ok"] or _is_known_aarch64_nvidia_platform_check_false_positive(pip_check, wheelhouse)
+    pip_check_acceptable = (
+        pip_check["ok"]
+        or _is_known_aarch64_nvidia_platform_check_false_positive(pip_check, wheelhouse)
+        or _is_known_linux_x64_missing_natten(pip_check, wheelhouse, plan["policy"]["lane"])
+    )
     if not pip_check_acceptable or not runtime_check["ok"]:
         return {
             "status": "failed",
@@ -433,6 +438,25 @@ def _install_prepare_dependencies(
         "runtime_check": runtime_check,
         "commands": results,
     }
+
+
+def _is_known_linux_x64_missing_natten(pip_check: dict[str, Any], wheelhouse: Path, lane: str) -> bool:
+    # The published Linux x64 cu124 bundle omits the optional native NATTEN wheel.
+    # Keep strict checks for every other diagnostic; a truncated log cannot prove
+    # that the missing optional dependency was the only failure.
+    if lane != "linux-x64-cp312-cuda124" or _wheelhouse_contains_natten(wheelhouse):
+        return False
+    if pip_check.get("returncode") != 1 or pip_check.get("output_truncated") is not False:
+        return False
+    stdout = pip_check.get("stdout_tail")
+    if not isinstance(stdout, str) or pip_check.get("stderr_tail") != "":
+        return False
+    lines = stdout.splitlines()
+    allowed = {
+        "naf 0.1.0+modly requires natten, which is not installed.",
+        "pixal3d-core 0.1.0+modly requires natten, which is not installed.",
+    }
+    return bool(lines) and set(lines) <= allowed
 
 
 def _is_known_aarch64_nvidia_platform_check_false_positive(pip_check: dict[str, Any], wheelhouse: Path) -> bool:

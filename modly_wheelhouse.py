@@ -518,6 +518,11 @@ def detect_runtime_lane(
         # driver can use the published cu124 stack; kernel support is separate.
         if tuple(int(part) for part in cuda_version.split(".")) >= (12, 4):
             accelerator_lane = "cuda124"
+    elif os_name == "linux" and arch in {"x64", "aarch64"} and python_tag == "cp312" and int(gpu_sm) < 100:
+        # Same as Windows: Modly reports driver capability, and the published Linux
+        # wheelhouses are cu124 builds, which newer pre-Blackwell drivers run.
+        if tuple(int(part) for part in cuda_version.split(".")) >= (12, 4):
+            accelerator_lane = "cuda124"
     return {
         **evidence,
         "accelerator_lane": accelerator_lane,
