@@ -140,7 +140,8 @@ test('MV docs distinguish UI-managed model weights from intentional first-use NA
   assert.match(docs, /primary image arrives as bytes and secondary images as native file\s+paths/i)
   assert.match(docs, /do not need to copy selected images into the workspace/i)
   assert.match(docs, /empty slots are compacted[\s\S]*?do not rely on gaps/i)
-  assert.match(docs, /Every MV camera mode currently requires DA3 weights and runtime/i)
+  assert.match(docs, /Auto requires DA3 weights and its private calibration runtime; declared roles\s+skip that runtime/i)
+  assert.match(docs, /host still requires the DA3 weight group/i)
   assert.doesNotMatch(docs, /null gaps are ignored|secondary byte uploads/i)
 })
 

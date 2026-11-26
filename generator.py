@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -176,6 +177,30 @@ class Pixal3DGenerator(BaseGenerator):
             raise RuntimeError("Pixal3D MV automatic camera calibration requires the Modly shared group da3-base")
         return Path(shared_dirs[DA3_GROUP])
 
+    def _mv_calibration_status(self) -> tuple[dict | None, Exception | None]:
+        """Classify an explicitly selected Auto preflight, preserving its cause."""
+        from pixal3d_extension.scene_prepare import validate_da3_weights
+        from pixal3d_extension.scene_prepare_lane import da3_capability, validate_da3_runtime
+
+        try:
+            validate_da3_weights(self._da3_source())
+        except (OSError, ValueError, RuntimeError) as exc:
+            return {"ok": False, "machine_code": "mv_assets_missing",
+                    "reason": f"Download or repair the DA3 Base shared group in Modly Models UI: {exc}",
+                    "missing": [f"DA3 camera calibration: {exc}"]}, exc
+        support = da3_capability()
+        if not support["supported"]:
+            return {"ok": False, "machine_code": "mv_calibration_unsupported_platform",
+                    "reason": support["reason"]}, None
+        try:
+            validate_da3_runtime(Path(__file__).resolve().parent)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+            return {"ok": False, "machine_code": "mv_calibration_runtime_unavailable",
+                    "reason": "Automatic MV camera calibration runtime is unavailable. Use extension Repair "
+                              "only for a supported Scene Prep lane; Repair does not enable unsupported GPUs. "
+                              f"{type(exc).__name__}: {exc}"}, exc
+        return None, None
+
     def _single_view_compatibility_error(self) -> dict | None:
         from pixal3d_extension.readiness import single_view_transformers_compatibility
 
@@ -226,19 +251,18 @@ class Pixal3DGenerator(BaseGenerator):
             return
         if node_id == "generate-mv":
             from pixal3d_extension.multiview import validate_mv_pipeline_config
-            from pixal3d_extension.scene_prepare import validate_da3_weights
-            from pixal3d_extension.scene_prepare_lane import validate_da3_runtime
 
             try:
                 validate_mv_pipeline_config(self._model_source(), self._base_source())
-                if params is not None and params.get("view_layout", "auto") != "declared_roles":
-                    validate_da3_weights(self._da3_source())
-                    validate_da3_runtime(Path(__file__).resolve().parent)
             except (OSError, UnicodeError, ValueError, RuntimeError) as exc:
                 raise RuntimeError(
                     "mv_assets_missing: download or repair the Pixal3D base, MV, and DA3 Base shared groups in Modly Models UI: "
                     f"{exc}"
                 ) from exc
+            if params is not None and params.get("view_layout", "auto") == "auto":
+                status, cause = self._mv_calibration_status()
+                if status is not None:
+                    raise RuntimeError(f"{status['machine_code']}: {status['reason']}") from cause
             return
         if node_id == "worldsculpt":
             from pixal3d_extension.worldsculpt import validate_base
@@ -431,8 +455,6 @@ class Pixal3DGenerator(BaseGenerator):
             return {"ok": True, "machine_code": "ready", "reason": "Local assets and imports present; GPU inference untested."}
         if self._effective_node_id() == "generate-mv":
             from pixal3d_extension.multiview import missing_mv_assets, mv_runtime_available
-            from pixal3d_extension.scene_prepare import validate_da3_weights
-            from pixal3d_extension.scene_prepare_lane import da3_capability, validate_da3_runtime
 
             try:
                 model_root = self._model_source()
@@ -448,23 +470,19 @@ class Pixal3DGenerator(BaseGenerator):
             mode = params.get("view_layout", "auto") if params is not None else None
             if mode not in {None, "auto", "declared_roles"}:
                 return {"ok": False, "machine_code": "mv_invalid_camera_mode", "reason": "view_layout must be auto or declared_roles"}
-            if mode == "auto":
-                support = da3_capability()
-                if not support["supported"]:
-                    return {"ok": False, "machine_code": "mv_calibration_unsupported_platform", "reason": support["reason"]}
-                try:
-                    validate_da3_weights(self._da3_source())
-                    validate_da3_runtime(Path(__file__).resolve().parent)
-                except (OSError, ValueError, RuntimeError) as exc:
-                    missing.append(f"DA3 camera calibration: {exc}")
             runtime_ready = mv_runtime_available()
-            return {"ok": not missing and runtime_ready,
+            status = {"ok": not missing and runtime_ready,
                     "machine_code": "mv_assets_missing" if missing else "mv_runtime_missing" if not runtime_ready else "ready",
                     "reason": "Download the Pixal3D MV group and provision NAF before generation." if missing else
                     "An exact-stack Pixal3D MV Python wheel is required; the published wheelhouse is single-view only." if not runtime_ready else
                     "MV core assets and Python module found; automatic calibration is checked only when selected. GPU inference remains unqualified.",
                     "camera_mode": mode or "not-selected", "auto_calibration_requires": ["DA3 Base weights", "validated Scene Prep Python 3.12 runtime"],
                     "missing": missing}
+            if status["ok"] and mode == "auto":
+                calibration, _cause = self._mv_calibration_status()
+                if calibration is not None:
+                    status.update(calibration)
+            return status
         compatibility_error = self._single_view_compatibility_error()
         if compatibility_error is not None:
             return {"ok": False, "machine_code": compatibility_error["code"], "reason": compatibility_error["message"]}
@@ -746,8 +764,8 @@ class Pixal3DGenerator(BaseGenerator):
             validate_ordered_images(bytes(image_or_job), extra_image_paths, self.workspace_dir)
             mv_root = self._model_source()
             base_root = self._base_source()
-            da3_root = self._da3_source() if values.get("view_layout", "auto") != "declared_roles" else None
             naf_path = self._prepare_generation_assets(cancel_evt, params=values)
+            da3_root = self._da3_source() if values.get("view_layout", "auto") != "declared_roles" else None
             output_dir = getattr(self, "outputs_dir", None) or self.workspace_dir / "Workflows"
             return run_multiview_from_images(
                 primary_image_bytes=bytes(image_or_job), extra_image_paths=extra_image_paths,
