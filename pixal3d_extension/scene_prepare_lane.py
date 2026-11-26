@@ -53,12 +53,18 @@ def capability() -> dict:
 def da3_capability() -> dict:
     machine = platform.machine().lower()
     supported = capability()["supported"]
+    windows = sys.platform == "win32" and machine in {"amd64", "x86_64"}
     return {
         "supported": supported,
         "status": "supported" if supported else "unsupported-platform",
         "platform": sys.platform,
         "architecture": machine,
+        **({"channel": "experimental", "primary_python": "3.11", "calibration_python": "3.12",
+            "runtime_policy": "private Scene Prep torch 2.7.1+cu128; SM120"} if windows else {}),
         "reason": (
+            "MV runs in the primary CPython 3.11 environment; Auto camera calibration uses private CPython 3.12. "
+            "The current experimental Windows Scene Prep runtime policy is cu128/SM120, not an intrinsic DA3 requirement."
+            if windows else
             "Pixal3D MV DA3 camera calibration requires the prepared private Python 3.12 Scene Prep lane."
             if supported
             else f"Pixal3D MV DA3 camera calibration is unavailable on {sys.platform}/{machine}."

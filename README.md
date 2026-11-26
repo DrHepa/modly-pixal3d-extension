@@ -91,8 +91,9 @@ Empty slots are compacted by the host, so do not rely on gaps preserving camera 
 
 Auto cameras use DA3 estimates, not guaranteed camera calibration. Declared camera
 roles must match your actual camera rig; their FOV defaults to **20°**.
-**Every MV camera mode currently requires DA3 weights and runtime**, including
-Declared roles. MV defaults are resolution/texture size 1024, Low VRAM, Auto
+**Auto requires DA3 weights and its private calibration runtime; declared roles
+skip that runtime**, while the host still requires the DA3 weight group.
+MV defaults are resolution/texture size 1024, Low VRAM, Auto
 cameras, and random seed (`-1`).
 
 ### Images → scene → WorldSculpt
@@ -144,6 +145,10 @@ with CUDA 12.4 wheels; available lanes are not blanket hardware qualification.
   MV, scene preparation, and WorldSculpt. Viewport/perceptual validation remains partial.
 - Other feature/platform paths remain **UNTESTED**; no AMD/ROCm inference claim is made.
 - **Scene-preparation lanes:** Linux ARM64, CPython 3.12, CUDA ≥12.6; experimental Windows x64, private CPython 3.12.10, torch 2.7.1+cu128 and Triton Windows 3.3.1.post21.
+  On the experimental Windows lane, MV uses primary CPython 3.11 while Auto
+  calibration uses private CPython 3.12. The current Scene Prep cu128/SM120
+  restriction is extension runtime policy, not an intrinsic DA3 requirement.
+  Windows Ampere Auto calibration is not currently enabled or qualified.
 - **WorldSculpt lane:** exact Linux ARM64, Python 3.12, PyTorch 2.12.0+cu130,
   CUDA 13.0 environment; experimental Windows x64 inherits the exact primary cp311/cu128 stack through one controlled `.pth`. Its locked dependencies remain isolated from the primary runtime.
 
@@ -159,7 +164,17 @@ boxes, scale, and provenance. WorldSculpt currently publishes **geometry only,
 without textures**: `scene.glb` plus `scene_mesh.glb`, returning `scene.glb` to Modly.
 Its default face budget is 1,000,000 per instance.
 
-For missing weights, use **Models**; for dependency errors, use **Repair** first.
+For missing weights (`mv_assets_missing`), use **Models**. Auto calibration
+runtime failures (`mv_calibration_runtime_unavailable`) are not missing weights;
+retain the exact diagnostic and use extension **Repair** for supported runtime
+lanes. Repair does not enable an unsupported GPU such as the current Windows
+Ampere Auto lane. `mv_calibration_unsupported_platform` identifies an unavailable
+calibration platform; `mv_runtime_missing` still identifies the primary MV module.
+If Auto calibration is unavailable and the primary MV runtime is working, try
+**View Layout → Declared roles** with two equal-sized images of the same object:
+assign their actual directions (one **Front** and one distinct view) and start
+with **Low VRAM** at 1024. This bypasses Auto calibration; it does not provision
+Scene Prep, repair Modly registration, or guarantee that inference fits your GPU.
 On Windows x64 with Python 3.11/3.12, Modly's `cuda_version` is driver capability,
 not the installed PyTorch CUDA ABI. Pre-Blackwell GPUs with capability ≥12.4 select
 the published cu124 wheelhouse, including newer drivers reporting 12.8. Setup
